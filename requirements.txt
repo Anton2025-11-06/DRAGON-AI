@@ -1,0 +1,66 @@
+# FastAPI Web主框架
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+
+# 异步HTTP客户端（服务间HTTP调用）
+httpx>=0.25.2
+
+# gRPC 服务端+客户端（异步aio适配FastAPI）
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.2
+
+# Celery 分布式异步任务
+celery>=5.3.6
+
+# 异步SQLAlchemy 数据库ORM（Alembic迁移配套）
+sqlalchemy[asyncio]>=2.0.23
+alembic>=1.12.1
+aiomysql>=0.2.0
+
+# Nacos 注册中心/配置中心 SDK
+nacos-sdk-python>=0.1.15
+
+# 工具依赖
+python-multipart>=0.0.6
+python-jose[cryptography]>=3.3.0
+python-dotenv>=1.0.0
+pydantic-settings>=2.1.0
+pydantic>=2.4.2
+pydantic[email]
+email-validator==2.3.0
+
+# 日志、链路追踪、监控
+loguru>=0.7.2
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+opentelemetry-instrumentation-fastapi>=0.42b0
+opentelemetry-instrumentation-grpc>=0.42b0
+
+# 分布式限流工具
+redis==5.3.1
+
+# ===== AI 中台新增依赖 =====
+# 向量库 Milvus
+pymilvus>=2.4.0
+# 关键词检索（BM25）
+rank-bm25>=0.2.2
+# 文档解析
+pypdf>=4.2.0
+python-docx>=1.1.0
+openpyxl>=3.1.2
+markdown>=3.6
+# 智能体自主规划框架（依赖 langgraph/smolagents）
+deepagents
+# HTTP 流式输出
+sse-starlette>=2.1.0
+# 沙箱进程管理
+psutil>=5.9.8
+# 异步文件 IO
+aiofiles>=23.2.1
+# excel工具
+openpyxl>=3.1.5
+# oss存储
+minio>=7.2.20
+# 大模型
+modelscope>=1.35.0
