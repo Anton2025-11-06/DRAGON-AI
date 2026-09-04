@@ -1,0 +1,64 @@
+service_gateway:
+  redis:
+    host: 127.0.0.1
+    port: 26379
+    password: ''
+    max_connections: 200
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai2
+    pool_size: 50
+    max_overflow: 100
+    echo: false
+
+service_system:
+  redis:
+    host: 127.0.0.1
+    port: 26379
+    password: ""
+    max_connections: 10
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai2
+    pool_size: 10
+    max_overflow: 10
+    echo: False
+
+service_login:
+  redis:
+    host: 127.0.0.1
+    port: 26379
+    password: ""
+    max_connections: 200
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai2
+    pool_size: 50
+    max_overflow: 100
+    echo: False
+
+
+service_workflow:
+  redis:
+    host: 127.0.0.1
+    port: 26379
+    password: ""
+    max_connections: 10
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai2
+    pool_size: 10
+    max_overflow: 10
+    echo: False

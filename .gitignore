@@ -1,0 +1,87 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+.eggs/
+
+# ===== Virtual Environment =====
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ===== IDE / Editor =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Environment & Secrets =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ===== Logs & Runtime =====
+*.log
+logs/
+*.pid
+*.pid.lock
+
+# ===== Testing & Coverage =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.cache/
+
+# ===== MyPy / Linters =====
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyright/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== Local Data & Uploads =====
+data/
+uploads/
+tmp/
+temp/
+*.sqlite
+*.sqlite3
+*.db
+!*.db.example
+
+# ===== Docker / K8s local state =====
+docker/*.tar
+.docker-volumes/
+
+# ===== Build / Dist outputs =====
+ui-ai/node_modules/
+ui-ai/dist/
+ui-ai/.nuxt/
+ui-ai/.output/
+
+# ===== Project specific =====
+docs/_build/
+.sass-cache/
