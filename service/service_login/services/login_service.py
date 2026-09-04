@@ -47,7 +47,6 @@ class LoginService:
             payload["exp"] = int(time.time()) + TOKEN_EXPIRE
             token = create_access_token(payload)
             await client.set(PREFIX_LOGIN + payload["jti"], payload, TOKEN_EXPIRE)
-            log.info(f"User login success: {user.username}")
             return {"token": token, "user": payload, "expire": TOKEN_EXPIRE}
 
     @staticmethod

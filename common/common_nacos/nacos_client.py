@@ -28,7 +28,6 @@ def _get_local_ip(server_address: str) -> str:
 
 class NacosClient:
 
-
     def __init__(self, *,
                  user_name, password, server_address, log_level=logging.INFO, log_dir="./nacos_log",
                  service_name, ip, port, group_name="DEFAULT_GROUP", weight=1.0, namespace_id):
@@ -59,7 +58,6 @@ class NacosClient:
         self.client_config = client_config
         self.service_client: NacosNamingService | None = None
         self.config_client: NacosConfigService | None = None
-
 
     async def init(self):
         self.service_client = await NacosNamingService.create_naming_service(self.client_config)
@@ -108,44 +106,22 @@ class NacosClient:
         log.info(f"Service {self.service_name} {self.ip}:{self.port} success get config content from Nacos")
         return yaml.safe_load(content)
 
-    async def _http_list_instances(self, service_name: str,
-                                    group_name: str = "DEFAULT_GROUP") -> list:
-        """经 HTTP(v1) 接口查询实例列表（含健康状态）
-        说明：python v2 SDK 的 gRPC list_instances 在 Nacos 3.x 服务端下
-        健康状态/GROUP 过滤存在兼容问题（健康实例被误判为不健康），
-        而 HTTP 接口返回的健康状态正确，因此服务发现改用 HTTP 实现。
-        返回：[{ip, port, healthy, enabled, weight}]，失败返回空列表"""
-        query = urllib.parse.urlencode({
-            "serviceName": service_name, "groupName": group_name,
-            "namespaceId": self.namespace_id, "healthyOnly": "false",
-        })
-        url = f"http://{self.server_address}/nacos/v1/ns/instance/list?{query}"
-        try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data.get("hosts") or []
-        except Exception as e:
-            log.warning(f"HTTP list instances failed for {service_name}: {str(e)}")
-            return []
-
     async def get_one_healthy_instance(self, service_name: str,
                                        group_name: str = "DEFAULT_GROUP") -> Optional[Tuple[str, int]]:
         """获取一个健康实例的 (ip, port)：优先 HTTP 接口（健康状态可靠），
         过滤未启用实例后按权重随机挑选；无可用实例返回 None"""
-        hosts = await self._http_list_instances(service_name, group_name)
-        if not hosts:
-            # 兜底：HTTP 失败时回退 SDK gRPC 查询
-            instances = await self.service_client.list_instances(
-                request=ListInstanceParam(
-                    service_name=service_name,
-                    group_name=group_name,
-                    healthy_only=True,
-                )
+        instances = await self.service_client.list_instances(
+            request=ListInstanceParam(
+                service_name=service_name,
+                group_name=group_name,
+                # 禁用缓存查询
+                subscribe=False,
+                healthy_only=True,
             )
-            hosts = [{"ip": ins.ip, "port": ins.port,
-                      "healthy": ins.healthy, "enabled": True,
-                      "weight": getattr(ins, "weight", 1.0)} for ins in instances]
+        )
+        hosts = [{"ip": ins.ip, "port": ins.port,
+                  "healthy": ins.healthy, "enabled": True,
+                  "weight": getattr(ins, "weight", 1.0)} for ins in instances]
         # 过滤掉不健康/被禁用的实例
         candidates = [(h["ip"], h["port"], float(h.get("weight") or 1.0))
                       for h in hosts if h.get("healthy") and h.get("enabled", True)]
@@ -160,19 +136,19 @@ class NacosClient:
         tuple[str | int | bool | float | Any, str | int | bool | float | Any]]:
         """获取一个健康实例的 (ip, port)：优先 HTTP 接口（健康状态可靠），
         过滤未启用实例后按权重随机挑选；无可用实例返回 None"""
-        hosts = await self._http_list_instances(service_name, group_name)
-        if not hosts:
-            # 兜底：HTTP 失败时回退 SDK gRPC 查询
-            instances = await self.service_client.list_instances(
-                request=ListInstanceParam(
-                    service_name=service_name,
-                    group_name=group_name,
-                    healthy_only=True,
-                )
+        # 兜底：HTTP 失败时回退 SDK gRPC 查询
+        instances = await self.service_client.list_instances(
+            request=ListInstanceParam(
+                service_name=service_name,
+                group_name=group_name,
+                # 禁用缓存查询
+                subscribe=False,
+                healthy_only=True,
             )
-            hosts = [{"ip": ins.ip, "port": ins.port,
-                      "healthy": ins.healthy, "enabled": True,
-                      "weight": getattr(ins, "weight", 1.0)} for ins in instances]
+        )
+        hosts = [{"ip": ins.ip, "port": ins.port,
+                  "healthy": ins.healthy, "enabled": True,
+                  "weight": getattr(ins, "weight", 1.0)} for ins in instances]
         # 过滤掉不健康/被禁用的实例
         return [(h["ip"], h["port"]) for h in hosts if h.get("healthy") and h.get("enabled", True)]
 

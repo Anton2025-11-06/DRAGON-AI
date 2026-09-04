@@ -13,7 +13,7 @@ export default defineConfig(async () => {
           // 网关路由规范：/api/{service_name}/{path}
           '/api': {
             changeOrigin: true,
-            target: 'http://localhost:18000',
+            target: 'http://10.87.106.143:18000',
             ws: true,
           },
         },

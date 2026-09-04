@@ -1,12 +1,9 @@
-
-
 STATUS_UN_AUTH = 403
 ROP_UN_AUTH = "未登录，禁止操作！"
 ROP_WITHOUT_PERMISSION = "权限不足，禁止操作！"
 
 STATUS_UNKNOW = 500
 ROP_UNKNOW = "无效的操作！"
-
 
 
 SERVICE_SYSTEM = "service_system"
@@ -41,6 +38,14 @@ PREFIX_RATE_LIMIT = "rate_limit"
 # 限流策略配置（hash）：field=模块桶名，value=JSON {limit, window, enabled}
 PREFIX_RATE_LIMIT_CONFIG = "rate_limit_config"
 
+# ---- AI 模型网关 ----
+# 模型路由配置（hash）：field=model_id，value=JSON（模型路由/限流参数，不含管理端密钥）
+PREFIX_MODEL_RATE_LIMIT_CONFIG = "model_rate_limit_config"
+# api-key 映射（hash）：field=api_key，value=JSON {model_id, user_id, apply_id, create_time}
+PREFIX_MODEL_RATE_LIMIT = "model_rate_limit"
+# 模型 QPS 计数（双层 hash）：外层 field=model_id，内层 field=qps，value=每秒次数
+PREFIX_MODEL_RATE_LIMIT_QPS = "model_rate_limit_qps"
+
 
 # 可配置的模块桶候选（与网关 _SERVICE_ALIASES 对应，login/global 另有默认策略可覆盖）
 MODULES = [
@@ -53,6 +58,8 @@ MODULES = [
     {"bucket": "inference", "name": "模型推理", "default": {"limit": 300, "window": 60}},
     {"bucket": "notebook", "name": "Notebook", "default": {"limit": 300, "window": 60}},
     {"bucket": "eval_model", "name": "模型评测", "default": {"limit": 300, "window": 60}},
+    # AI 模型网关 /api/model 入口：默认按 IP 60 次/分钟防爆破
+    {"bucket": "model", "name": "AI模型网关", "default": {"limit": 60, "window": 60}},
 ]
 
 SERVICE_ALIASES = {

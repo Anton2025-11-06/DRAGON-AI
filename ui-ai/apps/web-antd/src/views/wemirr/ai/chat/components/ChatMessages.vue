@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { ChatReference } from '../../shared';
+
 import { computed, nextTick, ref, watch } from 'vue';
 
 import {
@@ -17,9 +19,9 @@ import {
   setCustomComponents,
 } from 'markstream-vue';
 
-import 'markstream-vue/index.css';
+import { referenceDisplayIndex } from '../../shared';
 
-import { referenceDisplayIndex, type ChatReference } from '../../shared';
+import 'markstream-vue/index.css';
 
 // ==================== Props ====================
 const props = defineProps<{
@@ -47,6 +49,8 @@ export interface ChatMessage {
   content: string;
   references?: ChatReference[];
   thinking?: string;
+  /** 调用失败时上游返回的完整响应体（code/message/data），用于页面展示接口数据 */
+  errorData?: unknown;
 }
 
 // ==================== Refs ====================
@@ -83,10 +87,38 @@ const displayMessages = computed(() => {
   return items;
 });
 
+/** 接口返回数据格式化为可读文本：对象 JSON 缩进，字符串原样 */
+function formatResponseData(data: unknown): string {
+  if (typeof data === 'string') return data;
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+/** 是否有接口返回数据可展示（网络层错误等无响应体的情况不展示） */
+function hasResponseData(
+  data: unknown,
+): data is Record<string, unknown> | string {
+  return data !== undefined && data !== null && data !== '';
+}
+
 // ==================== 滚动到底部 ====================
 let scrollTimer: null | ReturnType<typeof setTimeout> = null;
 
+// 用户是否贴近底部（距离底部小于阈值）；为 false 时暂停自动滚动，避免流式输出打断阅读
+const isNearBottom = ref(true);
+
+function handleScroll() {
+  const el = containerRef.value;
+  if (!el) return;
+  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
 function scrollToBottom() {
+  // 用户正在查看上方历史时不打扰，滚回底部附近后再恢复自动跟随
+  if (!isNearBottom.value) return;
   if (scrollTimer) return;
   scrollTimer = setTimeout(() => {
     scrollTimer = null;
@@ -107,7 +139,7 @@ defineExpose({ scrollToBottom });
 </script>
 
 <template>
-  <div ref="containerRef" class="chat-messages">
+  <div ref="containerRef" class="chat-messages" @scroll="handleScroll">
     <div class="message-list">
       <div
         v-for="msg in displayMessages"
@@ -132,19 +164,39 @@ defineExpose({ scrollToBottom });
 
           <!-- AI 消息 -->
           <template v-else>
-            <details v-if="msg.thinking" class="thinking-panel" :open="isStreaming">
+            <details
+              v-if="msg.thinking"
+              class="thinking-panel"
+              :open="isStreaming"
+            >
               <summary>思考</summary>
               <div class="thinking-content">{{ msg.thinking }}</div>
             </details>
             <div class="message-bubble ai">
               <MarkdownRender custom-id="ai-chat" :content="msg.content" />
             </div>
+            <!-- 调用失败：展示上游返回的完整接口数据（code/message/data），默认展开便于排查 -->
+            <details
+              v-if="hasResponseData(msg.errorData)"
+              class="response-panel"
+              open
+            >
+              <summary>接口返回</summary>
+              <pre
+                class="response-data"
+                v-text="formatResponseData(msg.errorData)"
+              ></pre>
+            </details>
             <div v-if="msg.references?.length" class="reference-panel">
               <div class="reference-title">引用来源</div>
               <div class="reference-list">
                 <a
                   v-for="(reference, index) in msg.references"
-                  :key="reference.url || reference.chunkId || `${reference.title}-${index}`"
+                  :key="
+                    reference.url ||
+                    reference.chunkId ||
+                    `${reference.title}-${index}`
+                  "
                   class="reference-item"
                   :href="reference.url || undefined"
                   :target="reference.url ? '_blank' : undefined"
@@ -153,20 +205,39 @@ defineExpose({ scrollToBottom });
                   <span class="reference-index">
                     {{ referenceDisplayIndex(reference, index) }}
                   </span>
-                  <GlobalOutlined v-if="reference.type === 'web'" class="reference-icon" />
+                  <GlobalOutlined
+                    v-if="reference.type === 'web'"
+                    class="reference-icon"
+                  />
                   <FileTextOutlined v-else class="reference-icon" />
                   <span class="reference-body">
                     <span class="reference-name">
-                      {{ reference.title || reference.documentName || '引用来源' }}
+                      {{
+                        reference.title || reference.documentName || '引用来源'
+                      }}
                     </span>
-                    <span v-if="reference.siteName || reference.documentName || reference.chunkId" class="reference-meta">
-                      {{ reference.siteName || reference.documentName || `片段 ${reference.chunkId}` }}
+                    <span
+                      v-if="
+                        reference.siteName ||
+                        reference.documentName ||
+                        reference.chunkId
+                      "
+                      class="reference-meta"
+                    >
+                      {{
+                        reference.siteName ||
+                        reference.documentName ||
+                        `片段 ${reference.chunkId}`
+                      }}
                     </span>
                     <span v-if="reference.snippet" class="reference-snippet">
                       {{ reference.snippet }}
                     </span>
                   </span>
-                  <LinkOutlined v-if="reference.url" class="reference-link-icon" />
+                  <LinkOutlined
+                    v-if="reference.url"
+                    class="reference-link-icon"
+                  />
                 </a>
               </div>
             </div>
@@ -277,6 +348,35 @@ defineExpose({ scrollToBottom });
     font-size: 13px;
     line-height: 1.7;
     white-space: pre-wrap;
+  }
+}
+
+// ==================== 接口返回 ====================
+.response-panel {
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 10px 14px;
+  color: var(--text-color-secondary, #666);
+  background: #fff;
+  border: 1px solid var(--border-color, #eee);
+  border-radius: 8px;
+
+  summary {
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .response-data {
+    max-height: 240px;
+    overflow: auto;
+    margin: 8px 0 0;
+    font-family: 'JetBrains Mono', 'Fira Code', Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 }
 

@@ -26,9 +26,10 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
         "/redoc",
         "/openapi.json",
     ]
-    # 前缀白名单：服务间内部接口（网关 /internal/...）不校验用户登录态
+    # 前缀白名单：服务间内部接口（网关 /internal/...）与外部模型调用（/api/model，api-key 鉴权）不校验用户登录态
     WHITE_LIST_PREFIX = [
         "/internal/",
+        "/api/model",
     ]
 
     async def dispatch(self, request: Request, call_next):
@@ -64,4 +65,17 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
             return JSONResponse(status_code=403,
                                 content=ApiResponse.error(code=403, message="登录已失效，请重新登录！"))
+
+        # ---- 2. 兼容历史 b32hex 格式 token：载荷存于 Redis login_{token} ----
+        legacy = await client.get(PREFIX_LOGIN + token, to_dict=True)
+        if legacy:
+            request.scope["token"] = token
+            request.scope["login_user"] = legacy
+            request.state.token = token
+            request.state.login_user = legacy
+            return await call_next(request)
+
+        # ---- 3. JWT 解析失败且无历史登录态：无效凭证，所有分支必须显式返回响应 ----
+        return JSONResponse(status_code=403,
+                            content=ApiResponse.error(code=403, message="无效的登录凭证，请重新登录！"))
 

@@ -26,6 +26,22 @@ const { apiURL } = useAppConfig(import.meta.env, import.meta.env.PROD);
 // 避免 axios 拼接出 /api/api/... 双重前缀（VITE_GLOB_API_URL=/api 时 requestBaseURL 为空，直接走相对网关路径）
 const requestBaseURL = apiURL.replace(/\/+$/, '').replace(/\/api$/, '');
 
+// ==================== 链路追踪 trace-id ====================
+// 后端每次响应（含错误响应）都会携带 X-Trace-Id（网关 RequestLogMiddleware 生成/沿用）；
+// 前端记录后，后续所有请求回带同一 trace-id，便于后台将同一用户的操作串联为一条链路。
+// 本地持久化：刷新页面后继续沿用，直到后端更换该 ID。
+const TRACE_ID_KEY = 'x-trace-id';
+
+export function getTraceId(): string {
+  return localStorage.getItem(TRACE_ID_KEY) || '';
+}
+
+export function saveTraceId(traceId: string) {
+  if (traceId && getTraceId() !== traceId) {
+    localStorage.setItem(TRACE_ID_KEY, traceId);
+  }
+}
+
 function createRequestClient(baseURL: string, options?: RequestClientOptions) {
   const client = new RequestClient({
     ...options,
@@ -82,8 +98,25 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
 
       config.headers.Authorization = formatToken(accessStore.accessToken);
       config.headers['x-request-id'] = generateUUID();
+      // 后端响应携带过 X-Trace-Id 后，后续请求回带同一 trace-id 串联用户行为
+      const traceId = getTraceId();
+      if (traceId) {
+        config.headers['X-Trace-Id'] = traceId;
+      }
       config.headers['Accept-Language'] = preferences.app.locale;
       return config;
+    },
+  });
+
+  // 提取后端响应头 X-Trace-Id（成功/失败响应均携带），记录后供后续请求回带
+  client.addResponseInterceptor({
+    fulfilled: async (response) => {
+      saveTraceId(response?.headers?.['x-trace-id'] || '');
+      return response;
+    },
+    rejected: async (error) => {
+      saveTraceId(error?.response?.headers?.['x-trace-id'] || '');
+      throw error;
     },
   });
 
@@ -108,14 +141,15 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
   );
 
   // 后端统一返回 HTTP 403 + { code: 403, message } 约定：
-  // - 未登录 / 登录已失效 -> 触发重新认证
-  // - 权限不足 -> 仅提示错误，不强制登出
+  // - 登录凭证类消息均含"未登录"或"请重新登录"（未登录，禁止操作！/
+  //   登录已失效，请重新登录！/无效的登录凭证，请重新登录！）-> 触发重新认证
+  // - 权限不足（"权限不足，禁止操作！"）-> 仅提示错误，不强制登出
   client.addResponseInterceptor({
     rejected: async (error) => {
       const responseData = error?.response?.data ?? {};
       if (error?.response?.status === 403 && responseData?.code === 403) {
         const message = String(responseData?.message ?? '');
-        if (message.includes('未登录') || message.includes('登录已失效')) {
+        if (message.includes('未登录') || message.includes('请重新登录')) {
           await doReAuthenticate();
         }
       }

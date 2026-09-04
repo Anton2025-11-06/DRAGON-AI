@@ -27,6 +27,9 @@ async def get_login_user(request: Request) -> dict:
         return cached
 
     token = await extract_token(request)
+    # 网关链路必注入 X-User-Token；缺失（如直连/旁路）时视为未登录，避免 decode_token(None) 崩溃成 500
+    if not token:
+        raise UnauthorizedException("未登录，禁止操作！")
     # JWT 载荷自带完整用户信息
     payload = decode_token(token)
     if payload:

@@ -1,3 +1,5 @@
+import time
+
 from fastapi import APIRouter
 from starlette.requests import Request
 

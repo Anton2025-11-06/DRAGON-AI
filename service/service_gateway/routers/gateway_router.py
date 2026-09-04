@@ -1,32 +1,33 @@
+import time
+
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from common.common_entity.response_schema import ApiResponse
 from common.common_log.log_init import log
 from common.common_constants.constant import SERVICE_ALIASES
+from common.common_httpx.httpx import httpx_pool
+from service.service_gateway.util.model_proxy_router import model_proxy
 
-router = APIRouter(tags=["网关"])
+router = APIRouter(tags=["业务网关"])
 
-# 全局复用转发客户端：连接池 keep-alive 复用，避免每个请求新建连接
-# （高频短连接容易触发 Windows accept 异常，且降低转发开销）
-# trust_env=False：跳过 Windows 系统代理（Clash 127.0.0.1:7897），否则内网转发被代理拦截返回 502
-_client = httpx.AsyncClient(timeout=30, trust_env=False)
 # 不透传给下游服务的请求头
 _EXCLUDED_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
 
-# URI 规范：/api/模块名 分类（如 /api/system/users），网关据此归一化为 Nacos 注册服务名
+
+@router.post("/api/model", summary="直连模型：api-key 鉴权，转发模型真实地址（完整路径）")
+async def model_proxy_forward(request: Request):
+    """直连：模型 base_url 维护的是完整接口路径，直接转发"""
+    return await model_proxy(request, True)
 
 
-# 下游服务路由前缀：网关别名 → 下游接口前缀（空=直接根路径）
-# service_login 的路由本身以 /login 开头（POST /login、/register、/logout、/refresh），
-# 网关 path 段直接拼接即可，无需额外前缀；service_system 接口直接挂根路径（/users /roles /menus /depts /logs）
-_PATH_PREFIXES = {}
-
-
-def _normalize_service_name(name: str) -> str:
-    """模块名别名 → Nacos 注册名（已带 service_ 前缀的路径原样转发）"""
-    return SERVICE_ALIASES.get(name, name)
+@router.post("/api/model/{path:path}", summary="非直连模型：api-key 鉴权，base_url + 接口后缀转发")
+async def model_proxy_entry(path: str, request: Request):
+    """
+    非直连：模型 base_url 维护的是接口基础地址，path 为接口后缀（如 v1/chat/completions），
+    网关拼接 base_url + /path 后转发，并校验 path 在模型维护的后缀列表中
+    """
+    return await model_proxy(request, False, path)
 
 
 @router.api_route("/api/{service_name}/{path:path}",
@@ -35,15 +36,17 @@ def _normalize_service_name(name: str) -> str:
 async def proxy(service_name: str, path: str, request: Request):
     """
     网关转发入口：/api/{service_name}/{下游路径}
-    2. 通过 Nacos 服务发现动态获取下游健康实例地址，透传方法/查询参数/请求头/请求体
+    通过 Nacos 服务发现动态获取下游健康实例地址，透传方法/查询参数/请求头/请求体
     """
-    # if not breaker.allow(service_name):
-    #     raise HTTPException(status_code=503, detail=f"服务 {service_name} 触发熔断，请稍后再试")
 
     # 模块名别名归一化：/api/system/... 映射到 Nacos 注册名 service_system
+    def _normalize_service_name(name: str) -> str:
+        """模块名别名 → Nacos 注册名（已带 service_ 前缀的路径原样转发）"""
+        return SERVICE_ALIASES.get(name, None)
+
     service_name = _normalize_service_name(service_name)
-    # 下游路由前缀：service_login 接口挂在 /login 下，转发时补回
-    path_prefix = _PATH_PREFIXES.get(service_name, "")
+    if service_name is None:
+        raise HTTPException(status_code=404, detail="无效请求")
 
     nacos_service = request.app.state.nacos_service
     target = await nacos_service.get_one_healthy_instance(service_name)
@@ -51,33 +54,27 @@ async def proxy(service_name: str, path: str, request: Request):
         raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
 
     ip, port = target
-    url = f"http://{ip}:{port}{path_prefix}/{path}"
+    url = f"http://{ip}:{port}/{path}"
 
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _EXCLUDED_HEADERS}
-    # 网关 TokenCheckMiddleware 校验通过后写入 scope["token"]，此处注入内部头 X-User-Token
-    # （覆盖客户端伪造值），下游服务直接读取即可，无需重复校验 token
+    # 网关 TokenCheckMiddleware 校验通过后写入 scope["token"]
+    # 跨服务，request.scope request.state读不到，改写到header下游消费用
+    # 此处注入内部头 X-User-Token，下游可重复读，（覆盖客户端伪造值），下游服务直接读取即可，无需重复校验 token
     if request.scope.get("token"):
         headers["X-User-Token"] = request.scope["token"]
     body = await request.body()
 
     try:
-        resp = await _client.request(
-                method=request.method,
-                url=url,
-                params=request.query_params,
-                headers=headers,
-                content=body if body else None,
-            )
+        resp = await httpx_pool.client.request(
+            method=request.method,
+            url=url,
+            params=request.query_params,
+            headers=headers,
+            content=body if body else None,
+        )
     except httpx.RequestError as e:
-        # breaker.record_failure(service_name)
         log.error(f"Gateway forward to {service_name} failed: {str(e)}")
         raise HTTPException(status_code=502, detail="下游服务请求失败")
-
-    # 下游 5xx 视为故障计入熔断，其他成功恢复
-    # if resp.status_code >= 500:
-    #     breaker.record_failure(service_name)
-    # else:
-    #     breaker.record_success(service_name)
 
     resp_headers = {k: v for k, v in resp.headers.items()
                     if k.lower() not in {"content-length", "transfer-encoding", "connection"}}
