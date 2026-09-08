@@ -1,7 +1,7 @@
 <script lang="ts" setup name="WorkflowListPage">
 /**
  * 工作流列表页面
- * 卡片式展示工作流列表，支持新增、编辑、删除、发布、归档等操作
+ * 卡片式展示工作流列表，支持新增、编辑、删除、发布、复制等操作
  */
 import type {
   WorkflowPageResp,
@@ -16,7 +16,6 @@ import { useFs } from '@fast-crud/fast-crud';
 import { Input, message, Modal } from 'ant-design-vue';
 
 import {
-  archiveWorkflow,
   copyWorkflow,
   createWorkflowFromTemplate,
   deleteWorkflow,
@@ -24,6 +23,8 @@ import {
 } from '#/api/ai-workflow';
 
 import TemplateSelectModal from '../templates/components/TemplateSelectModal.vue';
+import SaveAsTemplateModal from '../templates/components/SaveAsTemplateModal.vue';
+import ApiKeyManager from '../components/ApiKeyManager.vue';
 import WorkflowCard from './components/WorkflowCard.vue';
 import createCrudOptions from './crud';
 
@@ -43,6 +44,14 @@ const copyingWorkflow = ref<WorkflowPageResp | null>(null);
 
 // 模板选择弹窗
 const templateSelectVisible = ref(false);
+
+// API 访问抽屉（需求 4.2：从编辑页迁移到列表页）
+const apiDrawerVisible = ref(false);
+const apiDrawerItem = ref<WorkflowPageResp | null>(null);
+
+// 保存为模块弹窗（需求 4.2）
+const templateModalVisible = ref(false);
+const templateModalItem = ref<WorkflowPageResp | null>(null);
 
 // 捕获并忽略卡片模式下的 scrollTo 错误
 onErrorCaptured((err) => {
@@ -135,21 +144,6 @@ async function handlePublish(item: WorkflowPageResp) {
   });
 }
 
-/** 归档工作流 */
-async function handleArchive(item: WorkflowPageResp) {
-  Modal.confirm({
-    title: '确认归档',
-    content: `确定要归档工作流「${item.name}」吗？归档后将无法执行。`,
-    okText: '归档',
-    cancelText: '取消',
-    onOk: async () => {
-      await archiveWorkflow(item.id);
-      message.success('归档成功');
-      await crudExpose.doRefresh();
-    },
-  });
-}
-
 /** 打开复制对话框 */
 function handleCopy(item: WorkflowPageResp) {
   copyingWorkflow.value = item;
@@ -177,9 +171,30 @@ function handleHistory(item: WorkflowPageResp) {
   router.push(`/agent/workflow/history/${item.id}`);
 }
 
-/** 执行工作流 */
+/** 执行工作流（未发布时提示先发布，需求 2.1） */
 function handleExecute(item: WorkflowPageResp) {
+  if (item.status !== 'PUBLISHED') {
+    message.warning(`工作流「${item.name}」尚未发布，请先发布后再执行`);
+    return;
+  }
   router.push(`/agent/workflow/editor/${item.id}?execute=true`);
+}
+
+/** 打开 API 访问抽屉（需求 4.2） */
+function handleApi(item: WorkflowPageResp) {
+  apiDrawerItem.value = item;
+  apiDrawerVisible.value = true;
+}
+
+/** 打开保存为模块弹窗（需求 4.2） */
+function handleSaveAsTemplate(item: WorkflowPageResp) {
+  templateModalItem.value = item;
+  templateModalVisible.value = true;
+}
+
+/** 模块保存成功 */
+function handleTemplateSaved() {
+  message.success('保存为模块成功');
 }
 </script>
 
@@ -205,10 +220,11 @@ function handleExecute(item: WorkflowPageResp) {
             @edit="handleEdit"
             @remove="handleRemove"
             @publish="handlePublish"
-            @archive="handleArchive"
             @copy="handleCopy"
             @history="handleHistory"
             @execute="handleExecute"
+            @api="handleApi"
+            @template="handleSaveAsTemplate"
           />
         </div>
 
@@ -247,6 +263,27 @@ function handleExecute(item: WorkflowPageResp) {
     <TemplateSelectModal
       v-model:open="templateSelectVisible"
       @select="handleTemplateSelect"
+    />
+
+    <!-- API 访问抽屉（需求 4.2） -->
+    <a-drawer
+      v-model:open="apiDrawerVisible"
+      :title="`${apiDrawerItem?.name || ''} - API 访问管理`"
+      placement="right"
+      :width="720"
+    >
+      <ApiKeyManager
+        v-if="apiDrawerItem"
+        :workflow-id="apiDrawerItem.id"
+      />
+    </a-drawer>
+
+    <!-- 保存为模块弹窗（需求 4.2） -->
+    <SaveAsTemplateModal
+      v-model:open="templateModalVisible"
+      :workflow-id="templateModalItem?.id || ''"
+      :workflow-name="templateModalItem?.name"
+      @success="handleTemplateSaved"
     />
   </fs-page>
 </template>

@@ -4,6 +4,12 @@
  */
 import { defHttp } from '#/api/request';
 
+import {
+  MODEL_TYPE_EMBEDDING,
+  MODEL_TYPE_RERANK,
+  MODEL_TYPE_TEXT,
+} from '#/api/ai-workflow/const';
+
 // ==================== 知识库相关 ====================
 
 /** 知识库分页请求 */
@@ -82,15 +88,17 @@ export const DelKnowledgeBase = (id: number) =>
 
 /** 获取聊天模型列表（归属 service_workflow） */
 export const GetChatModels = () =>
-  defHttp.get('/api/workflow/models/list', { params: { type: 'TEXT' } });
+  defHttp.get('/api/workflow/models/list', { params: { type: MODEL_TYPE_TEXT } });
 
 /** 获取嵌入模型列表 */
 export const GetEmbeddingModels = () =>
-  defHttp.get('/api/workflow/models/list', { params: { type: 'EMBEDDING' } });
+  defHttp.get('/api/workflow/models/list', {
+    params: { type: MODEL_TYPE_EMBEDDING },
+  });
 
 /** 获取重排序模型列表 */
 export const GetRerankModels = () =>
-  defHttp.get('/api/workflow/models/list', { params: { type: 'RERANK' } });
+  defHttp.get('/api/workflow/models/list', { params: { type: MODEL_TYPE_RERANK } });
 
 /** 语义搜索 */
 export const SemanticSearch = (kbId: number, query: string, topK: number = 5) =>

@@ -11,8 +11,6 @@ grpcio>=1.60.0
 grpcio-tools>=1.60.0
 protobuf>=4.25.2
 
-# Celery 分布式异步任务
-celery>=5.3.6
 
 # 异步SQLAlchemy 数据库ORM（Alembic迁移配套）
 sqlalchemy[asyncio]>=2.0.23
@@ -39,6 +37,7 @@ opentelemetry-instrumentation-fastapi>=0.42b0
 opentelemetry-instrumentation-grpc>=0.42b0
 
 # 分布式限流工具
+# redis要求8+，支持stream
 redis==5.3.1
 
 # ===== AI 中台新增依赖 =====
@@ -65,3 +64,5 @@ openpyxl>=3.1.5
 minio>=7.2.20
 # 大模型
 modelscope>=1.35.0
+
+arq>=0.28.0

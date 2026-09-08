@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from typing import Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
+import yaml
+
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
@@ -86,6 +88,7 @@ def create_app(service_name: str,
             password=os.environ.get("nacos_password", Config.nacos_password),
             server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
             service_name=service_name,
+            # TODO 自动获取 实例IP
             ip=os.environ.get("service_ip"),
             port=port,
             namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
@@ -93,13 +96,13 @@ def create_app(service_name: str,
         )
 
         await nacos_service.init()
-        await nacos_service.register_service()
         # 供网关等需要在运行时做服务发现的场景使用
         app.state.nacos_service = nacos_service
-
+        await nacos_service.register_service()
         yml_config = await nacos_service.get_config_content(service_name)
+
         # 暴露给业务扩展（如 Milvus、向量化配置），保持 app.state.config 全服务可用
-        app.state.config = yml_config or {}
+        app.state.config = yml_config
 
         try:
             if enable_redis:
@@ -111,8 +114,11 @@ def create_app(service_name: str,
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
             log.error(f"Service {service_name} init dependencies failed: {str(e)}")
-            await nacos_service.deregister_service()
-            await nacos_service.close_config_client()
+            try:
+                await nacos_service.deregister_service()
+                await nacos_service.close_config_client()
+            except Exception as deregister_err:
+                log.warning(f"Nacos deregister skipped: {deregister_err}")
             raise e
 
         # 网关启动时自动加载 Redis 中的限流策略（无配置则默认无限流）
@@ -121,8 +127,12 @@ def create_app(service_name: str,
 
         yield
 
-        await nacos_service.deregister_service()
-        await nacos_service.close_config_client()
+        # Nacos 不可用时客户端可能未初始化/连接失效，注销失败不阻断进程退出
+        try:
+            await nacos_service.deregister_service()
+            await nacos_service.close_config_client()
+        except Exception as e:
+            log.warning(f"Nacos deregister skipped: {e}")
         if enable_redis:
             await redis.client.close()
         if enable_mysql:

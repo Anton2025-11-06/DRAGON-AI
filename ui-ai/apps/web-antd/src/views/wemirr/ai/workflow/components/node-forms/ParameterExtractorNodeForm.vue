@@ -1,21 +1,14 @@
 <template>
   <a-form layout="vertical" :model="formData" class="node-form">
-    <a-form-item label="提取模型" required>
-      <a-select
-        v-model:value="formData.modelId"
-        placeholder="选择用于参数提取的模型"
-        :loading="loadingModels"
-        @change="handleChange"
-      >
-        <a-select-option
-          v-for="model in models"
-          :key="model.id"
-          :value="model.id"
-        >
-          {{ model.name }} ({{ model.provider }})
-        </a-select-option>
-      </a-select>
-    </a-form-item>
+    <ModelSelect
+      v-model:model-value="formData.modelId"
+      v-model:model-type="formData.modelType"
+      v-model:suffix-value="formData.suffix"
+      v-model:model-is-direct="formData.modelIsDirect"
+      :type-options="LLM_TYPE_OPTIONS"
+      placeholder="选择用于参数提取的模型"
+      @change="handleChange"
+    />
 
     <a-form-item label="输入变量" required>
       <VariableInput
@@ -197,8 +190,8 @@
  * 参数提取器节点配置表单
  * 从自然语言文本中提取结构化参数
  */
+import { LLM_TYPE_OPTIONS, MODEL_TYPE_TEXT_GEN } from '#/api/ai-workflow/const';
 import type {
-  AiModelOption,
   ExtractParameter,
   InferenceMode,
   ParameterExtractorConfig,
@@ -213,10 +206,10 @@ import {
   PlusOutlined,
   QuestionCircleOutlined,
 } from '@ant-design/icons-vue';
-import { onMounted, reactive, ref, watch } from 'vue';
+import { reactive, ref, watch } from 'vue';
 import draggable from 'vuedraggable';
 
-import { listAiModels } from '#/api/ai-workflow';
+import { ModelSelect } from '../model-select';
 import { VariableInput } from '../variable-selector';
 
 // Props
@@ -232,10 +225,6 @@ const emit = defineEmits<{
   (e: 'update:config', config: ParameterExtractorConfig): void;
 }>();
 
-// 模型列表
-const models = ref<AiModelOption[]>([]);
-const loadingModels = ref(false);
-
 // 默认参数
 const defaultParameters: ExtractParameter[] = [
   {
@@ -249,6 +238,9 @@ const defaultParameters: ExtractParameter[] = [
 // 表单数据
 const formData = reactive<ParameterExtractorConfig>({
   modelId: undefined,
+  modelType: MODEL_TYPE_TEXT_GEN,
+  suffix: undefined,
+  modelIsDirect: undefined,
   inputVariable: '',
   instructions: '',
   parameters: [...defaultParameters],
@@ -263,6 +255,9 @@ watch(
   (config) => {
     Object.assign(formData, {
       modelId: config.modelId,
+      modelType: config.modelType || MODEL_TYPE_TEXT_GEN,
+      suffix: config.suffix,
+      modelIsDirect: config.modelIsDirect,
       inputVariable: config.inputVariable || '',
       instructions: config.instructions || '',
       parameters:
@@ -276,17 +271,6 @@ watch(
   },
   { immediate: true, deep: true },
 );
-
-// 加载模型列表
-async function loadModels() {
-  loadingModels.value = true;
-  try {
-    models.value = await listAiModels();
-  } catch {
-  } finally {
-    loadingModels.value = false;
-  }
-}
 
 // 添加参数
 function addParameter() {
@@ -311,6 +295,9 @@ function removeParameter(index: number) {
 function handleChange() {
   const config: ParameterExtractorConfig = {
     modelId: formData.modelId,
+    modelType: formData.modelType,
+    suffix: formData.suffix || undefined,
+    modelIsDirect: formData.modelIsDirect,
     inputVariable: formData.inputVariable,
     instructions: formData.instructions,
     parameters: formData.parameters?.filter(
@@ -324,10 +311,6 @@ function handleChange() {
   };
   emit('update:config', config);
 }
-
-onMounted(() => {
-  loadModels();
-});
 </script>
 
 <style scoped lang="less">

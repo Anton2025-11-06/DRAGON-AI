@@ -94,6 +94,10 @@ class AsyncRedisClient:
             return data.decode("utf-8")
         return data
 
+    async def hdel(self, name: str, *fields: str) -> int:
+        """删除 hash 中的 field(s)，返回实际删除条数"""
+        return await self._redis.hdel(name, *fields)
+
     async def lpush(self, key: str, *values):
         await self._redis.lpush(key, *values)
 

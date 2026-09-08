@@ -13,6 +13,6 @@ if __name__ == '__main__':
     uvicorn.run("service.service_login.login:app",
                 port=int(os.environ.get(SERVICE_LOGIN + "_port", SERVICE_LOGIN_PORT)),
                 host="0.0.0.0",
-                workers=2,
+                workers=1,
                 log_level="INFO",
                 access_log=False,)

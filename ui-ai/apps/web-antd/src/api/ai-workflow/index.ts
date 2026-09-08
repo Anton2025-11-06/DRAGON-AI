@@ -29,6 +29,8 @@ import { resolveApiUrl } from '#/api/helper';
 
 import { requestClient } from '#/api/request';
 
+import { MODEL_TYPE_TEXT } from './const';
+
 const BASE_URL = '/api/workflow';
 
 // ==================== 工作流定义 API ====================
@@ -56,7 +58,8 @@ export function getWorkflowNodeDefinitions() {
   );
 }
 
-export function listAiModels(type = 'text') {
+/** 模型下拉（type 取值见 ./const 的 MODEL_TYPE_*） */
+export function listAiModels(type = MODEL_TYPE_TEXT) {
   return requestClient.get<AiModelOption[]>(`${BASE_URL}/models/list`, {
     params: { type },
   });
@@ -118,13 +121,6 @@ export function publishWorkflow(id: number | string) {
 }
 
 /**
- * 归档工作流
- */
-export function archiveWorkflow(id: number | string) {
-  return requestClient.post<void>(`${BASE_URL}/workflows/${id}/archive`);
-}
-
-/**
  * 复制工作流
  */
 export function copyWorkflow(id: number | string, name: string) {
@@ -180,20 +176,8 @@ export function createWorkflowFromTemplate(
 // ==================== 工作流执行 API ====================
 
 /**
- * 同步执行工作流
- */
-export function executeWorkflow(
-  workflowId: number | string,
-  data: WorkflowExecutionReq,
-) {
-  return requestClient.post<WorkflowExecutionResp>(
-    `${BASE_URL}/workflow-executions/workflows/${workflowId}/execute`,
-    data,
-  );
-}
-
-/**
- * 异步执行工作流
+ * 异步执行工作流（需求 4:后台已取消同步 /execute,统一 execute-async 投递）
+ * 返回 executionId,状态/结果通过 SSE 订阅或 GET 执行详情轮询获取
  */
 export function executeWorkflowAsync(
   workflowId: number | string,
@@ -502,7 +486,8 @@ export interface ApiKeyCreateResp {
 export interface ApiKeyListResp {
   id: number;
   name: string;
-  apiKeyMasked: string;
+  /** 完整 API Key（需求：不做脱敏，可随时查看） */
+  apiKey: string;
   status: string;
   rateLimit: number;
   expireTime: null | string;

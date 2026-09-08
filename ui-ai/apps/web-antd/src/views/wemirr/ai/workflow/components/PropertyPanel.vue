@@ -94,6 +94,9 @@ const nodeLabel = ref('');
 // 节点描述
 const nodeDescription = ref('');
 
+// 节点「返回内容」开关(画布 data.emitOutput,默认开):开才把节点数据推送给客户端,持久化不受影响
+const nodeEmitOutput = ref(true);
+
 // 节点配置
 const nodeConfig = ref<Record<string, any>>({});
 
@@ -175,6 +178,7 @@ watch(
     if (node) {
       nodeLabel.value = node.label || '';
       nodeDescription.value = node.data?.description || '';
+      nodeEmitOutput.value = node.data?.emitOutput !== false;
       nodeConfig.value = { ...node.data };
       // 如果在调试模式且有追踪数据，自动切换到追踪视图
       activeView.value =
@@ -280,6 +284,13 @@ function handleDescriptionChange() {
 }
 
 /**
+ * 返回内容开关变更：写入节点配置 emitOutput（执行与数据持久化不受影响）
+ */
+function handleEmitOutputChange(checked: boolean) {
+  handleConfigUpdate({ ...nodeConfig.value, emitOutput: checked });
+}
+
+/**
  * 处理配置更新
  */
 function handleConfigUpdate(config: Record<string, any>) {
@@ -378,6 +389,18 @@ function handleTraceNodeClick(nodeId: string) {
                 :rows="2"
                 @change="handleDescriptionChange"
               />
+            </a-form-item>
+            <a-form-item label="返回内容">
+              <div class="emit-output-control">
+                <a-switch
+                  v-model:checked="nodeEmitOutput"
+                  size="small"
+                  @change="handleEmitOutputChange"
+                />
+                <span class="emit-output-tip"
+                  >开启时该节点输出（含流式内容）实时推送给客户端，关闭不影响执行与数据持久化</span
+                >
+              </div>
             </a-form-item>
           </a-form>
         </div>
@@ -510,6 +533,19 @@ function handleTraceNodeClick(nodeId: string) {
       textarea {
         resize: none;
       }
+    }
+
+    // 返回内容开关：开关与说明水平对齐排版
+    .emit-output-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .emit-output-tip {
+      font-size: 12px;
+      line-height: 1.5;
+      color: #8c8c8c;
     }
   }
 }

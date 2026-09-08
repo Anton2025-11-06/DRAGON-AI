@@ -2,7 +2,7 @@
 """模型网关 Redis 缓存访问层（双层 hash 结构，与模块限流风格统一）：
 
 - model_rate_limit_config（外层 hash）：field=model_id，value=模型路由配置 JSON
-  (model_id/name/category/model_name/provider/base_url/rate_limit_qps/status)
+  (model_id/name/category/model_name/provider/base_url/is_direct/suffixes/rate_limit_qps/status)
 - model_rate_limit（外层 hash）：field=api_key，value=JSON
   {model_id, user_id, apply_id, create_time}（比裸 model_id 多存元数据，支持按用户/模型批量吊销）
 

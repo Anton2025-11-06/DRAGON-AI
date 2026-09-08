@@ -16,7 +16,7 @@ SERVICE_WORKFLOW = "service_workflow"
 SERVICE_WORKFLOW_PORT = 9003
 
 SERVICE_LOGIN = "service_login"
-SERVICE_LOGIN_PORT = 9044
+SERVICE_LOGIN_PORT = 9004
 
 SERVICE_GATEWAY = "service_gateway"
 SERVICE_GATEWAY_PORT = 18000
@@ -43,11 +43,19 @@ PREFIX_RATE_LIMIT_CONFIG = "rate_limit_config"
 PREFIX_MODEL_RATE_LIMIT_CONFIG = "model_rate_limit_config"
 # api-key 映射（hash）：field=api_key，value=JSON {model_id, user_id, apply_id, create_time}
 PREFIX_MODEL_RATE_LIMIT = "model_rate_limit"
+
+# ---- 工作流 API Key（第三方 API 执行网关鉴权） ----
+# 配置（hash）：field=api_key，value=JSON {workflowId, rateLimit(QPS), expireTime, status}
+# 工作流服务增删改时同步写入，网关读取做鉴权与限流
+PREFIX_WORKFLOW_API_KEY = "workflow_api_key_config"
+# QPS 计数（双层 hash）：外层 field=api_key，内层 field=qps，value=每秒次数
+PREFIX_WORKFLOW_API_KEY_QPS = "workflow_api_key_qps"
 # 模型 QPS 计数（双层 hash）：外层 field=model_id，内层 field=qps，value=每秒次数
 PREFIX_MODEL_RATE_LIMIT_QPS = "model_rate_limit_qps"
 
 
-# 可配置的模块桶候选（与网关 _SERVICE_ALIASES 对应，login/global 另有默认策略可覆盖）
+# 可配置的模块桶候选（与网关 _SERVICE_ALIASES 对应）
+# 限流单位：每个client ip 一个window + limit
 MODULES = [
     {"bucket": "login", "name": "登录认证", "default": {"limit": 300, "window": 60}},
     {"bucket": "system", "name": "系统管理", "default": {"limit": 300, "window": 60}},

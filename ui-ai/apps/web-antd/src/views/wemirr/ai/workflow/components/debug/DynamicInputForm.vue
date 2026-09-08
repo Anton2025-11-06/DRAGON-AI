@@ -118,11 +118,26 @@ const formRules = computed(() => {
 
 // ==================== Watch ====================
 
-// 监听外部 values 变化，同步到内部状态
+/**
+ * 浅比较两个表单值对象（输入表单的值均为原始类型/扁平结构）
+ * 用于打破「props.values -> formValues -> emit -> props.values」的 watch 回环，
+ * 避免 Vue "Maximum recursive updates exceeded" 死循环
+ */
+function shallowEqualValues(
+  a: Record<string, any>,
+  b: Record<string, any>,
+): boolean {
+  const ka = Object.keys(a || {});
+  const kb = Object.keys(b || {});
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => a[k] === b[k]);
+}
+
+// 监听外部 values 变化，同步到内部状态（内容未变化时跳过，防止 watch 回环）
 watch(
   () => props.values,
   (newValues) => {
-    if (newValues) {
+    if (newValues && !shallowEqualValues(newValues, formValues.value)) {
       formValues.value = { ...newValues };
     }
   },

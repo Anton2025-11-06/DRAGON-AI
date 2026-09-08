@@ -5,7 +5,7 @@ import aiofiles
 from fastapi import UploadFile
 from sqlalchemy import delete, func, or_, select, update
 
-from celery_tasks.tasks.vectorize.tasks import vectorize_document
+from arq_tasks.tasks.vectorize.tasks import vectorize_document
 from common.common_constants.constant import (DOC_STATUS_PENDING, MAX_DOC_SIZE, UPLOAD_TMP_DIR)
 from common.common_entity.rbac_entity import Role, UserRole
 from common.common_log.log_init import log

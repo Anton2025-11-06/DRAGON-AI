@@ -14,7 +14,7 @@ class Model(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="模型名称")
-    # 分类：TEXT_GEN/EMBEDDING/RERANK/MULTIMODAL/IMAGE_GEN/AUDIO_GEN/VIDEO_GEN
+    # 分类枚举见 common.common_constants.model_constant 的 MODEL_CATEGORY_*（7 类）
     category: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     # 提供商：deepseek/qwen/doubao/hunyuan/kimi/openai
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)

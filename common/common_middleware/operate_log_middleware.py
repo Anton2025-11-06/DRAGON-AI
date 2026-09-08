@@ -17,12 +17,6 @@ _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # 参数最大记录长度（避免超长请求体撑爆日志表）
 _MAX_PARAMS_LEN = 2000
 
-# 网关路径 /api/{service_name}/{path} 的模块名映射（服务名/模块别名 → 可读模块名）
-_SERVICE_MODULE_ALIAS = {
-    "system": "系统管理",
-    "login": "登录认证",
-    "gateway": "网关",
-}
 
 # 敏感字段脱敏：日志落库前将密码类/凭证类字段替换为掩码，防止明文泄露
 _SENSITIVE_KEYS = {"password", "old_password", "new_password", "confirm_password", "token", "authorization"}
@@ -102,7 +96,7 @@ class OperateLogMiddleware(BaseHTTPMiddleware):
                     trace_id=request.scope.get("trace_id") or getattr(request.state, "trace_id", "-"),
                     user_id=user.get("user_id"),
                     username=user.get("username") if user.get("username") else request.headers.get("x-user-api-key"),
-                    module=_SERVICE_MODULE_ALIAS.get(service_name, service_name),
+                    module=service_name,
                     operation=f"{path}",
                     method=method,
                     path=path,

@@ -16,6 +16,6 @@ if __name__ == '__main__':
     uvicorn.run("service.service_workflow.workflow:app",
                 port=int(os.environ.get(SERVICE_WORKFLOW + "_port", SERVICE_WORKFLOW_PORT)),
                 host="0.0.0.0",
-                workers=1,
+                workers=2,
                 log_level="INFO",
                 access_log=False,)

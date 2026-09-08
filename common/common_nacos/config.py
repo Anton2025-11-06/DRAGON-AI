@@ -9,3 +9,5 @@ class Config:
     nacos_server_address = "127.0.0.1:8848"
     nacos_namespace_id = "dragon-ai"
     nacos_log_level = logging.INFO
+
+

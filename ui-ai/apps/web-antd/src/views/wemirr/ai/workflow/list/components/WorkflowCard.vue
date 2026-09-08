@@ -5,14 +5,15 @@
 import type { WorkflowPageResp } from '#/api/ai-workflow/types';
 
 import {
+  ApiOutlined,
   ApartmentOutlined,
+  AppstoreOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   HistoryOutlined,
   PlayCircleOutlined,
   SendOutlined,
-  StopOutlined,
 } from '@ant-design/icons-vue';
 import { Tag, Tooltip } from 'ant-design-vue';
 
@@ -26,16 +27,16 @@ const emit = defineEmits<{
   (e: 'edit', item: WorkflowPageResp): void;
   (e: 'remove', item: WorkflowPageResp): void;
   (e: 'publish', item: WorkflowPageResp): void;
-  (e: 'archive', item: WorkflowPageResp): void;
   (e: 'copy', item: WorkflowPageResp): void;
   (e: 'history', item: WorkflowPageResp): void;
   (e: 'execute', item: WorkflowPageResp): void;
+  (e: 'api', item: WorkflowPageResp): void;
+  (e: 'template', item: WorkflowPageResp): void;
 }>();
 
 const statusConfig: Record<string, { color: string; text: string }> = {
   DRAFT: { color: 'default', text: '草稿' },
   PUBLISHED: { color: 'success', text: '已发布' },
-  ARCHIVED: { color: 'warning', text: '已归档' },
 };
 
 function getStatusConfig(status: string) {
@@ -97,7 +98,8 @@ function formatTime(time: string) {
             <template #icon><EditOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip v-if="item.status === 'PUBLISHED'" title="执行">
+        <!-- 执行按钮常显：未发布时点击由列表页提示先发布（需求 2.1） -->
+        <Tooltip title="执行">
           <a-button
             data-testid="workflow-card-execute"
             type="text"
@@ -117,16 +119,6 @@ function formatTime(time: string) {
             <template #icon><SendOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip v-if="item.status === 'PUBLISHED'" title="归档">
-          <a-button
-            data-testid="workflow-card-archive"
-            type="text"
-            size="small"
-            @click="emit('archive', item)"
-          >
-            <template #icon><StopOutlined /></template>
-          </a-button>
-        </Tooltip>
         <Tooltip title="复制">
           <a-button
             data-testid="workflow-card-copy"
@@ -135,6 +127,26 @@ function formatTime(time: string) {
             @click="emit('copy', item)"
           >
             <template #icon><CopyOutlined /></template>
+          </a-button>
+        </Tooltip>
+        <Tooltip title="API 访问">
+          <a-button
+            data-testid="workflow-card-api"
+            type="text"
+            size="small"
+            @click="emit('api', item)"
+          >
+            <template #icon><ApiOutlined /></template>
+          </a-button>
+        </Tooltip>
+        <Tooltip title="保存为模块">
+          <a-button
+            data-testid="workflow-card-template"
+            type="text"
+            size="small"
+            @click="emit('template', item)"
+          >
+            <template #icon><AppstoreOutlined /></template>
           </a-button>
         </Tooltip>
         <Tooltip title="执行历史">
@@ -265,7 +277,10 @@ function formatTime(time: string) {
 
     .card-actions {
       display: flex;
-      gap: 4px;
+      gap: 2px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: 60%;
     }
   }
 }

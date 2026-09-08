@@ -5,7 +5,6 @@
  * 支持元数据过滤和重排序配置
  */
 import type {
-  AiModelOption,
   FilterOperator,
   KnowledgeBaseOption,
   KnowledgeRetrievalConfig,
@@ -22,8 +21,10 @@ import {
   QuestionCircleOutlined,
 } from '@ant-design/icons-vue';
 
-import { listAiModels, listKnowledgeBases } from '#/api/ai-workflow';
+import { MODEL_TYPE_RERANK } from '#/api/ai-workflow/const';
+import { listKnowledgeBases } from '#/api/ai-workflow';
 
+import { ModelSelect } from '../model-select';
 import { VariableInput } from '../variable-selector';
 
 // Props
@@ -41,8 +42,6 @@ const emit = defineEmits<{
 
 const knowledgeBases = ref<KnowledgeBaseOption[]>([]);
 const loadingKnowledgeBases = ref(false);
-const rerankModels = ref<AiModelOption[]>([]);
-const loadingModels = ref(false);
 
 // 默认重排序配置
 const defaultRerankConfig: RerankConfig = {
@@ -101,18 +100,6 @@ async function loadKnowledgeBases() {
   }
 }
 
-// 加载重排序模型列表
-async function loadRerankModels() {
-  loadingModels.value = true;
-  try {
-    rerankModels.value = await listAiModels('RERANK');
-  } catch {
-    rerankModels.value = [];
-  } finally {
-    loadingModels.value = false;
-  }
-}
-
 // 添加过滤条件
 function addFilter() {
   formData.metadataFilters = formData.metadataFilters || [];
@@ -156,7 +143,6 @@ function handleChange() {
 
 onMounted(() => {
   loadKnowledgeBases();
-  loadRerankModels();
 });
 </script>
 
@@ -256,22 +242,13 @@ onMounted(() => {
     </a-form-item>
 
     <template v-if="formData.rerankConfig.enabled">
-      <a-form-item label="重排序模型">
-        <a-select
-          v-model:value="formData.rerankConfig.rerankModelId"
-          placeholder="选择重排序模型"
-          :loading="loadingModels"
-          @change="handleChange"
-        >
-          <a-select-option
-            v-for="model in rerankModels"
-            :key="model.id"
-            :value="model.id"
-          >
-            {{ model.name }}
-          </a-select-option>
-        </a-select>
-      </a-form-item>
+      <ModelSelect
+        v-model:model-value="formData.rerankConfig.rerankModelId"
+        :default-type="MODEL_TYPE_RERANK"
+        :show-suffix="false"
+        placeholder="选择重排序模型"
+        @change="handleChange"
+      />
 
       <a-form-item label="重排序后保留数量">
         <a-input-number

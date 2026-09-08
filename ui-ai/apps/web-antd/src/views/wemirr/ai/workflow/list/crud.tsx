@@ -82,7 +82,6 @@ export default function crud(
             data: [
               { value: 'DRAFT', label: '草稿', color: 'default' },
               { value: 'PUBLISHED', label: '已发布', color: 'success' },
-              { value: 'ARCHIVED', label: '已归档', color: 'warning' },
             ],
           }),
           column: { width: 100 },

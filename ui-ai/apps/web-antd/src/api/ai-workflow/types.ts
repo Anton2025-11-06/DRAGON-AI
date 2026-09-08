@@ -40,7 +40,7 @@ export type NodeType =
 /**
  * 工作流状态枚举
  */
-export type WorkflowStatus = 'ARCHIVED' | 'DRAFT' | 'PUBLISHED';
+export type WorkflowStatus = 'DRAFT' | 'PUBLISHED';
 
 /**
  * 执行状态枚举
@@ -463,12 +463,23 @@ export interface WorkflowNodeDefinitionResp {
   defaultConfig: Record<string, any>;
 }
 
+export interface ModelSuffixOption {
+  /** 接口后缀路径，如 /v1/chat/completions */
+  url: string;
+  /** 后缀说明（模型广场维护，展示给用户） */
+  desc?: string;
+}
+
 export interface AiModelOption {
   id: number;
   provider: string;
   type: string;
   name: string;
   baseUrl?: string;
+  /** 是否直连：1=baseUrl 含完整接口路径；0=非直连(baseUrl+接口后缀) */
+  isDirect?: number;
+  /** 非直连时支持的后缀列表 */
+  suffixes?: ModelSuffixOption[];
 }
 
 export interface WorkflowAgentOption {
@@ -802,6 +813,12 @@ export interface ContextVariable {
 export interface LLMNodeConfig {
   /** 模型 ID */
   modelId?: number;
+  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  modelType?: string;
+  /** 所选接口后缀（非直连模型时生效，base_url + suffix 拼接调用地址） */
+  suffix?: string;
+  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
+  modelIsDirect?: number;
   /** 系统提示词 */
   systemPrompt?: string;
   /** 用户提示词模板 (支持变量引用: {{nodeName.variableName}}) */
@@ -925,6 +942,12 @@ export interface ClassCategory {
 export interface QuestionClassifierConfig {
   /** 分类使用的模型 ID */
   modelId?: number;
+  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  modelType?: string;
+  /** 所选接口后缀（非直连模型时生效） */
+  suffix?: string;
+  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
+  modelIsDirect?: number;
   /** 输入变量（要分类的文本，支持变量引用格式: {{nodeName.variableName}}） */
   inputVariable?: string;
   /** 分类指导说明 */
@@ -978,6 +1001,12 @@ export interface ExtractParameter {
 export interface ParameterExtractorConfig {
   /** 提取使用的模型 ID */
   modelId?: number;
+  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  modelType?: string;
+  /** 所选接口后缀（非直连模型时生效） */
+  suffix?: string;
+  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
+  modelIsDirect?: number;
   /** 输入变量（要提取参数的文本，支持变量引用格式: {{nodeName.variableName}}） */
   inputVariable?: string;
   /** 提取指导说明 */

@@ -55,13 +55,9 @@ export default defineComponent({
       }
     }
 
-    /** 返回 */
+    /** 返回（需求 4.3：始终回到工作流列表页，不再回到编辑页） */
     function handleBack() {
-      if (workflowId.value) {
-        router.push(`/agent/workflow/editor/${workflowId.value}`);
-      } else {
-        router.push('/agent/workflow');
-      }
+      router.push('/agent/workflow');
     }
 
     /** 打开详情弹窗 */

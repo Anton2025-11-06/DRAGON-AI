@@ -5,6 +5,16 @@
  */
 import { computed } from 'vue';
 
+import {
+  MODEL_CATEGORY_AUDIO_GEN,
+  MODEL_CATEGORY_EMBEDDING,
+  MODEL_CATEGORY_IMAGE_GEN,
+  MODEL_CATEGORY_MULTIMODAL,
+  MODEL_CATEGORY_RERANK,
+  MODEL_CATEGORY_TEXT_GEN,
+  MODEL_CATEGORY_VIDEO_GEN,
+} from '#/api/ai-workflow/const';
+
 import type * as api from '../api';
 
 const props = defineProps<{
@@ -25,13 +35,13 @@ const emit = defineEmits<{
 
 /** 分类 emoji 图标（maxkb 卡片图标位） */
 const categoryEmoji: Record<string, string> = {
-  TEXT_GEN: '✍️',
-  EMBEDDING: '📐',
-  RERANK: '🔀',
-  MULTIMODAL: '🧠',
-  IMAGE_GEN: '🎨',
-  AUDIO_GEN: '🎙️',
-  VIDEO_GEN: '🎬',
+  [MODEL_CATEGORY_TEXT_GEN]: '✍️',
+  [MODEL_CATEGORY_EMBEDDING]: '📐',
+  [MODEL_CATEGORY_RERANK]: '🔀',
+  [MODEL_CATEGORY_MULTIMODAL]: '🧠',
+  [MODEL_CATEGORY_IMAGE_GEN]: '🎨',
+  [MODEL_CATEGORY_AUDIO_GEN]: '🎙️',
+  [MODEL_CATEGORY_VIDEO_GEN]: '🎬',
 };
 
 /** 申请状态展示 */

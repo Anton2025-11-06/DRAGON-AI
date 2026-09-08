@@ -418,7 +418,9 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), '部门管理', 2, 'org',        'views/wemirr/system/org/index.vue',           'lucide:building-2',  4),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), '在线用户', 2, 'online',     'views/wemirr/system/online/index.vue',        'lucide:radio',       5),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), '限流配置', 2, 'rate-limit', 'views/wemirr/system/rate-limit/index.vue',   'lucide:gauge',       6),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), '操作日志', 2, 'opt-log',    'views/wemirr/system/log/opt-log.vue',         'lucide:file-text',   7);
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), '操作日志', 2, 'opt-log',    'views/wemirr/system/log/opt-log.vue',         'lucide:file-text',   7),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) m), 'ARQ任务监控', 2,
+'arq-monitor', 'views/wemirr/system/arq-monitor/index.vue',  'lucide:server',      8);
 
 -- 兼容旧库：老种子的组件格式统一（幂等 UPDATE）
 UPDATE `tb_menu` SET `component`='BasicLayout' WHERE `menu_name` IN ('系统管理','知识库','智能体','模型工厂','数据集工厂','模型广场') AND `parent_id`=0;
@@ -526,6 +528,10 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='限流配置' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0)) m), '限流配置查询', 3, 'system:rate-limit:list',    1),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='限流配置' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0)) m), '限流策略配置', 3, 'system:rate-limit:edit',    2),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='限流配置' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0)) m), '限流策略发布', 3, 'system:rate-limit:publish', 3);
+
+-- 8.8 ARQ 任务监控（service_system arq 队列指标 / worker 进程健康）
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='ARQ任务监控' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0)) m), 'ARQ监控查询', 3, 'system:arq:list', 1);
 
 -- 8.8 模型广场（service_system 模型管理）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES

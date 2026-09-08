@@ -62,7 +62,7 @@
 ### 4. 📚 RAG 知识库 —— 企业私有知识问答基座
 
 - **多格式文档接入**：PDF / Word / 文本等，单文档最大 50MB，状态机驱动（待处理 → 解析 → 向量化 → 完成）；
-- **Celery 异步流水线**：独立 `vectorize_queue` 队列解析 + 向量化，不阻塞业务；
+- **arq 异步任务**：工作流执行/恢复由独立 arq worker 进程消费（Redis 队列 db=1），API 秒回执行 ID；
 - **混合检索**：BM25 关键词 + Milvus 向量召回 + **RRF 融合排序**，再经 **rerank / embed API 重排**，检索精度双保险；
 - **向量存储**：每个知识库独立 Milvus 集合（`kb_{id}`）；
 - **知识库问答**：对话页无缝挂载知识库（RAG 检索增强），回答可溯源。
@@ -124,7 +124,7 @@
         ▼          ▼          ▼          ▼          ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │           基础设施：Nacos（注册/配置）· MySQL（业务数据）· Redis 7.4+     │
-│           · Milvus（向量库）· Celery（异步流水线）· 内网 vLLM/推理服务      │
+│           · Milvus（向量库）· arq（异步任务队列）· 内网 vLLM/推理服务      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -157,7 +157,7 @@ sequenceDiagram
 | 注册配置 | Nacos（nacos-sdk-python） | 服务注册发现 + 配置中心，注册即路由 |
 | 数据存储 | MySQL（aiomysql）+ Redis 7.4+ | 业务数据 / 会话态·限流计数·路由缓存 |
 | 向量检索 | Milvus + BM25 + RRF 融合 + rerank | 知识库混合检索 |
-| 异步任务 | Celery 5（vectorize_queue / parse_queue） | 文档解析与向量化流水线 |
+| 异步任务 | arq 0.28（Redis 队列，db=1） | 工作流执行/恢复（worker 独立进程） |
 | HTTP 客户端 | httpx（连接池 keep-alive + HTTP/2） | 服务间调用 / 网关上游转发 |
 | 日志可观测 | loguru + OpenTelemetry + 自研 trace-id | 结构化日志与全链路串联 |
 | 前端框架 | Vue 3.5 + TypeScript 5.9 + Vite | vben v5（pnpm/turbo monorepo） |
@@ -189,7 +189,8 @@ python-microsoft-fast
 │   ├── service_agent/             #   智能体 :9005
 │   ├── service_skill/             #   技能中心 :9006
 │   └── service_* /                #   数据集 / 训练 / 推理 / 评测 / Notebook（预留）
-├── celery_tasks/                  # 异步任务（向量化 / 解析）
+├── arq_tasks/                      # arq 任务（worker 配置 + 工作流执行/恢复任务）
+├── common/common_arq/              # arq 生产端封装（投递任务）
 ├── ui-ai/                         # 前端（vben v5 monorepo）
 │   └── apps/web-antd/             #   Web 端应用 :5666
 │       └── src/views/wemirr/      #   模型广场 / 对话 / 知识库 / 工作流 / 智能体 / 系统管理
@@ -232,6 +233,7 @@ python -m service.service_login.login        # 登录认证   :9044
 python -m service.service_system.system      # 系统管理   :9001
 python -m service.service_rag.rag            # RAG 知识库 :9002
 python -m service.service_workflow.workflow  # 工作流     :9003
+arq arq_tasks.worker_settings.WorkerSettings # arq worker（工作流执行，Redis db=1）
 ```
 
 > 服务启动时自动向 Nacos 注册并拉取各自配置（数据源、Redis、模型路由等）。

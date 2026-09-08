@@ -34,7 +34,7 @@ const showCreateModal = ref(false);
 const showKeyModal = ref(false);
 const newApiKey = ref('');
 
-const apiBaseUrl = `${window.location.origin}/api/ai`;
+const apiBaseUrl = `${window.location.origin}/api/workflow`;
 
 const createForm = reactive({
   name: '',
@@ -42,13 +42,25 @@ const createForm = reactive({
   expireDays: 0,
 });
 
+/** 复制某行 API Key */
+function copyKey(key: string) {
+  navigator.clipboard
+    .writeText(key)
+    .then(() => {
+      message.success('已复制到剪贴板');
+    })
+    .catch(() => {
+      message.error('复制失败，请手动复制');
+    });
+}
+
 const columns = [
   { title: '名称', dataIndex: 'name', key: 'name', width: 120 },
   {
     title: 'API Key',
-    dataIndex: 'apiKeyMasked',
-    key: 'apiKeyMasked',
-    width: 200,
+    dataIndex: 'apiKey',
+    key: 'apiKey',
+    width: 260,
   },
   { title: '状态', key: 'status', width: 80 },
   { title: 'QPS', key: 'rateLimit', width: 80 },
@@ -109,7 +121,8 @@ async function handleCreate() {
 
 async function handleToggleStatus(record: ApiKeyListResp, checked: boolean) {
   try {
-    await updateApiKeyStatus(record.id, checked ? 'ACTIVE' : 'DISABLED');
+    // 启用/禁用：仅支持 ACTIVE/REVOKED/EXPIRED（后端报错修复点：禁用状态传 REVOKED）
+    await updateApiKeyStatus(record.id, checked ? 'ACTIVE' : 'REVOKED');
     message.success(checked ? '已启用' : '已禁用');
     await loadApiKeys();
   } catch {
@@ -155,8 +168,9 @@ onMounted(() => {
 
     <a-alert type="info" show-icon style="margin-bottom: 16px">
       <template #message>
-        第三方系统可通过 API Key 调用此工作流，请求头添加
-        <code>Authorization: Bearer sk-wf-xxx</code>
+        第三方系统可通过 API Key 执行此工作流（需先发布），请求头添加
+        <code>X-Workflow-Token: {{ newApiKey }}</code>，鉴权与限流由网关统一执行；
+        限流按 API Key 的 QPS 限制，0 表示不限制。
       </template>
     </a-alert>
 
@@ -170,7 +184,15 @@ onMounted(() => {
       size="small"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'status'">
+        <template v-if="column.key === 'apiKey'">
+          <a-space>
+            <code class="key-cell">{{ record.apiKey }}</code>
+            <a-button type="link" size="small" @click="copyKey(record.apiKey)">
+              <CopyOutlined />
+            </a-button>
+          </a-space>
+        </template>
+        <template v-else-if="column.key === 'status'">
           <a-tag :color="record.status === 'ACTIVE' ? 'green' : 'default'">
             {{ record.status === 'ACTIVE' ? '启用' : '禁用' }}
           </a-tag>
@@ -255,10 +277,10 @@ onMounted(() => {
       :closable="true"
     >
       <a-alert
-        type="warning"
+        type="info"
         show-icon
         style="margin-bottom: 16px"
-        message="请立即复制并妥善保存此 API Key，关闭后将无法再次查看完整内容。"
+        message="API Key 已生成，可在列表中随时查看完整内容并复制。"
       />
       <div class="key-display">
         <code class="key-value">{{ newApiKey }}</code>
@@ -271,10 +293,17 @@ onMounted(() => {
 
       <h4>调用示例</h4>
       <div class="code-block">
-        <pre><code>curl -X POST {{ apiBaseUrl }}/open-api/workflows/run \
-  -H "Authorization: Bearer {{ newApiKey }}" \
+        <pre><code># 1. 异步执行工作流（返回 executionId）
+curl -X POST {{ apiBaseUrl }}/workflow-executions/workflows/{{ props.workflowId }}/execute-async \
+  -H "X-Workflow-Token: {{ newApiKey }}" \
   -H "Content-Type: application/json" \
-  -d '{"key": "value"}'</code></pre>
+  -d '{"inputs": {"query": "你好"}}'
+
+# 2. 订阅执行事件流（SSE 长连接，网关白名单放行，无需携带请求头）
+curl -N {{ apiBaseUrl }}/workflow-executions/&lt;executionId&gt;/subscribe
+
+# 事件类型：node.started / node.completed / node.failed / node.delta
+#          / workflow.paused / workflow.completed / workflow.failed / workflow.cancelled</code></pre>
       </div>
     </a-modal>
   </div>
@@ -304,6 +333,11 @@ onMounted(() => {
       font-size: 13px;
       word-break: break-all;
     }
+  }
+
+  .key-cell {
+    font-size: 12px;
+    word-break: break-all;
   }
 
   .code-block {

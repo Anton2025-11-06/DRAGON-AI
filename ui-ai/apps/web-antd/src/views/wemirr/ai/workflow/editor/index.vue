@@ -16,9 +16,7 @@ import {
 import { useRoute, useRouter } from 'vue-router';
 
 import {
-  ApiOutlined,
   ArrowLeftOutlined,
-  AppstoreOutlined,
   BugOutlined,
   CheckCircleOutlined,
   ClearOutlined,
@@ -26,9 +24,10 @@ import {
   ExpandOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
-  HistoryOutlined,
   SaveOutlined,
+  SendOutlined,
   StopOutlined,
+  VersionOutlined,
   WarningOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
@@ -39,19 +38,19 @@ import { Badge, message, Modal, Spin, Tag, Tooltip } from 'ant-design-vue';
 import {
   cancelExecution,
   createWorkflow,
+  publishWorkflow,
   resumeExecution,
   updateWorkflow,
 } from '#/api/ai-workflow';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
-import ApiKeyManager from '../components/ApiKeyManager.vue';
 import DebugPanel from '../components/DebugPanel.vue';
 import NodePanel from '../components/NodePanel.vue';
 import PropertyPanel from '../components/PropertyPanel.vue';
+import VersionHistoryModal from '../components/VersionHistoryModal.vue';
 import VueFlowCanvas from '../components/VueFlowCanvas.vue';
 import WorkflowDiagnosticsPanel from '../components/WorkflowDiagnosticsPanel.vue';
-import SaveAsTemplateModal from '../templates/components/SaveAsTemplateModal.vue';
 import { ErrorDetailPanel } from '../components/debug';
 
 const route = useRoute();
@@ -91,14 +90,13 @@ const showDebugPanel = ref(false);
 // 调试面板布局模式
 const debugPanelLayoutMode = ref<'bottom' | 'right'>('right');
 
-// 保存为模板弹窗
-const showSaveAsTemplateModal = ref(false);
+// 发布历史弹窗
+const showVersionHistoryModal = ref(false);
 
-// API Key 管理抽屉
-const showApiKeyDrawer = ref(false);
-
-// 选中的节点
-const selectedNode = computed(() => workflowStore.selectedNode);
+// 发布状态与 5 秒点击间隔（防狂点）
+const publishing = ref(false);
+const publishCountdown = ref(0);
+let publishTimer: ReturnType<typeof setInterval> | null = null;
 
 // 是否有未保存的更改
 const isDirty = computed(() => workflowStore.isDirty);
@@ -199,7 +197,6 @@ function getNodeFriendlyName(nodeId: string): string {
 const statusConfig: Record<string, { color: string; text: string }> = {
   DRAFT: { color: 'default', text: '草稿' },
   PUBLISHED: { color: 'success', text: '已发布' },
-  ARCHIVED: { color: 'warning', text: '已归档' },
 };
 
 /**
@@ -511,30 +508,53 @@ function handleDebugNodeClick(nodeId: string) {
 }
 
 /**
- * 查看执行历史
+ * 发布工作流（保存右侧，5 秒点击间隔防狂点）
  */
-function handleViewHistory() {
-  if (workflowId.value) {
-    router.push(`/agent/workflow/history/${workflowId.value}`);
-  }
-}
-
-/**
- * 保存为模板
- */
-function handleSaveAsTemplate() {
+function handlePublish() {
   if (!workflowId.value) {
     message.warning('请先保存工作流');
     return;
   }
-  showSaveAsTemplateModal.value = true;
+  Modal.confirm({
+    title: '确认发布',
+    content: '发布后生成版本快照，正式执行与第三方 API 将使用最新版本。',
+    okText: '发布',
+    cancelText: '取消',
+    onOk: async () => {
+      publishing.value = true;
+      try {
+        await publishWorkflow(workflowId.value!);
+        message.success('发布成功');
+        await loadWorkflow(); // 刷新状态（PUBLISHED 与版本号）
+        startPublishCountdown();
+      } catch {
+        message.error('发布失败，请先修复工作流诊断中的阻断问题');
+      } finally {
+        publishing.value = false;
+      }
+    },
+  });
+}
+
+/** 发布成功后进入 5 秒冷却，防止连续发布 */
+function startPublishCountdown() {
+  publishCountdown.value = 5;
+  if (publishTimer) clearInterval(publishTimer);
+  publishTimer = setInterval(() => {
+    publishCountdown.value -= 1;
+    if (publishCountdown.value <= 0 && publishTimer) {
+      clearInterval(publishTimer);
+      publishTimer = null;
+    }
+  }, 1000);
 }
 
 /**
- * 模板保存成功
+ * 发布历史：恢复版本成功后重新加载，页面显示该版本的工作流
  */
-function handleTemplateSaved() {
-  message.success('模板保存成功');
+async function handleVersionRestored() {
+  await loadWorkflow();
+  message.success('已切换到恢复后的版本');
 }
 
 // 画布是否已就绪
@@ -630,6 +650,10 @@ onMounted(() => {
 
 // 页面离开前提示
 onBeforeUnmount(() => {
+  if (publishTimer) {
+    clearInterval(publishTimer);
+    publishTimer = null;
+  }
   if (import.meta.env.DEV && (window as any).__workflowEditor) {
     delete (window as any).__workflowEditor;
   }
@@ -789,27 +813,27 @@ onBeforeUnmount(() => {
                 </a-button>
               </Badge>
             </a-tooltip>
-            <a-tooltip title="执行历史">
-              <a-button @click="handleViewHistory">
-                <template #icon><HistoryOutlined /></template>
-              </a-button>
-            </a-tooltip>
-            <a-tooltip title="API 访问">
+            <a-tooltip title="发布历史（版本查看与恢复）">
               <a-button
                 :disabled="!workflowId"
-                @click="showApiKeyDrawer = true"
+                @click="showVersionHistoryModal = true"
               >
-                <template #icon><ApiOutlined /></template>
-              </a-button>
-            </a-tooltip>
-            <a-tooltip title="保存为模板">
-              <a-button :disabled="!workflowId" @click="handleSaveAsTemplate">
-                <template #icon><AppstoreOutlined /></template>
+                <template #icon><VersionOutlined /></template>
               </a-button>
             </a-tooltip>
             <a-button type="primary" :loading="saving" @click="handleSave">
               <template #icon><SaveOutlined /></template>
               保存
+            </a-button>
+            <a-button
+              type="primary"
+              ghost
+              :loading="publishing"
+              :disabled="isCreateMode || publishCountdown > 0"
+              @click="handlePublish"
+            >
+              <template #icon><SendOutlined /></template>
+              {{ publishCountdown > 0 ? `发布 (${publishCountdown}s)` : '发布' }}
             </a-button>
           </a-space>
         </div>
@@ -900,15 +924,13 @@ onBeforeUnmount(() => {
         />
       </a-drawer>
 
-      <!-- API Key 管理抽屉 -->
-      <a-drawer
-        v-model:open="showApiKeyDrawer"
-        title="API 访问管理"
-        placement="right"
-        :width="720"
-      >
-        <ApiKeyManager v-if="workflowId" :workflow-id="workflowId" />
-      </a-drawer>
+      <!-- 发布历史弹窗 -->
+      <VersionHistoryModal
+        v-model:open="showVersionHistoryModal"
+        :workflow-id="workflowId || ''"
+        :current-version="currentWorkflow?.currentVersion"
+        @restored="handleVersionRestored"
+      />
 
       <!-- 工作流诊断抽屉 -->
       <a-drawer
@@ -920,13 +942,7 @@ onBeforeUnmount(() => {
         <WorkflowDiagnosticsPanel :issues="diagnostics.issues" />
       </a-drawer>
 
-      <!-- 保存为模板弹窗 -->
-      <SaveAsTemplateModal
-        v-model:open="showSaveAsTemplateModal"
-        :workflow-id="workflowId || ''"
-        :workflow-name="workflowName"
-        @success="handleTemplateSaved"
-      />
+      <!-- 保存为模板功能已迁移至工作流列表页（需求 4.2） -->
     </Spin>
   </div>
 </template>

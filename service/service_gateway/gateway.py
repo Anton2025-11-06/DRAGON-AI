@@ -14,6 +14,6 @@ if __name__ == '__main__':
     uvicorn.run("service.service_gateway.gateway:app",
                 port=int(os.environ.get(SERVICE_GATEWAY + "_port", SERVICE_GATEWAY_PORT)),
                 host="0.0.0.0",
-                workers=2,
+                workers=1,
                 log_level="INFO",
                 access_log=False,)

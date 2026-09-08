@@ -25,6 +25,8 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
         "/docs",
         "/redoc",
         "/openapi.json",
+        # ---- 工作流执行事件订阅（SSE/EventSource 场景难携带登录头；executionId 为 UUID 熵足够）----
+        "/subscribe",
     ]
     # 前缀白名单：服务间内部接口（网关 /internal/...）与外部模型调用（/api/model，api-key 鉴权）不校验用户登录态
     WHITE_LIST_PREFIX = [
@@ -34,6 +36,10 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        # 工作流 API Key 模式：第三方携带 X-Workflow-Token（无登录态），放行到网关路由
+        # 统一鉴权（gateway_router 校验 Redis 配置 + QPS 限流，无效 key 返回 401/403）
+        if path.startswith("/api/workflow/") and request.headers.get("X-Workflow-Token"):
+            return await call_next(request)
         # 匹配任意白名单后缀直接放行
         if any(path.endswith(suffix) for suffix in self.WHITE_LIST_SUFFIX):
             return await call_next(request)

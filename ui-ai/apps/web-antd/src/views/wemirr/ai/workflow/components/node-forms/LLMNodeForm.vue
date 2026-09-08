@@ -4,17 +4,17 @@
  * 配置大模型调用参数
  * 支持 Vision（图像理解）、Memory（对话记忆）、结构化输出
  */
+import { LLM_TYPE_OPTIONS, MODEL_TYPE_TEXT_GEN } from '#/api/ai-workflow/const';
 import type {
-  AiModelOption,
   LLMNodeConfig,
   StructuredOutput,
 } from '#/api/ai-workflow/types';
 
-import { onMounted, reactive, ref, watch } from 'vue';
+import { reactive, ref, watch } from 'vue';
 
 import { QuestionCircleOutlined } from '@ant-design/icons-vue';
 
-import { listAiModels } from '#/api/ai-workflow';
+import { ModelSelect } from '../model-select';
 
 import { VariableInput } from '../variable-selector';
 
@@ -31,10 +31,6 @@ const emit = defineEmits<{
   (e: 'update:config', config: LLMNodeConfig): void;
 }>();
 
-// 模型列表
-const models = ref<AiModelOption[]>([]);
-const loadingModels = ref(false);
-
 // 默认结构化输出配置
 const defaultStructuredOutput: StructuredOutput = {
   enabled: false,
@@ -48,6 +44,9 @@ const formData = reactive<
   LLMNodeConfig & { structuredOutput: StructuredOutput }
 >({
   modelId: undefined,
+  modelType: MODEL_TYPE_TEXT_GEN,
+  suffix: undefined,
+  modelIsDirect: undefined,
   systemPrompt: '',
   promptTemplate: '',
   temperature: 0.7,
@@ -68,6 +67,9 @@ watch(
   (config) => {
     Object.assign(formData, {
       modelId: config.modelId,
+      modelType: config.modelType || MODEL_TYPE_TEXT_GEN,
+      suffix: config.suffix,
+      modelIsDirect: config.modelIsDirect,
       systemPrompt: config.systemPrompt || '',
       promptTemplate: config.promptTemplate || '',
       temperature: config.temperature ?? 0.7,
@@ -87,21 +89,13 @@ watch(
   { immediate: true, deep: true },
 );
 
-// 加载模型列表
-async function loadModels() {
-  loadingModels.value = true;
-  try {
-    models.value = await listAiModels();
-  } catch {
-  } finally {
-    loadingModels.value = false;
-  }
-}
-
 // 处理配置变更
 function handleChange() {
   const config: LLMNodeConfig = {
     modelId: formData.modelId,
+    modelType: formData.modelType,
+    suffix: formData.suffix || undefined,
+    modelIsDirect: formData.modelIsDirect,
     systemPrompt: formData.systemPrompt,
     promptTemplate: formData.promptTemplate,
     temperature: formData.temperature,
@@ -123,29 +117,18 @@ function handleChange() {
   emit('update:config', config);
 }
 
-onMounted(() => {
-  loadModels();
-});
 </script>
 
 <template>
   <a-form layout="vertical" :model="formData" class="node-form">
-    <a-form-item label="模型" required>
-      <a-select
-        v-model:value="formData.modelId"
-        placeholder="选择模型"
-        :loading="loadingModels"
-        @change="handleChange"
-      >
-        <a-select-option
-          v-for="model in models"
-          :key="model.id"
-          :value="model.id"
-        >
-          {{ model.name }} ({{ model.provider }})
-        </a-select-option>
-      </a-select>
-    </a-form-item>
+    <ModelSelect
+      v-model:model-value="formData.modelId"
+      v-model:model-type="formData.modelType"
+      v-model:suffix-value="formData.suffix"
+      v-model:model-is-direct="formData.modelIsDirect"
+      :type-options="LLM_TYPE_OPTIONS"
+      @change="handleChange"
+    />
 
     <a-form-item label="系统提示词">
       <a-textarea

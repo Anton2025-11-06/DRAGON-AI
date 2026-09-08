@@ -639,6 +639,22 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
           node,
         );
       }
+      // 模型类节点：非直连模型必须选择接口后缀（执行时按 base_url + suffix 调用）
+      if (
+        (node.type === 'LLM' ||
+          node.type === 'QUESTION_CLASSIFIER' ||
+          node.type === 'PARAMETER_EXTRACTOR') &&
+        node.data?.modelIsDirect === 0 &&
+        !node.data?.suffix
+      ) {
+        addIssue(
+          'ERROR',
+          'MODEL_SUFFIX_REQUIRED',
+          `节点 ${node.label || node.id} 的模型为非直连，必须选择接口后缀`,
+          node,
+          '在节点配置中为非直连模型选择一个接口后缀',
+        );
+      }
       if (node.type === 'LLM' && !node.data?.promptTemplate) {
         addIssue(
           'WARNING',

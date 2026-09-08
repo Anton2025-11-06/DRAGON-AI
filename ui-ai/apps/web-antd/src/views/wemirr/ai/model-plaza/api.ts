@@ -2,17 +2,11 @@ import { dict } from '@fast-crud/fast-crud';
 
 import { defHttp } from '#/api/request';
 
+import type { ModelCategory } from '#/api/ai-workflow/const';
+
 // ==================== 类型定义 ====================
 
-/** 模型分类 */
-export type ModelCategory =
-  | 'AUDIO_GEN'
-  | 'EMBEDDING'
-  | 'IMAGE_GEN'
-  | 'MULTIMODAL'
-  | 'RERANK'
-  | 'TEXT_GEN'
-  | 'VIDEO_GEN';
+// 模型分类（统一常量入口：ModelCategory 来自 #/api/ai-workflow/const）
 
 /** 模型提供商 */
 export type ModelProvider =

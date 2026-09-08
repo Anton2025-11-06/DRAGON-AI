@@ -8,6 +8,11 @@ from datetime import datetime
 import httpx
 from sqlalchemy import func, select, update
 
+from common.common_constants.model_constant import (
+    MODEL_CATEGORY_EMBEDDING,
+    MODEL_CATEGORY_LABELS,
+    MODEL_CATEGORY_RERANK,
+)
 from common.common_entity.rbac_entity import Dept
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -19,16 +24,8 @@ from service.service_system.schemas.model_schema import (
 )
 from common.common_httpx.httpx import httpx_pool
 
-# 模型分类（7 类）
-CATEGORIES = {
-    "TEXT_GEN": "文本生成",
-    "EMBEDDING": "向量化",
-    "RERANK": "重排序",
-    "MULTIMODAL": "多模态",
-    "IMAGE_GEN": "图片生成",
-    "AUDIO_GEN": "语音生成",
-    "VIDEO_GEN": "视频生成",
-}
+# 模型分类字典（统一入口：common.common_constants.model_constant，本名保留供路由导出）
+CATEGORIES = MODEL_CATEGORY_LABELS
 # 模型提供商
 PROVIDERS = {
     "deepseek": "DeepSeek",
@@ -275,9 +272,9 @@ class ModelService:
             headers["Authorization"] = f"Bearer {req.api_key}"
 
         # 按分类选择通用探测端点（OpenAI 兼容协议）
-        if req.category == "EMBEDDING":
+        if req.category == MODEL_CATEGORY_EMBEDDING:
             body = {"model": req.model_name, "input": "hi"}
-        elif req.category == "RERANK":
+        elif req.category == MODEL_CATEGORY_RERANK:
             body = {"model": req.model_name, "query": "hi", "documents": ["hello", "hi"]}
         else:
             body = {
