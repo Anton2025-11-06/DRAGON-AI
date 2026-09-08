@@ -88,15 +88,7 @@ docs/_build/
 .sass-cache/
 
 # ===== Local E2E test runtime artifacts =====
-test/workflow/cft-headless/
-test/workflow/chrome-profile/
-test/workflow/*.png
-test/workflow/login-resp.json
-test/workflow/token.txt
-test/workflow/paused_eid.txt
-
-# ===== Temporary test scripts =====
-test/_tmp_*.py
+test/
 
 # ===== Workflow sandbox runtime directory =====
 service/service_workflow/sandbox_root/
