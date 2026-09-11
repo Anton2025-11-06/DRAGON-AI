@@ -4,7 +4,7 @@
 部署方式:队列按切片号分片,worker 用环境变量 SPLIT_NUMBER 指定消费哪个切片:
     SPLIT_NUMBER=2 arq arq_tasks.worker_settings.WorkerSettings
 多进程扩展:arq CLI 本身单进程(无 -w/--workers 参数),用上层入口拉起 N 个进程:
-    python -m arq_tasks.run_workers -n 4 --split 2
+    python -m arq_tasks.run_workers -n 4 -p 2
 本文件所有配置均显式写明取值与原因,便于后续维护调整。
 """
 import os

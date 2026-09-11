@@ -6,10 +6,8 @@ arq CLI 本身只启动单进程（一个进程 = 一个 asyncio worker），
 要横向扩展必须自行拉起多个进程（等同 supervisor 配置 N 个 program）。
 
 用法（项目根目录执行）：
-    python -m arq_tasks.run_workers -n 4             # 启动 4 个 worker（切片 1）
-    python -m arq_tasks.run_workers -n 4 --split 2   # 启动 4 个 worker 消费切片 2 队列
-    ARQ_WORKERS=4 python -m arq_tasks.run_workers    # 数量也可走环境变量
-    ARQ_WORKERS=4 SPLIT_NUMBER=3 python -m arq_tasks.run_workers  # 切片号也可走环境变量
+    python -m arq_tasks.run_workers -n 4 -p 1    # 启动 4 个 worker 消费切片 1（split_1）队列
+    python -m arq_tasks.run_workers -n 4 -p 2    # 启动 4 个 worker 消费切片 2（split_2）队列
 
 行为：
 - 切片号经子进程环境变量 SPLIT_NUMBER 传入,worker 端 WorkerSettings.queue_name
