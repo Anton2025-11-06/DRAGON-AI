@@ -248,7 +248,7 @@ function handleChange() {
       <VariableInput
         v-model="formData.inputVariable"
         :current-node-id="nodeId"
-        placeholder="{{nodeName.arrayVariable}}"
+        :placeholder="'{{nodeName.arrayVariable}}'"
         :filter-types="['array']"
         @change="handleChange"
       />
@@ -516,7 +516,7 @@ function handleChange() {
         <a-select
           v-model:value="formData.concatConfig.otherArrays"
           mode="tags"
-          placeholder="输入数组变量引用，如 {{node.array}}"
+          :placeholder="'输入数组变量引用，如 {{node.array}}'"
           @change="handleChange"
         />
         <div class="form-hint">输入其他要合并的数组变量引用</div>

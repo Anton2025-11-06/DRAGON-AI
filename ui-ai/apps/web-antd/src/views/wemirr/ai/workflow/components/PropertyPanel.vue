@@ -9,9 +9,8 @@
 import type { Component } from 'vue';
 
 import type { NodeType, WorkflowNode } from '#/api/ai-workflow/types';
-import type { NodeTrace } from '#/store/debug-store';
 
-import { computed, ref, watch } from 'vue';
+import { computed, onErrorCaptured, ref, watch } from 'vue';
 
 import {
   ApartmentOutlined,
@@ -19,6 +18,7 @@ import {
   BookOutlined,
   BranchesOutlined,
   CodeOutlined,
+  CommentOutlined,
   DatabaseOutlined,
   DeleteOutlined,
   FileTextOutlined,
@@ -33,10 +33,8 @@ import {
 } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
-import { useDebugStore } from '#/store/debug-store';
 
-// 调试组件
-import NodeTracePanel from './debug/NodeTracePanel.vue';
+// 节点配置表单组件 - 智能体节点
 import AgentNodeForm from './node-forms/AgentNodeForm.vue';
 // 节点配置表单组件 - 能力节点
 import CodeNodeForm from './node-forms/CodeNodeForm.vue';
@@ -55,6 +53,7 @@ import LoopNodeForm from './node-forms/LoopNodeForm.vue';
 import ParallelNodeForm from './node-forms/ParallelNodeForm.vue';
 import ParameterExtractorNodeForm from './node-forms/ParameterExtractorNodeForm.vue';
 import QuestionClassifierNodeForm from './node-forms/QuestionClassifierNodeForm.vue';
+import ReplyNodeForm from './node-forms/ReplyNodeForm.vue';
 // Vue Flow 自动处理端口更新，无需手动调用
 // 节点配置表单组件 - 工作流边界
 import StartNodeForm from './node-forms/StartNodeForm.vue';
@@ -67,13 +66,10 @@ import VariableNodeForm from './node-forms/VariableNodeForm.vue';
 interface Props {
   /** 选中的节点 */
   selectedNode?: null | WorkflowNode;
-  /** 是否显示追踪信息 (调试模式) */
-  showTrace?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   selectedNode: null,
-  showTrace: false,
 });
 
 // Emits
@@ -86,7 +82,6 @@ const emit = defineEmits<{
 
 // Store
 const workflowStore = useAiWorkflowStore();
-const debugStore = useDebugStore();
 
 // 节点标签
 const nodeLabel = ref('');
@@ -100,14 +95,15 @@ const nodeEmitOutput = ref(true);
 // 节点配置
 const nodeConfig = ref<Record<string, any>>({});
 
-// 当前视图: config-配置, trace-追踪
-const activeView = ref<'config' | 'trace'>('config');
+// 动态表单渲染错误信息(非空时在表单区展示,防止单节点表单异常拖垮整个面板)
+const formRenderError = ref('');
 
-// 视图选项
-const viewOptions = [
-  { label: '配置', value: 'config' },
-  { label: '追踪', value: 'trace' },
-];
+// 捕获子组件(动态节点表单)渲染错误,阻止向上传播导致整个面板空白
+onErrorCaptured((err) => {
+  formRenderError.value = (err as Error)?.message || '未知错误';
+  console.error('[PropertyPanel] node form render error:', err);
+  return false;
+});
 
 /**
  * 图标组件映射
@@ -133,6 +129,7 @@ const iconComponents: Record<NodeType, Component> = {
   // 能力节点
   CODE: CodeOutlined,
   TEMPLATE: FileTextOutlined,
+  REPLY: CommentOutlined,
   DOC_EXTRACTOR: BookOutlined,
   LIST_OPERATOR: UnorderedListOutlined,
   // 外部系统节点
@@ -164,6 +161,7 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   // 能力节点
   CODE: CodeNodeForm,
   TEMPLATE: TemplateNodeForm,
+  REPLY: ReplyNodeForm,
   DOC_EXTRACTOR: DocExtractorNodeForm,
   LIST_OPERATOR: ListOperatorNodeForm,
   // 外部系统节点
@@ -180,38 +178,15 @@ watch(
       nodeDescription.value = node.data?.description || '';
       nodeEmitOutput.value = node.data?.emitOutput !== false;
       nodeConfig.value = { ...node.data };
-      // 如果在调试模式且有追踪数据，自动切换到追踪视图
-      activeView.value =
-        props.showTrace && debugStore.getNodeTrace(node.id)
-          ? 'trace'
-          : 'config';
+      formRenderError.value = ''; // 切换节点时清除之前的表单错误提示
     } else {
       nodeLabel.value = '';
       nodeDescription.value = '';
       nodeConfig.value = {};
-      activeView.value = 'config';
     }
   },
   { immediate: true, deep: true },
 );
-
-// 监听 showTrace 变化
-watch(
-  () => props.showTrace,
-  (show) => {
-    if (!show) {
-      activeView.value = 'config';
-    }
-  },
-);
-
-/**
- * 当前节点的追踪数据
- */
-const currentNodeTrace = computed((): NodeTrace | null => {
-  if (!props.selectedNode) return null;
-  return debugStore.getNodeTrace(props.selectedNode.id) || null;
-});
 
 /**
  * 获取节点类型标签
@@ -310,13 +285,6 @@ function handleDeleteNode() {
     emit('delete-node', props.selectedNode.id);
   }
 }
-
-/**
- * 处理追踪面板中的节点点击
- */
-function handleTraceNodeClick(nodeId: string) {
-  emit('node-click', nodeId);
-}
 </script>
 
 <template>
@@ -329,14 +297,6 @@ function handleTraceNodeClick(nodeId: string) {
     <div class="property-panel-header">
       <span class="title">{{ selectedNode ? '节点配置' : '属性面板' }}</span>
       <div class="header-actions">
-        <!-- 调试模式下显示追踪切换 -->
-        <a-segmented
-          v-if="selectedNode && showTrace"
-          v-model:value="activeView"
-          :options="viewOptions"
-          size="small"
-          class="view-toggle"
-        />
         <a-button
           v-if="selectedNode"
           type="text"
@@ -361,10 +321,8 @@ function handleTraceNodeClick(nodeId: string) {
       class="property-content"
       data-testid="workflow-property-content"
     >
-      <!-- 配置视图 -->
-      <template v-if="activeView === 'config'">
-        <!-- 节点基本信息 -->
-        <div class="node-info-section">
+      <!-- 节点基本信息 -->
+      <div class="node-info-section">
           <div class="node-type-badge" :style="getNodeTypeBadgeStyle()">
             <component :is="getNodeIcon()" class="type-icon" />
             <span>{{ getNodeTypeLabel() }}</span>
@@ -416,19 +374,16 @@ function handleTraceNodeClick(nodeId: string) {
             :node-id="selectedNode.id"
             @update:config="handleConfigUpdate"
           />
-          <div v-else class="no-config">
+          <a-alert
+            v-if="formRenderError"
+            type="error"
+            show-icon
+            :message="`节点配置表单渲染失败: ${formRenderError}`"
+          />
+          <div v-else-if="!configFormComponent" class="no-config">
             <span>该节点无需额外配置</span>
           </div>
         </div>
-      </template>
-
-      <!-- 追踪视图 (调试模式) -->
-      <template v-else-if="activeView === 'trace'">
-        <NodeTracePanel
-          :trace="currentNodeTrace"
-          @node-click="handleTraceNodeClick"
-        />
-      </template>
     </div>
   </div>
 </template>
@@ -461,12 +416,6 @@ function handleTraceNodeClick(nodeId: string) {
     display: flex;
     align-items: center;
     gap: 8px;
-
-    .view-toggle {
-      :deep(.ant-segmented-item) {
-        min-width: 48px;
-      }
-    }
   }
 }
 

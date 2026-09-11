@@ -14,6 +14,7 @@ import {
   BookOutlined,
   BranchesOutlined,
   CodeOutlined,
+  CommentOutlined,
   EditOutlined,
   FileSearchOutlined,
   FileTextOutlined,
@@ -98,6 +99,7 @@ const iconComponents: Record<string, any> = {
   // 能力图标
   CodeOutlined,
   FileTextOutlined,
+  CommentOutlined,
   FileSearchOutlined,
   UnorderedListOutlined,
   // 外部系统图标
@@ -245,6 +247,9 @@ function handleDragStart(
 .node-collapse {
   flex: 1;
   min-height: 0; // 关键：确保内容可以滚动
+  // 兜底：展开内容超高时，把滚动容器钳制在可视区内（视口-编辑头-面板头），
+  // 避免 flex 高度链异常时滚动区被内容撑破、滚动条滚不到底部节点
+  max-height: calc(100vh - 112px);
   overflow-y: auto;
   background-color: #fff;
 

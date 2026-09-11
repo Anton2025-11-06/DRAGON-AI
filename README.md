@@ -233,7 +233,7 @@ python -m service.service_login.login        # 登录认证   :9044
 python -m service.service_system.system      # 系统管理   :9001
 python -m service.service_rag.rag            # RAG 知识库 :9002
 python -m service.service_workflow.workflow  # 工作流     :9003
-arq arq_tasks.worker_settings.WorkerSettings # arq worker（工作流执行，Redis db=1）
+python -m arq_tasks.run_workers -n 4    # 4 个 arq worker（工作流执行，Redis db=1）
 ```
 
 > 服务启动时自动向 Nacos 注册并拉取各自配置（数据源、Redis、模型路由等）。

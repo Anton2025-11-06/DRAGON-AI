@@ -380,6 +380,105 @@ function focusNode(nodeId: string) {
 }
 
 /**
+ * 美化布局：按依赖关系拓扑分层自动排列节点（同层垂直居中），供【适应】按钮一键整理画布
+ */
+function beautifyLayout() {
+  const nodeList = getNodes.value;
+  const edgeList = getEdges.value;
+  if (nodeList.length === 0) return;
+
+  // 统计入度与后继（自环忽略，避免死循环）
+  const indegree = new Map<string, number>();
+  const successors = new Map<string, string[]>();
+  nodeList.forEach((n) => indegree.set(n.id, 0));
+  edgeList.forEach((e) => {
+    if (e.source === e.target) return;
+    indegree.set(e.target, (indegree.get(e.target) || 0) + 1);
+    const list = successors.get(e.source) || [];
+    list.push(e.target);
+    successors.set(e.source, list);
+  });
+
+  // BFS 分层：入度为 0 的节点作为起点逐层展开
+  const levelMap = new Map<string, number>();
+  const queue = nodeList
+    .filter((n) => (indegree.get(n.id) || 0) === 0)
+    .map((n) => n.id);
+  queue.forEach((id) => levelMap.set(id, 0));
+  let level = 0;
+  while (queue.length) {
+    const size = queue.length;
+    for (let i = 0; i < size; i++) {
+      const id = queue.shift()!;
+      for (const next of successors.get(id) || []) {
+        if (!levelMap.has(next)) {
+          levelMap.set(next, level + 1);
+          queue.push(next);
+        }
+      }
+    }
+    level += 1;
+  }
+  // 环/孤岛兜底：未分层的节点追加到最新层
+  const maxLevel = nodeList.reduce(
+    (m, n) => Math.max(m, levelMap.get(n.id) ?? 0),
+    0,
+  );
+  nodeList.forEach((n) => {
+    if (!levelMap.has(n.id)) levelMap.set(n.id, maxLevel + 1);
+  });
+
+  // 收集每层节点，层内按当前 y 排序保持相对顺序，减少跳动
+  const layerMap = new Map<number, string[]>();
+  nodeList.forEach((n) => {
+    const lv = levelMap.get(n.id) ?? 0;
+    const arr = layerMap.get(lv) || [];
+    arr.push(n.id);
+    layerMap.set(lv, arr);
+  });
+  layerMap.forEach((ids) => {
+    ids.sort((a, b) => {
+      const na = nodeList.find((x) => x.id === a);
+      const nb = nodeList.find((x) => x.id === b);
+      return (na?.position?.y ?? 0) - (nb?.position?.y ?? 0);
+    });
+  });
+
+  // 布局参数：列距/行距/边距，节点尺寸优先取实际渲染尺寸
+  const NODE_W = 248;
+  const NODE_H = 148;
+  const GAP_X = 80;
+  const GAP_Y = 56;
+  const PAD = 48;
+
+  const levelIds = [...layerMap.keys()].sort((a, b) => a - b);
+  const posMap = new Map<string, { x: number; y: number }>();
+  let yCursor = PAD;
+  levelIds.forEach((lv) => {
+    const ids = layerMap.get(lv)!;
+    const layerH = ids.length * (NODE_H + GAP_Y) - GAP_Y;
+    ids.forEach((id, idx) => {
+      const n = nodeList.find((x) => x.id === id);
+      if (!n) return;
+      const w = n.measured?.width || NODE_W;
+      const h = n.measured?.height || NODE_H;
+      posMap.set(id, {
+        x: PAD + lv * (NODE_W + GAP_X) + (NODE_W - w) / 2,
+        y: yCursor + idx * (NODE_H + GAP_Y) + (NODE_H - h) / 2,
+      });
+    });
+    yCursor += layerH + GAP_Y;
+  });
+
+  // 写回节点位置（重建数组触发响应式更新）
+  nodes.value = nodes.value.map((n) => {
+    const p = posMap.get(n.id);
+    return p ? { ...n, position: { ...p } } : n;
+  });
+  workflowStore.setDirty(true);
+}
+
+/**
  * 批量设置节点折叠状态
  */
 function setAllNodesCollapsed(collapsed: boolean) {
@@ -418,6 +517,7 @@ defineExpose({
   removeEdges,
   updateNodeData,
   focusNode,
+  beautifyLayout,
   fitView,
   zoomIn,
   zoomOut,
@@ -506,14 +606,24 @@ defineExpose({
     stroke-width: 2;
   }
 
+  // 选中的连接线：绿色加粗显眼（未选中保持蓝色）
   :deep(.vue-flow__edge.selected .vue-flow__edge-path) {
-    stroke: #1890ff;
-    stroke-width: 3;
+    stroke: #52c41a;
+    stroke-width: 4;
+  }
+
+  // 箭头颜色跟随连接线状态（覆盖 markerEnd 内联样式）
+  :deep(.vue-flow__edge .vue-flow__arrowhead) {
+    fill: #5f95ff;
+  }
+
+  :deep(.vue-flow__edge.selected .vue-flow__arrowhead) {
+    fill: #52c41a !important;
   }
 
   :deep(.vue-flow__handle) {
-    width: 10px;
-    height: 10px;
+    width: 14px;
+    height: 14px;
     background-color: #d9d9d9;
     border: 1px solid #bfbfbf;
 

@@ -45,8 +45,8 @@ const statusText = computed(() => {
 const durationText = computed(() => {
   if (props.duration === undefined || props.status !== 'completed') return '';
   return props.duration < 1000
-    ? `${(props.duration / 1000).toFixed(3)}s`
-    : `${(props.duration / 1000).toFixed(2)}s`;
+    ? `${Math.round(props.duration)}ms`
+    : `${(props.duration / 1000).toFixed(1)}s`;
 });
 </script>
 

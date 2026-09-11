@@ -53,7 +53,7 @@
           <VariableInput
             v-model="assignment.transformExpression"
             :current-node-id="nodeId"
-            placeholder="例如: {{input.text}}.trim()"
+            :placeholder="'例如: {{nodes.xx.output}}.name 或 {{nodes.xx.output}}[0].name'"
             @change="handleChange"
           />
         </a-form-item>
@@ -119,7 +119,7 @@ function getValuePlaceholder(type: AssignmentType): string {
     return '例如: {{start.query}}';
   }
   if (type === 'EXPRESSION') {
-    return '表达式输入值，例如: {{input.text}}';
+    return '变量引用，例如: {{nodes.xx.output}}';
   }
   return '静态值，例如: hello 或 { "ok": true }';
 }

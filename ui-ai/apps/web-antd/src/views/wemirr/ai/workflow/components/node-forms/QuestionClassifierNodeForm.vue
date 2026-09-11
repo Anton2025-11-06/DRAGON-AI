@@ -122,7 +122,7 @@
         <a-textarea
           v-model:value="formData.customPromptTemplate"
           :rows="6"
-          placeholder="自定义分类提示词模板，使用 {{input}} 引用输入文本，{{categories}} 引用类别列表"
+          :placeholder="'自定义分类提示词模板，使用 {{input}} 引用输入文本，{{categories}} 引用类别列表'"
           @change="handleChange"
         />
         <div class="form-hint">

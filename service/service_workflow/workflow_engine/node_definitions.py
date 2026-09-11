@@ -229,6 +229,24 @@ def build_node_definitions() -> list[dict]:
             _field("groups", "聚合组", "AggregationGroupList", "array", False, []),
         ],
     ))
+    defs.append(_def(
+        "REPLY", "指定回复", "将引用参数的值或自定义文本作为回复内容输出", "control",
+        "CommentOutlined", "#2f54eb",
+        form_component="ReplyNodeForm",
+        required_fields=["replyType"],
+        output_variables=["output"],
+        fields=[
+            _field("replyType", "回复方式", "Select", "string", False, "TEXT",
+                   options=[("TEXT", "自定义文本"), ("VARIABLE", "引用参数")]),
+            _field("variableRef", "引用参数", "VariableSelect", "string", False, "",
+                   "", "引用上游节点输出的参数，回复其值（需选择「引用参数」方式）"),
+            _field("text", "回复内容", "Textarea", "string", False, "",
+                   "支持 {{节点ID.变量}} 引用"),
+            _field("outputVariable", "输出变量名", "Input", "string", False, "output"),
+        ],
+        default_config={"replyType": "TEXT", "text": "", "variableRef": "",
+                        "outputVariable": "output"},
+    ))
 
     # ---------- 数据 ----------
     defs.append(_def(
@@ -245,18 +263,16 @@ def build_node_definitions() -> list[dict]:
         ],
     ))
     defs.append(_def(
-        "CODE", "代码执行", "执行 Python 代码（受限沙箱）", "data", "CodeOutlined", "#531dab",
+        "CODE", "代码执行", "执行 Python 代码（import 导包 + 自动识别入口函数，返回任意值）", "data", "CodeOutlined", "#531dab",
         form_component="CodeNodeForm",
         required_fields=["code"],
-        output_variables=["main() 返回的每个变量"],
+        output_variables=["result"],
         fields=[
-            _field("language", "语言", "Select", "string", False, "PYTHON",
-                   options=[("PYTHON", "Python")]),
             _field("code", "代码", "CodeEditor", "string", True,
-                   "def main(**kwargs):\n    return {'output': ''}"),
-            _field("inputs", "输入变量", "CodeVariableList", "array", False, []),
+                   "import json\n\ndef main(**kwargs):\n    return 'hello'"),
+            _field("inputs", "参数", "CodeParameterList", "array", False, [],
+                   "配置方法入参：参数名 / 类型 / 是否必填 / 来源（引用参数或自定义值），代码中用 kwargs 接收"),
             _field("timeout", "超时(ms)", "InputNumber", "number", False, 10000),
-            _field("sandboxEnabled", "沙箱模式", "Switch", "boolean", False, True),
         ],
     ))
     defs.append(_def(
@@ -274,7 +290,7 @@ def build_node_definitions() -> list[dict]:
         ],
     ))
     defs.append(_def(
-        "DOC_EXTRACTOR", "文档提取", "从 PDF/Word/Excel 等文档提取文本", "data", "FileTextOutlined", "#c41d7f",
+        "DOC_EXTRACTOR", "文档提取", "从 PDF/Word/Excel/PPT/Markdown/HTML 等文档提取文本", "data", "FileTextOutlined", "#c41d7f",
         form_component="DocExtractorForm",
         required_fields=["fileVariable"],
         output_variables=["content", "metadata"],

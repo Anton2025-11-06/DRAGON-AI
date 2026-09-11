@@ -1,7 +1,7 @@
 <script lang="ts" setup name="VersionHistoryModal">
 /**
  * 工作流发布历史弹窗
- * 查看历史发布版本与时间；每个版本可「恢复此版本」（回滚并重新发布为新版本）
+ * 查看历史发布版本与时间；每个版本可「恢复此版本」（恢复为当前草稿，不自动发布）
  */
 import type { WorkflowVersionResp } from '#/api/ai-workflow/types';
 
@@ -48,12 +48,11 @@ async function loadVersions() {
   }
 }
 
-/** 恢复指定版本：回滚并重新发布为新版本，随后父级刷新展示 */
+/** 恢复指定版本：目标版本快照覆盖当前草稿（不自动发布，发布由用户手动触发），随后父级刷新展示 */
 function handleRestore(record: WorkflowVersionResp) {
   Modal.confirm({
     title: `恢复版本 v${record.version}`,
-    content:
-      `将把 v${record.version} 的内容恢复为当前工作流，并立即发布为最新版本（历史版本保留）。确定继续吗？`,
+    content: `将把 v${record.version} 的内容恢复为当前工作流。确定继续吗？`,
     okText: '恢复',
     okType: 'danger',
     cancelText: '取消',
@@ -61,7 +60,7 @@ function handleRestore(record: WorkflowVersionResp) {
       restoring.value = true;
       try {
         await rollbackWorkflow(props.workflowId, record.version);
-        message.success(`已恢复 v${record.version}，并发布为最新版本`);
+        message.success(`已恢复 v${record.version}（未发布，如需发布请点击「发布」）`);
         emit('update:open', false);
         emit('restored', record.version);
       } catch {

@@ -169,7 +169,7 @@ onMounted(() => {
     <a-alert type="info" show-icon style="margin-bottom: 16px">
       <template #message>
         第三方系统可通过 API Key 执行此工作流（需先发布），请求头添加
-        <code>X-Workflow-Token: {{ newApiKey }}</code>，鉴权与限流由网关统一执行；
+        <code style="word-break: break-all">X-Workflow-Token: {{ newApiKey }}</code>，鉴权与限流由网关统一执行；
         限流按 API Key 的 QPS 限制，0 表示不限制。
       </template>
     </a-alert>
@@ -275,6 +275,7 @@ onMounted(() => {
       title="API Key 创建成功"
       :footer="null"
       :closable="true"
+      :width="640"
     >
       <a-alert
         type="info"
@@ -322,6 +323,7 @@ curl -N {{ apiBaseUrl }}/workflow-executions/&lt;executionId&gt;/subscribe
 
   .key-display {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: center;
     padding: 12px;
@@ -330,6 +332,7 @@ curl -N {{ apiBaseUrl }}/workflow-executions/&lt;executionId&gt;/subscribe
 
     .key-value {
       flex: 1;
+      min-width: 0;
       font-size: 13px;
       word-break: break-all;
     }

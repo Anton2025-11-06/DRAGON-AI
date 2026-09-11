@@ -99,6 +99,7 @@ import {
   ApartmentOutlined,
   ApiOutlined,
   CodeOutlined,
+  CommentOutlined,
   DatabaseOutlined,
 } from '@ant-design/icons-vue';
 
@@ -191,6 +192,7 @@ const iconComponents: Record<string, Component> = {
   QUESTION_CLASSIFIER: BranchesOutlined,
   PARAMETER_EXTRACTOR: ApiOutlined,
   TEMPLATE: CodeOutlined,
+  REPLY: CommentOutlined,
   DOC_EXTRACTOR: BookOutlined,
   LIST_OPERATOR: DatabaseOutlined,
 };
@@ -414,15 +416,12 @@ function getNodeOutputVariables(
       break;
 
     case 'CODE':
-      if (config.outputs && Array.isArray(config.outputs)) {
-        config.outputs.forEach((output: any) => {
-          variables.push({
-            name: output.name,
-            type: output.type || 'string',
-            description: output.description,
-          });
-        });
-      }
+      // 代码节点输出固定为 { result: <返回值> }（参照 MaxKB ToolExecutor）
+      variables.push({
+        name: 'result',
+        type: 'object',
+        description: '代码执行返回值（类型不限）',
+      });
       break;
 
     case 'HTTP_REQUEST':
@@ -484,6 +483,14 @@ function getNodeOutputVariables(
         name: config.outputVariable || 'output',
         type: 'string',
         description: '模板渲染结果',
+      });
+      break;
+
+    case 'REPLY':
+      variables.push({
+        name: config.outputVariable || 'output',
+        type: 'string',
+        description: '回复内容',
       });
       break;
 

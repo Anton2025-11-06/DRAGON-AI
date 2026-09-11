@@ -13,7 +13,6 @@ import {
   EditOutlined,
   HistoryOutlined,
   PlayCircleOutlined,
-  SendOutlined,
 } from '@ant-design/icons-vue';
 import { Tag, Tooltip } from 'ant-design-vue';
 
@@ -26,7 +25,6 @@ defineProps<Props>();
 const emit = defineEmits<{
   (e: 'edit', item: WorkflowPageResp): void;
   (e: 'remove', item: WorkflowPageResp): void;
-  (e: 'publish', item: WorkflowPageResp): void;
   (e: 'copy', item: WorkflowPageResp): void;
   (e: 'history', item: WorkflowPageResp): void;
   (e: 'execute', item: WorkflowPageResp): void;
@@ -109,16 +107,7 @@ function formatTime(time: string) {
             <template #icon><PlayCircleOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip v-if="item.status === 'DRAFT'" title="发布">
-          <a-button
-            data-testid="workflow-card-publish"
-            type="text"
-            size="small"
-            @click="emit('publish', item)"
-          >
-            <template #icon><SendOutlined /></template>
-          </a-button>
-        </Tooltip>
+        <!-- 发布已迁移至工作流编辑页（保存按钮右侧），需求：列表页不再提供发布入口 -->
         <Tooltip title="复制">
           <a-button
             data-testid="workflow-card-copy"

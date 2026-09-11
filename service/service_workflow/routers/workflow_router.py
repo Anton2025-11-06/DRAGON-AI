@@ -154,10 +154,9 @@ async def workflow_version_detail(request: Request, workflow_id: int, version: i
 @has_permission("workflow:workflow:publish")
 async def rollback_workflow(request: Request, workflow_id: int, version: int):
     try:
-        new_version = await WorkflowService.rollback(
+        await WorkflowService.rollback(
             workflow_id, version, user_id=await _user_id(request))
-        return ApiResponse.success(data={"version": new_version},
-                                   message=f"已回滚并发布为 v{new_version}")
+        return ApiResponse.success(message=f"已恢复 v{version}，发布请手动触发")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 

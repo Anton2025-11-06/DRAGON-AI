@@ -6,9 +6,6 @@
 import type {
   DocExtractorConfig,
   DocumentType,
-  OcrConfig,
-  OcrEngine,
-  PaginationConfig,
 } from '#/api/ai-workflow/types';
 
 import { reactive, ref, watch } from 'vue';
@@ -41,23 +38,6 @@ const emit = defineEmits<{
 // 文件大小（MB）
 const maxFileSizeMB = ref<number | undefined>(10);
 
-// 默认 OCR 配置
-const defaultOcrConfig: OcrConfig = {
-  enabled: false,
-  language: 'chi_sim+eng',
-  engine: 'PADDLE_OCR' as OcrEngine,
-  preprocessImage: true,
-  dpi: 300,
-};
-
-// 默认分页配置
-const defaultPaginationConfig: PaginationConfig = {
-  splitByPage: false,
-  startPage: undefined,
-  endPage: undefined,
-  pageSeparator: '\n---\n',
-};
-
 // 内部表单类型，确保嵌套对象始终存在
 interface FormData {
   fileVariable: string;
@@ -66,8 +46,6 @@ interface FormData {
   extractMetadata: boolean;
   preserveFormatting: boolean;
   maxFileSize: number;
-  ocrConfig: OcrConfig;
-  paginationConfig: PaginationConfig;
 }
 
 // 表单数据
@@ -78,8 +56,6 @@ const formData = reactive<FormData>({
   extractMetadata: false,
   preserveFormatting: false,
   maxFileSize: 10 * 1024 * 1024, // 10MB
-  ocrConfig: { ...defaultOcrConfig },
-  paginationConfig: { ...defaultPaginationConfig },
 });
 
 // 监听配置变化
@@ -98,11 +74,6 @@ watch(
     formData.extractMetadata = config.extractMetadata ?? false;
     formData.preserveFormatting = config.preserveFormatting ?? false;
     formData.maxFileSize = config.maxFileSize || 10 * 1024 * 1024;
-    formData.ocrConfig = { ...defaultOcrConfig, ...config.ocrConfig };
-    formData.paginationConfig = {
-      ...defaultPaginationConfig,
-      ...config.paginationConfig,
-    };
     // 转换为 MB
     maxFileSizeMB.value = Math.round(formData.maxFileSize / (1024 * 1024));
   },
@@ -218,130 +189,17 @@ function handleChange() {
       <div class="form-hint">限制可处理的最大文件大小，默认 10MB</div>
     </a-form-item>
 
-    <!-- OCR 配置 -->
-    <a-collapse ghost>
-      <a-collapse-panel key="ocr" header="OCR 配置（图片/扫描文档）">
-        <a-form-item>
-          <a-checkbox
-            v-model:checked="formData.ocrConfig.enabled"
-            @change="handleChange"
-          >
-            启用 OCR
-          </a-checkbox>
-          <div class="form-hint">对图片和扫描 PDF 进行文字识别</div>
-        </a-form-item>
-
-        <template v-if="formData.ocrConfig.enabled">
-          <a-form-item label="OCR 引擎">
-            <a-select
-              v-model:value="formData.ocrConfig.engine"
-              @change="handleChange"
-            >
-              <a-select-option value="TESSERACT">
-                Tesseract (开源)
-              </a-select-option>
-              <a-select-option value="PADDLE_OCR">
-                PaddleOCR (中文优化)
-              </a-select-option>
-              <a-select-option value="CLOUD_OCR">云端 OCR</a-select-option>
-            </a-select>
-          </a-form-item>
-
-          <a-form-item label="识别语言">
-            <a-select
-              v-model:value="formData.ocrConfig.language"
-              @change="handleChange"
-            >
-              <a-select-option value="chi_sim">简体中文</a-select-option>
-              <a-select-option value="chi_tra">繁体中文</a-select-option>
-              <a-select-option value="eng">英文</a-select-option>
-              <a-select-option value="chi_sim+eng">中英混合</a-select-option>
-              <a-select-option value="jpn">日文</a-select-option>
-              <a-select-option value="kor">韩文</a-select-option>
-            </a-select>
-          </a-form-item>
-
-          <a-form-item>
-            <a-checkbox
-              v-model:checked="formData.ocrConfig.preprocessImage"
-              @change="handleChange"
-            >
-              图像预处理
-            </a-checkbox>
-            <div class="form-hint">
-              对图像进行去噪、二值化等预处理以提高识别率
-            </div>
-          </a-form-item>
-
-          <a-form-item label="DPI 设置">
-            <a-input-number
-              v-model:value="formData.ocrConfig.dpi"
-              :min="72"
-              :max="600"
-              placeholder="300"
-              style="width: 100%"
-              @change="handleChange"
-            />
-            <div class="form-hint">
-              PDF 转图像时的 DPI，越高识别越准但速度越慢
-            </div>
-          </a-form-item>
-        </template>
-      </a-collapse-panel>
-
-      <a-collapse-panel key="pagination" header="分页配置">
-        <a-form-item>
-          <a-checkbox
-            v-model:checked="formData.paginationConfig.splitByPage"
-            @change="handleChange"
-          >
-            按页分割
-          </a-checkbox>
-          <div class="form-hint">将文档按页分割为数组输出</div>
-        </a-form-item>
-
-        <a-form-item label="页码范围">
-          <a-space>
-            <a-input-number
-              v-model:value="formData.paginationConfig.startPage"
-              :min="1"
-              placeholder="起始页"
-              style="width: 100px"
-              @change="handleChange"
-            />
-            <span>至</span>
-            <a-input-number
-              v-model:value="formData.paginationConfig.endPage"
-              :min="1"
-              placeholder="结束页"
-              style="width: 100px"
-              @change="handleChange"
-            />
-          </a-space>
-          <div class="form-hint">留空表示提取所有页面</div>
-        </a-form-item>
-
-        <a-form-item label="页面分隔符">
-          <a-input
-            v-model:value="formData.paginationConfig.pageSeparator"
-            placeholder="\n---\n"
-            @change="handleChange"
-          />
-          <div class="form-hint">不按页分割时，页面之间的分隔符</div>
-        </a-form-item>
-      </a-collapse-panel>
-    </a-collapse>
-
+    <!-- OCR 配置与分页配置已移除：文件提取全部由后端 Python 生态库解析，不做 OCR/分页 -->
     <!-- 支持的文档类型说明 -->
     <a-alert type="info" show-icon class="doc-type-info">
       <template #message>文档提取说明</template>
       <template #description>
         <ul class="info-list">
-          <li>PDF: 支持文本 PDF 和扫描 PDF（需启用 OCR）</li>
-          <li>Word: 支持 .doc 和 .docx 格式</li>
-          <li>Excel: 提取所有工作表的内容</li>
-          <li>PPT: 提取幻灯片中的文本内容</li>
-          <li>文本文件: 自动检测编码</li>
+          <li>PDF: 支持文本 PDF</li>
+          <li>Word: 支持 .docx 和 .doc（.doc 需服务器安装 LibreOffice）</li>
+          <li>Excel: 支持 .xlsx 和 .xls</li>
+          <li>PPT: 支持 .pptx 和 .ppt（.ppt 需服务器安装 LibreOffice）</li>
+          <li>TXT / CSV / Markdown / HTML: 直接读取</li>
         </ul>
       </template>
     </a-alert>

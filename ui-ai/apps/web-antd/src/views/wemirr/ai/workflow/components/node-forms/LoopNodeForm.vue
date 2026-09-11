@@ -14,7 +14,7 @@
     <a-form-item label="退出条件表达式">
       <a-input
         v-model:value="formData.exitCondition"
-        placeholder="如: {{result}} == 'done' 或 {{count}} >= 10"
+        :placeholder="'如: {{result}} == \'done\' 或 {{count}} >= 10'"
         @change="handleChange"
       />
       <div class="form-hint">当表达式为 true 时退出循环</div>

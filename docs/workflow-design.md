@@ -103,7 +103,7 @@ DRAFT ──publish──▶ PUBLISHED
 3. **执行取图规则**（workflow_execution_service.py:112-124）：
    - `trigger_type == "DEBUG"` → 跑**草稿**
    - `API/AGENT` → 跑 **current_version 快照**（草稿怎么改都不影响线上）
-4. **回滚**（rollback, workflow_service.py:214）：目标版本快照**覆盖草稿 → 立即重新发布为新版本**。历史版本不可变，所以回滚后 version 是递增的（如 v1,v2 → 回滚 v1 → 变 v3），**不是版本号回退**。
+4. **回滚**（rollback, workflow_service.py:214）：目标版本快照**覆盖草稿**，**不自动发布**（是否对外开放由用户手动点「发布」决定）。历史版本不可变，每次发布 version 递增（如 v1,v2 → 回滚 v1 后手动发布 → 变 v3），**不是版本号回退**。
 5. **删除**：级联删 version + apikey（注意：**不删执行记录**——执行历史保留做审计）。
 6. **懒加载初始化**（`ensure_initialized`, workflow_service.py:507）：内置模板种子 + 默认模型 Provider 注入，以 FastAPI 依赖挂在所有工作流路由上（`__init__.py:36-39`），DB 未就绪时自愈重试。
 

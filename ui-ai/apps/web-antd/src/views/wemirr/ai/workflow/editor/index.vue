@@ -27,7 +27,7 @@ import {
   SaveOutlined,
   SendOutlined,
   StopOutlined,
-  VersionOutlined,
+  TagsOutlined,
   WarningOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
@@ -211,25 +211,13 @@ async function loadWorkflow() {
     workflowName.value = workflowStore.currentWorkflow?.name || '';
     workflowDescription.value =
       workflowStore.currentWorkflow?.description || '';
-    openDebugPanelFromRoute();
+    // 同步草稿来源版本（发布后即最新版本；恢复动作在 handleVersionRestored 中再覆盖）
+    displayVersion.value = workflowStore.currentWorkflow?.currentVersion || 0;
   } catch {
     message.error('加载工作流失败');
   } finally {
     loading.value = false;
   }
-}
-
-function shouldOpenDebugFromRoute() {
-  const execute = route.query.execute;
-  return execute === 'true' || execute === '1';
-}
-
-function openDebugPanelFromRoute() {
-  if (!workflowId.value || !shouldOpenDebugFromRoute()) return;
-
-  workflowStore.isDebugMode = true;
-  showDebugPanel.value = true;
-  debugStore.setNodeNameResolver(getNodeFriendlyName);
 }
 
 /**
@@ -327,7 +315,6 @@ async function handleGraphReady() {
   if (pendingWorkflowId.value) {
     await loadWorkflow();
     pendingWorkflowId.value = null;
-    openDebugPanelFromRoute();
   } else if (isCreateMode.value) {
     // 新建模式，创建空工作流
     workflowStore.createNewWorkflow('新建工作流');
@@ -384,10 +371,11 @@ function handleZoomOut() {
 }
 
 /**
- * 适应画布
+ * 适应画布：先按依赖拓扑自动美化布局，再缩放至全图
  */
 function handleZoomToFit() {
-  canvasRef.value?.fitView();
+  canvasRef.value?.beautifyLayout();
+  setTimeout(() => canvasRef.value?.fitView({ padding: 0.2 }), 60);
 }
 
 /**
@@ -517,7 +505,7 @@ function handlePublish() {
   }
   Modal.confirm({
     title: '确认发布',
-    content: '发布后生成版本快照，正式执行与第三方 API 将使用最新版本。',
+    content: '发布后生成版本快照，第三方 API 将使用最新版本。',
     okText: '发布',
     cancelText: '取消',
     onOk: async () => {
@@ -550,15 +538,21 @@ function startPublishCountdown() {
 }
 
 /**
- * 发布历史：恢复版本成功后重新加载，页面显示该版本的工作流
+ * 发布历史：恢复版本成功后重新加载，页面显示该版本的工作流；
+ * 并记录草稿来源版本（displayVersion），使版本历史中「当前版本」标记指向恢复后的版本
  */
-async function handleVersionRestored() {
+async function handleVersionRestored(version: number) {
   await loadWorkflow();
+  // loadWorkflow 会把 displayVersion 同步为已发布版本号，恢复未发布需覆盖为来源版本
+  displayVersion.value = version;
   message.success('已切换到恢复后的版本');
 }
 
 // 画布是否已就绪
 const canvasReady = ref(false);
+
+// 草稿当前对应的来源版本（初始=已发布版本；恢复某版本后指向该版本，用于版本历史「当前版本」标记）
+const displayVersion = ref(0);
 
 // 待加载的工作流ID（画布就绪后加载）
 const pendingWorkflowId = ref<string | null>(null);
@@ -584,7 +578,6 @@ watch(
       // 编辑模式：如果画布已就绪，直接加载；否则标记待加载
       if (canvasReady.value) {
         await loadWorkflow();
-        openDebugPanelFromRoute();
       } else {
         pendingWorkflowId.value = String(newId);
       }
@@ -701,7 +694,7 @@ onBeforeUnmount(() => {
                 <template #icon><ZoomOutOutlined /></template>
               </a-button>
             </a-tooltip>
-            <a-tooltip title="适应画布">
+            <a-tooltip title="美化布局并适应画布（按依赖自动排列节点）">
               <a-button type="text" @click="handleZoomToFit"> 适应 </a-button>
             </a-tooltip>
             <a-divider type="vertical" />
@@ -771,10 +764,7 @@ onBeforeUnmount(() => {
             </template>
 
             <a-tooltip title="调试模式">
-              <a-button
-                :type="workflowStore.isDebugMode ? 'primary' : 'default'"
-                @click="toggleDebugMode"
-              >
+              <a-button type="primary" @click="toggleDebugMode">
                 <template #icon><BugOutlined /></template>
                 调试
                 <Tag
@@ -818,7 +808,7 @@ onBeforeUnmount(() => {
                 :disabled="!workflowId"
                 @click="showVersionHistoryModal = true"
               >
-                <template #icon><VersionOutlined /></template>
+                <template #icon><TagsOutlined /></template>
               </a-button>
             </a-tooltip>
             <a-button type="primary" :loading="saving" @click="handleSave">
@@ -861,8 +851,7 @@ onBeforeUnmount(() => {
         <!-- 右侧属性面板 -->
         <div class="right-panel">
           <PropertyPanel
-            :selected-node="selectedNode"
-            :show-trace="workflowStore.isDebugMode"
+            :selected-node="workflowStore.selectedNode"
             @delete-node="handleDeleteNode"
             @update-config="handleUpdateConfig"
             @update-label="handleUpdateLabel"
@@ -928,7 +917,7 @@ onBeforeUnmount(() => {
       <VersionHistoryModal
         v-model:open="showVersionHistoryModal"
         :workflow-id="workflowId || ''"
-        :current-version="currentWorkflow?.currentVersion"
+        :current-version="displayVersion"
         @restored="handleVersionRestored"
       />
 
@@ -1032,6 +1021,7 @@ onBeforeUnmount(() => {
   flex: 0 0 260px;
   display: flex;
   flex-direction: column;
+  min-height: 0; // 防止内容超高时撑破高度链，导致面板滚动区异常
   overflow: hidden;
   background-color: #fff;
   border-right: 1px solid #e8e8e8;

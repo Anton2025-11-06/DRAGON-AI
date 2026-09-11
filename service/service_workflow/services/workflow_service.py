@@ -5,7 +5,7 @@
 - tb_workflow.graph 始终是草稿区；
 - publish：校验 ERROR 清零 → 版本号+1 → 快照写 tb_workflow_version → 主表 current_version 更新；
 - 执行（非 DEBUG）：只读 current_version 对应快照，与草稿互不干扰；
-- 回滚：目标版本快照复制为草稿 + 立即发布为新版本（历史不可变）。
+- 回滚：目标版本快照复制为草稿，不自动发布（发布由用户手动触发；历史不可变）。
 """
 from __future__ import annotations
 
@@ -213,7 +213,7 @@ class WorkflowService:
 
     @staticmethod
     async def rollback(workflow_id: int, version: int, user_id: int = 0) -> int:
-        """回滚：目标版本快照覆盖草稿 → 重新发布为新版本。"""
+        """回滚：目标版本快照覆盖草稿，不自动发布（发布由用户手动触发）。"""
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             v = (await session.execute(
@@ -225,10 +225,8 @@ class WorkflowService:
             r.input_variables = v.input_variables
             r.output_variables = v.output_variables
             await session.commit()
-        # 覆盖草稿后立即发布为最新版本
-        result = await WorkflowService.publish(
-            workflow_id, change_log=f"回滚自版本 v{version}", user_id=user_id)
-        return result["version"]
+        # 仅覆盖草稿，不自动发布：是否对外生效由用户在编辑器手动点「发布」决定
+        return version
 
     @staticmethod
     async def get_snapshot(workflow_id: int, version: Optional[int] = None) -> Optional[dict]:

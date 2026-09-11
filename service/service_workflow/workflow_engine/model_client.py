@@ -13,13 +13,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional, Protocol
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 
 from common.common_constants.model_constant import (
-    MODEL_CATEGORY_TEXT_GEN,
     MODEL_ENDPOINT_CHAT,
     MODEL_ENDPOINT_DEFAULT_CHAT,
     MODEL_ENDPOINT_DEFAULT_EMBEDDING,
@@ -28,81 +26,15 @@ from common.common_constants.model_constant import (
     MODEL_ENDPOINT_RERANK,
 )
 from common.common_log.log_init import log
-
-# ==================== 数据结构 ====================
-
-
-@dataclass
-class ModelConfig:
-    model_id: int
-    name: str = ""
-    category: str = MODEL_CATEGORY_TEXT_GEN
-    provider: str = ""
-    model_name: str = ""
-    base_url: str = ""
-    api_key: str = ""
-    is_direct: int = 1
-    suffixes: list = field(default_factory=list)
-    # 节点配置所选接口后缀（非直连时优先用它拼接；None 则自动匹配 suffixes）
-    use_suffix: Optional[str] = None
-    model_params: dict = field(default_factory=dict)
-    status: int = 1
-
-    def model_url(self) -> str:
-        """对话接口地址（LLM/分类/参数提取节点）。
-
-        直连：base_url 已含完整路径；非直连优先节点配置后缀 use_suffix，
-        未配置时在 suffixes 中自动匹配对话后缀，再无匹配用默认路径兜底。
-        """
-        if self.is_direct == 1:
-            return self.base_url
-        if self.use_suffix:
-            return self.base_url.rstrip("/") + self.use_suffix
-
-
-
-@dataclass
-class ChatMessage:
-    role: str  # system / user / assistant / tool
-    content: Any  # str 或多模态数组
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[list] = None
-
-    def to_openai(self) -> dict:
-        msg: dict[str, Any] = {"role": self.role, "content": self.content}
-        if self.name:
-            msg["name"] = self.name
-        if self.tool_call_id:
-            msg["tool_call_id"] = self.tool_call_id
-        if self.tool_calls:
-            msg["tool_calls"] = self.tool_calls
-        return msg
-
-
-@dataclass
-class StreamChunk:
-    content: str = ""
-    reasoning_content: str = ""
-    finish_reason: Optional[str] = None
-    usage: Optional[dict] = None
-    raw: Optional[dict] = None
-
-
-@dataclass
-class InvokeResult:
-    content: str = ""
-    reasoning_content: str = ""
-    usage: dict = field(default_factory=dict)
-    raw: dict = field(default_factory=dict)
-
-
-class ModelNotFoundError(Exception):
-    pass
-
-
-class ModelInvokeError(Exception):
-    pass
+# 数据结构公共定义（common 层，直连/非直连双路由共用；此处 re-export 保持历史 import 兼容）
+from common.common_model.model_types import (
+    ChatMessage,
+    InvokeResult,
+    ModelConfig,
+    ModelInvokeError,
+    ModelNotFoundError,
+    StreamChunk,
+)
 
 
 # ==================== 配置源协议 ====================

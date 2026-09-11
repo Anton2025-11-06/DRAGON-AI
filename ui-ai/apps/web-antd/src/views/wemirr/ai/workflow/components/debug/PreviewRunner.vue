@@ -159,9 +159,17 @@ async function handleRun() {
     // 获取启用的检查点ID列表
     const breakpointIds = debugStore.enabledBreakpointIds;
 
+    // 过滤空值字段：未填写（空串/null/undefined）的字段不传，
+    // 交给后端 START 节点用字段默认值兜底（否则 {query: ""} 会覆盖默认值）
+    const inputs = Object.fromEntries(
+      Object.entries(inputValues.value).filter(
+        ([, v]) => v !== '' && v !== null && v !== undefined,
+      ),
+    );
+
     // 调用异步执行 API
     const executionId = await executeWorkflowAsync(props.workflowId, {
-      inputs: inputValues.value,
+      inputs,
       breakpoints: breakpointIds,
     });
 

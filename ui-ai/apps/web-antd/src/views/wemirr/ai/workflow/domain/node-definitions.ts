@@ -16,6 +16,7 @@ export const ALL_NODE_TYPES = [
   'PARALLEL',
   'CODE',
   'TEMPLATE',
+  'REPLY',
   'DOC_EXTRACTOR',
   'LIST_OPERATOR',
   'HTTP_REQUEST',

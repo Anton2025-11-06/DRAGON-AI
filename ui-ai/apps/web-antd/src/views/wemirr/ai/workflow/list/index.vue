@@ -19,7 +19,6 @@ import {
   copyWorkflow,
   createWorkflowFromTemplate,
   deleteWorkflow,
-  publishWorkflow,
 } from '#/api/ai-workflow';
 
 import TemplateSelectModal from '../templates/components/TemplateSelectModal.vue';
@@ -129,21 +128,6 @@ function handleRemove(item: WorkflowPageResp) {
   });
 }
 
-/** 发布工作流 */
-async function handlePublish(item: WorkflowPageResp) {
-  Modal.confirm({
-    title: '确认发布',
-    content: `确定要发布工作流「${item.name}」吗？发布后可以被执行。`,
-    okText: '发布',
-    cancelText: '取消',
-    onOk: async () => {
-      await publishWorkflow(item.id);
-      message.success('发布成功');
-      await crudExpose.doRefresh();
-    },
-  });
-}
-
 /** 打开复制对话框 */
 function handleCopy(item: WorkflowPageResp) {
   copyingWorkflow.value = item;
@@ -171,13 +155,13 @@ function handleHistory(item: WorkflowPageResp) {
   router.push(`/agent/workflow/history/${item.id}`);
 }
 
-/** 执行工作流（未发布时提示先发布，需求 2.1） */
+/** 执行工作流（未发布时提示进入编辑页发布，需求 2.1；进入后不自动弹调试面板） */
 function handleExecute(item: WorkflowPageResp) {
   if (item.status !== 'PUBLISHED') {
-    message.warning(`工作流「${item.name}」尚未发布，请先发布后再执行`);
+    message.warning(`工作流「${item.name}」尚未发布，请进入编辑页发布后再执行`);
     return;
   }
-  router.push(`/agent/workflow/editor/${item.id}?execute=true`);
+  router.push(`/agent/workflow/editor/${item.id}`);
 }
 
 /** 打开 API 访问抽屉（需求 4.2） */
@@ -219,7 +203,6 @@ function handleTemplateSaved() {
             :item="item"
             @edit="handleEdit"
             @remove="handleRemove"
-            @publish="handlePublish"
             @copy="handleCopy"
             @history="handleHistory"
             @execute="handleExecute"

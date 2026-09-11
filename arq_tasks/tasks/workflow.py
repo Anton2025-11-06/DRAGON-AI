@@ -41,10 +41,13 @@ async def bootstrap(ctx: dict) -> None:
     if _BOOTSTRAPPED:
         return
 
-    # 0. 清理同 hostname:pid 的旧健康 key 残骸(pid 复用场景:上次未优雅退出的
-    # 节点 key 可能仍未过期,启动即 DEL 兜底,避免监控端误判为存活节点)
+    # 0. 清理本 worker(hostname:pid)残留的旧健康 key(pid 复用场景:上次未优雅退出的
+    # 节点 key 可能仍未过期,启动即 DEL 兜底,避免监控端误判为存活节点)。
+    # 延迟导入 WorkerSettings:worker_settings 先于本函数被 arq 加载,此时无循环引用;
+    # ctx 不含 queue_name(arq 0.28 只在 ctx 注入 redis),队列名以 WorkerSettings 为准。
+    from arq_tasks.worker_settings import WorkerSettings
     try:
-        await ctx["redis"].delete(worker_health_key(os.environ.get("ARQ_QUEUE", "workflow")))
+        await ctx["redis"].delete(worker_health_key(WorkerSettings.queue_name))
     except Exception as e:  # noqa: BLE001
         log.warning("clean stale worker health key failed: {}", e)
 
@@ -89,7 +92,7 @@ async def bootstrap(ctx: dict) -> None:
     )
     httpx_pool.init()
 
-    log.info("arq worker bootstrap done, queue={}", ctx.get("queue_name", "workflow"))
+    log.info("arq worker bootstrap done, queue={}", WorkerSettings.queue_name)
     _BOOTSTRAPPED = True
 
 

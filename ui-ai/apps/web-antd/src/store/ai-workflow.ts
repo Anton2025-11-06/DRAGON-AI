@@ -55,6 +55,7 @@ export interface VueFlowCanvasRef {
   zoomOut: () => void;
   setAllNodesCollapsed: (collapsed: boolean) => void;
   focusNode: (nodeId: string) => void;
+  beautifyLayout: () => void;
   getNodes: () => any[];
   getEdges: () => any[];
 }
@@ -190,7 +191,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         nodeState.output = data.output;
         nodeState.duration = data.duration;
       }
-      highlightNode(data.nodeId, 'completed');
+      highlightNode(data.nodeId, 'completed', data.duration);
     },
     onNodeError: (data) => {
       if (!executionState.value) return;
@@ -998,11 +999,12 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
   }
 
   /**
-   * 高亮节点（更新执行状态）
+   * 高亮节点（更新执行状态与耗时，completed 时展示耗时）
    */
   function highlightNode(
     nodeId: string,
     status: 'completed' | 'failed' | 'paused' | 'running',
+    duration?: number | null,
   ) {
     if (!canvasRef.value) return;
 
@@ -1014,6 +1016,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
     };
     canvasRef.value.updateNodeData(nodeId, {
       executionStatus: statusMap[status] || null,
+      executionDuration: duration ?? null,
     });
   }
 

@@ -168,30 +168,32 @@ watch(
 
 /**
  * 初始化默认值
+ * 空值判断：undefined/null/空串 均视为未填写，此时才用字段默认值预填
+ * （v-model 挂载时会先把空串写入 formValues，若只判 undefined 会导致默认值不生效）
  */
 function initDefaultValues(fields: InputField[]) {
   fields.forEach((field) => {
+    const current = formValues.value[field.name];
+    const isEmpty = current === undefined || current === null || current === '';
+
     // 如果当前值为空且有默认值，则设置默认值
-    if (
-      formValues.value[field.name] === undefined &&
-      field.defaultValue !== undefined
-    ) {
+    if (isEmpty && field.defaultValue !== undefined) {
       formValues.value[field.name] = field.defaultValue;
     }
 
-    // 为特定类型设置初始值
-    if (formValues.value[field.name] === undefined) {
-      switch (field.type) {
-        case 'CHECKBOX': {
-          formValues.value[field.name] = false;
-          break;
-        }
-        case 'FILE_LIST':
-        case 'SINGLE_FILE': {
-          formValues.value[field.name] = [];
-          break;
-        }
-      }
+    // 为特定类型设置初始值（重新读取，避免默认值被类型初始值覆盖）
+    const afterDefault = formValues.value[field.name];
+    if (
+      (afterDefault === undefined || afterDefault === null) &&
+      field.type === 'CHECKBOX'
+    ) {
+      formValues.value[field.name] = false;
+    }
+    if (
+      (afterDefault === undefined || afterDefault === null) &&
+      (field.type === 'FILE_LIST' || field.type === 'SINGLE_FILE')
+    ) {
+      formValues.value[field.name] = [];
     }
   });
 }

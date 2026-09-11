@@ -32,6 +32,7 @@ export type NodeType =
   | 'QUESTION_CLASSIFIER' // 分类路由 Agent
   | 'START' // 用户输入
   | 'TEMPLATE' // 模板转换
+  | 'REPLY' // 指定回复
   | 'TOOL' // 工具
   // 外部系统节点
   | 'VARIABLE_AGGREGATOR' // 变量聚合
@@ -1170,59 +1171,59 @@ export interface VariableAggregatorConfig {
 }
 
 // ==================== CODE 节点配置 ====================
-// 同步自: com.wemirr.platform.ai.core.workflow.config.node.CodeNodeConfig
+// 参照 MaxKB ToolExecutor（apps/common/utils/tool_code.py）：
+// 仅 Python；方法名可自定义；支持 import 导包；返回类型由方法定义决定；
+// 节点输出统一包装为 { result: <返回值> }，下游用 {{nodeId.result}} 接收。
 
 /**
- * 代码语言枚举
+ * 代码参数类型枚举
  */
-export type CodeLanguage = 'JAVASCRIPT' | 'PYTHON';
+export type CodeParameterType =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'array'
+  | 'object';
 
 /**
- * 代码输入变量定义
+ * 代码参数来源枚举
+ */
+export type CodeInputSource = 'REFERENCE' | 'CONSTANT';
+
+/**
+ * 代码输入参数定义
+ * 支持：参数名 / 参数类型 / 是否必填 / 参数来源（引用参数或自定义值）
  */
 export interface CodeInputVariable {
-  /** 变量名（在代码中使用） */
+  /** 前端拖拽/渲染用稳定 key（不持久化语义） */
+  id?: string;
+  /** 参数名（在代码方法中使用） */
   name: string;
-  /** 源变量引用 (支持格式: {{nodeName.variableName}}) */
+  /** 参数类型 */
+  type?: CodeParameterType;
+  /** 是否必填 */
+  required?: boolean;
+  /** 参数来源：REFERENCE 引用参数 / CONSTANT 自定义值 */
+  sourceType?: CodeInputSource;
+  /** 源变量引用 (sourceType=REFERENCE, 支持格式: {{nodeName.variableName}}) */
   sourceVariable?: string;
-  /** 变量类型 */
-  type?: string;
-}
-
-/**
- * 代码输出变量定义
- */
-export interface CodeOutputVariable {
-  /** 变量名 */
-  name: string;
-  /** 变量类型 */
-  type?: string;
-  /** 变量描述 */
-  description?: string;
+  /** 自定义值 (sourceType=CONSTANT, array/object 存 JSON 字符串) */
+  value?: any;
 }
 
 /**
  * 代码节点配置 (Workflow Code Capability)
- * 执行 Python/JavaScript 代码
+ * 执行 Python 代码：import 导包 + 自动识别入口函数（main 优先，无 main 取最后定义的顶层函数）
+ * 节点输出统一为 {result: <方法返回值>}
  * 输出限制: 字符串最大 200KB, 数组最大 100 元素
  */
 export interface CodeNodeConfig {
-  /** 编程语言 */
-  language?: CodeLanguage;
-  /** 代码内容 */
+  /** Python 代码内容（import + def 方法 或 顶层 return） */
   code?: string;
-  /** 输入变量列表 */
+  /** 输入参数列表 */
   inputs?: CodeInputVariable[];
-  /** 输出变量列表 */
-  outputs?: CodeOutputVariable[];
   /** 执行超时时间（毫秒） */
   timeout?: number;
-  /** 最大内存限制（MB） */
-  maxMemory?: number;
-  /** 是否启用沙箱模式 */
-  sandboxEnabled?: boolean;
-  /** 输出变量名（存储执行结果） */
-  outputVariable?: string;
 }
 
 // ==================== TEMPLATE 节点配置 ====================
@@ -1278,51 +1279,14 @@ export type DocumentType =
   | 'CSV'
   | 'DOC'
   | 'DOCX'
-  | 'EPUB'
   | 'HTML'
   | 'MD'
   | 'PDF'
   | 'PPT'
   | 'PPTX'
-  | 'RTF'
   | 'TXT'
   | 'XLS'
   | 'XLSX';
-
-/**
- * OCR 引擎枚举
- */
-export type OcrEngine = 'CLOUD_OCR' | 'PADDLE_OCR' | 'TESSERACT';
-
-/**
- * OCR 配置
- */
-export interface OcrConfig {
-  /** 是否启用 OCR */
-  enabled: boolean;
-  /** OCR 语言 (如: chi_sim, eng, chi_sim+eng) */
-  language?: string;
-  /** OCR 引擎 */
-  engine?: OcrEngine;
-  /** 图像预处理 */
-  preprocessImage?: boolean;
-  /** DPI 设置（用于 PDF 转图像） */
-  dpi?: number;
-}
-
-/**
- * 分页配置
- */
-export interface PaginationConfig {
-  /** 是否按页分割 */
-  splitByPage?: boolean;
-  /** 起始页码（从1开始） */
-  startPage?: number;
-  /** 结束页码 */
-  endPage?: number;
-  /** 页面分隔符 */
-  pageSeparator?: string;
-}
 
 /**
  * 文档提取器节点配置 (Workflow Document Capability)
@@ -1341,10 +1305,6 @@ export interface DocExtractorConfig {
   preserveFormatting?: boolean;
   /** 最大文件大小（字节） */
   maxFileSize?: number;
-  /** OCR 配置（用于图片和扫描 PDF） */
-  ocrConfig?: OcrConfig;
-  /** 分页配置 */
-  paginationConfig?: PaginationConfig;
 }
 
 // ==================== LIST_OPERATOR 节点配置 ====================
@@ -1726,6 +1686,20 @@ export interface NodeInputVariable {
 // ==================== 节点配置类型映射 ====================
 
 /**
+ * 指定回复节点配置
+ */
+export interface ReplyNodeConfig {
+  /** 回复方式: TEXT-自定义文本 / VARIABLE-引用参数（二选一） */
+  replyType: 'TEXT' | 'VARIABLE';
+  /** 引用参数（VARIABLE 模式，{{node.var}} 格式） */
+  variableRef?: string;
+  /** 自定义文本（TEXT 模式，支持 {{变量}} 模板） */
+  text?: string;
+  /** 输出变量名 */
+  outputVariable?: string;
+}
+
+/**
  * 节点类型到配置类型的映射
  */
 export interface NodeConfigMap {
@@ -1744,6 +1718,7 @@ export interface NodeConfigMap {
   PARALLEL: ParallelNodeConfig;
   CODE: CodeNodeConfig;
   TEMPLATE: TemplateNodeConfig;
+  REPLY: ReplyNodeConfig;
   DOC_EXTRACTOR: DocExtractorConfig;
   LIST_OPERATOR: ListOperatorConfig;
   HTTP_REQUEST: HttpRequestNodeConfig;

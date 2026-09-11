@@ -14,7 +14,7 @@
       <VariableInput
         v-model="formData.inputVariable"
         :current-node-id="nodeId"
-        placeholder="{{start.text}} 或 {{nodeName.output}}"
+        :placeholder="'{{start.text}} 或 {{nodeName.output}}'"
         @change="handleChange"
       />
       <div class="form-hint">输入要提取参数的文本变量引用</div>

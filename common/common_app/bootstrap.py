@@ -22,6 +22,7 @@ from common.common_nacos.config import Config
 from common.common_nacos.nacos_client import NacosClient
 from common.common_redis import redis
 from common.common_httpx.httpx import httpx_pool
+from common.common_storage import get_storage, init_storage
 
 
 async def _init_redis(redis_cfg: dict):
@@ -51,6 +52,12 @@ async def _init_mysql(mysql_cfg: dict):
 
 def _init_httpx_pool():
     httpx_pool.init()
+
+
+async def _init_storage(storage_cfg: dict):
+    # 统一存储后端（本地 / MinIO 等 S3）：未配置时默认本地，无外部依赖；
+    # 配置了 s3 但连接失败会抛错并阻断启动（避免静默降级造成数据写错位置）。
+    await init_storage(storage_cfg)
 
 
 def create_app(service_name: str,
@@ -111,6 +118,7 @@ def create_app(service_name: str,
                 await _init_mysql(yml_config.get("mysql", {}))
             if enable_httpx_pool:
                 _init_httpx_pool()
+            await _init_storage(yml_config.get("storage", {}))
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
             log.error(f"Service {service_name} init dependencies failed: {str(e)}")
@@ -137,6 +145,10 @@ def create_app(service_name: str,
             await redis.client.close()
         if enable_mysql:
             await mysql_client.close()
+        try:
+            await get_storage().close()
+        except Exception as e:
+            log.warning(f"storage backend close skipped: {e}")
 
     app = FastAPI(title=service_name, lifespan=lifespan)
 

@@ -12,8 +12,8 @@ class AsyncHttpPool:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def init(self, timeout: int = 30, max_connections: int = 200, max_keepalive_connections: int = 50,
-             keepalive_expiry: int = 30):
+    def init(self, timeout: int = 30, max_connections: int = 500, max_keepalive_connections: int = 150,
+             keepalive_expiry: int = 120):
         self._client = httpx.AsyncClient(timeout=timeout,
                                          trust_env=False,
                                          limits=httpx.Limits(max_connections=max_connections,

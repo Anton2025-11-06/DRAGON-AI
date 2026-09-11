@@ -33,15 +33,15 @@ from common.common_log.log_init import log
 from common.common_httpx.httpx import httpx_pool
 
 MAX_PARALLEL_BRANCHES = 50  # 单执行并行分支上限(防画布错配导致的任务爆炸)
-NODE_TIMEOUT_DEFAULT = 600   # 单节点执行超时(秒):防外部/工具节点永久挂起(MaxKB 无此保护)
+NODE_TIMEOUT_DEFAULT = 600  # 单节点执行超时(秒):防外部/工具节点永久挂起(MaxKB 无此保护)
 
 # ---------- 执行/节点状态常量(与 tb_workflow_execution.status 及前端展示一致,禁止写裸字符串) ----------
-STATUS_PENDING = "PENDING"      # 初始状态(执行未调度 / 节点未开始)
-STATUS_RUNNING = "RUNNING"      # 执行中 / 节点运行中
-STATUS_PAUSED = "PAUSED"        # 暂停(仅执行记录与运行时使用)
+STATUS_PENDING = "PENDING"  # 初始状态(执行未调度 / 节点未开始)
+STATUS_RUNNING = "RUNNING"  # 执行中 / 节点运行中
+STATUS_PAUSED = "PAUSED"  # 暂停(仅执行记录与运行时使用)
 STATUS_COMPLETED = "COMPLETED"  # 成功完成
 STATUS_CANCELLED = "CANCELLED"  # 取消(仅执行记录与运行时使用)
-STATUS_FAILED = "FAILED"        # 失败
+STATUS_FAILED = "FAILED"  # 失败
 
 
 class WorkflowCancelled(Exception):
@@ -89,6 +89,7 @@ class WorkflowRuntime:
                  breakpoint_conditions: Optional[dict] = None,
                  model_provider=None,
                  http_client=None,
+                 file_loader=None,
                  event_bus: EventBus = None,
                  node_persist_hook=None,
                  state_persist_hook=None,
@@ -111,6 +112,8 @@ class WorkflowRuntime:
         self.bus = event_bus
         self.model_provider = model_provider
         self.http_client = http_client
+        # DOC_EXTRACTOR 文件加载钩子（service 层注入：fileId/本地路径 → (text, metadata)）
+        self.file_loader = file_loader
         self.node_timeout = node_timeout
 
         # 控制状态(需求 5):取消/暂停不通过进程内信号,全部由 DB 状态驱动。
@@ -124,7 +127,7 @@ class WorkflowRuntime:
         self._order_counter = 0
         self._completed_with_branch: dict[str, Optional[str]] = {}  # node_id -> 活跃出边端口
         self._running_tasks: set[asyncio.Task] = set()
-        self._pending_nodes: list[str] = []          # 暂停时未调度的节点
+        self._pending_nodes: list[str] = []  # 暂停时未调度的节点
         self.outputs: dict = {}
         self.error: Optional[str] = None
         self.duration_ms: int = 0
@@ -178,7 +181,7 @@ class WorkflowRuntime:
                     raise NodeExecutionError("工作流缺少 START 节点")
                 await self._schedule(start_node.id)
                 await self._wait_running()
-    
+
             # 终态检查点:末节点执行期间到达的取消/暂停,在收尾前再查一次 DB 状态,
             # 避免「全部节点已跑完但 DB 已不是 RUNNING」时仍按成功落库。
             await self._checkpoint()
@@ -191,7 +194,7 @@ class WorkflowRuntime:
                 self.status = STATUS_COMPLETED
                 self.duration_ms = int((time.monotonic() - start) * 1000)
                 self.outputs = self._collect_outputs()
-                await self._persist_state()
+                asyncio.create_task(self._persist_state())
                 await self.emit("workflow.completed", outputs=self.outputs, duration=self.duration_ms)
             return self.outputs
         except WorkflowCancelled:
@@ -200,14 +203,14 @@ class WorkflowRuntime:
             # 取消仍在执行的节点任务:防任务泄漏与取消后半途写库
             for t in list(self._running_tasks):
                 t.cancel()
-            await self._persist_state()
+            asyncio.create_task(self._persist_state())
             await self.emit("workflow.cancelled")
             return {}
         except Exception as e:  # noqa: BLE001
             self.status = STATUS_FAILED
             self.error = str(e)
             self.duration_ms = int((time.monotonic() - start) * 1000)
-            await self._persist_state()
+            asyncio.create_task(self._persist_state())
             await self.emit("workflow.failed", error=str(e))
             raise
         finally:
@@ -285,14 +288,15 @@ class WorkflowRuntime:
 
         input_view = self._node_input_view(node)
         state.input = input_view
+
+        started = time.monotonic()
         await self.emit("node.started", nodeId=node.id, nodeType=node.type, input=input_view)
         if self.node_persist_hook:
             try:
-                await self.node_persist_hook(self, node, state)
+                asyncio.create_task(self.node_persist_hook(self, node, state))
             except Exception:  # noqa: BLE001
                 pass
 
-        started = time.monotonic()
         try:
             executor_cls = NODE_REGISTRY.get(node.type)
             if executor_cls is None:
@@ -311,14 +315,17 @@ class WorkflowRuntime:
         except Exception as e:  # noqa: BLE001
             state.status = STATUS_FAILED
             state.error = str(e)
-            state.duration = int((time.monotonic() - started) * 1000)
             state.output = None
-            await self.emit("node.failed", nodeId=node.id, error=str(e))
+
             if self.node_persist_hook:
                 try:
-                    await self.node_persist_hook(self, node, state)
+                    asyncio.create_task(self.node_persist_hook(self, node, state))
                 except Exception:  # noqa: BLE001
                     pass
+
+            state.duration = int((time.monotonic() - started) * 1000)
+            await self.emit("node.failed", nodeId=node.id, error=str(e))
+
             # 异常分支：branch:exception 出边存在则继续，否则终止工作流
             if self.graph.get_out_edges(node.id, "exception"):
                 self._completed_with_branch[node.id] = "exception"
@@ -330,23 +337,29 @@ class WorkflowRuntime:
 
         # 成功
         state.status = STATUS_COMPLETED
-        state.duration = int((time.monotonic() - started) * 1000)
+
         state.output = result.output
         self.ctx.set_node_output(node.id, result.output)
         if result.stream_text is not None:
             state.output = {**result.output, "_streamText": result.stream_text}
         self.ctx.executed.append(node.id)
         self._completed_with_branch[node.id] = result.branch_id  # None → output 端口
+
+        if self.node_persist_hook:
+            try:
+                asyncio.create_task(self.node_persist_hook(self, node, state))
+            except Exception:  # noqa: BLE001
+                pass
+
+        state.duration = int((time.monotonic() - started) * 1000)
         # 返回内容开关(画布 data.emitOutput,默认开):开才把节点输出广播给客户端;
         # 关则跳过 emit(节点数据不推送给客户端),但数据持久化不受影响(下方照常落库)
         if node.data.get(EMIT_OUTPUT_KEY, True) is not False:
-            await self.emit("node.completed", nodeId=node.id,
-                            output=state.output, duration=state.duration)
-        if self.node_persist_hook:
-            try:
-                await self.node_persist_hook(self, node, state)
-            except Exception:  # noqa: BLE001
-                pass
+            await self.emit("node.completed", nodeId=node.id, output=state.output, duration=state.duration)
+        else:
+            # 输出开关关闭:只广播节点完成事件,不广播输出
+            await self.emit("node.completed", nodeId=node.id, duration=state.duration)
+
         return result
 
     def _node_input_view(self, node) -> dict:
@@ -463,7 +476,7 @@ class WorkflowRuntime:
         """
         if scope_vars:
             self.ctx.push_scope(scope_vars)
-        executed_before = set(self.ctx.executed)
+        order_before = self._order_counter
         self._reset_subgraph_nodes(entry_node_id, exit_node_id)
         # 快照进入前已存在的任务（含调用方——复合节点的调度 task）。
         # 复合节点以 asyncio.create_task 形式被调度，其 task 就在 _running_tasks 中，
@@ -482,12 +495,33 @@ class WorkflowRuntime:
                     break
                 await asyncio.wait(pending, timeout=0.2,
                                    return_when=asyncio.FIRST_COMPLETED)
-            result = {nid: self.ctx.get_node_output(nid)
-                      for nid in self.ctx.executed if nid not in executed_before}
+            result = self._collect_new_outputs(entry_node_id, order_before)
             return result
         finally:
             if scope_vars:
                 self.ctx.pop_scope()
+
+    def _collect_new_outputs(self, entry_node_id: str, order_before: int) -> dict:
+        """收集入口可达子图内「本轮（order>order_before）新增执行完成」节点的最新输出。
+
+        与旧实现（executed 集合差）的区别：
+        - LOOP/ITERATION body 节点每轮重复执行且 id 相同，集合差会把第二轮及以后的
+          输出全部丢弃（loopResult/items 为空）；按 order 过滤只认本轮新执行的
+        - PARALLEL 分支并发执行时全局 executed 交错，集合差会把相邻分支的节点
+          误收进本分支结果；按入口可达闭包过滤只收本分支子图的节点
+        """
+        reachable: set[str] = set()
+        stack = [entry_node_id]
+        while stack:
+            nid = stack.pop()
+            if nid in reachable or nid is None:
+                continue
+            reachable.add(nid)
+            for e in self.graph.get_out_edges(nid):
+                stack.append(e.target)
+        return {nid: self.ctx.get_node_output(nid)
+                for nid, st in self.node_states.items()
+                if nid in reachable and st.order > order_before}
 
     def _reset_subgraph_nodes(self, entry_node_id: str, exit_node_id: Optional[str]) -> None:
         """重置 entry 可达子图（不含 exit）的完成状态，使复合节点每轮能重跑子图。"""
@@ -504,7 +538,6 @@ class WorkflowRuntime:
                 continue  # exit 节点不被执行，不继续向下传播
             for e in self.graph.get_out_edges(nid):
                 stack.append(e.target)
-
 
     async def run_branches(self, node, branch_ids: list[str],
                            wait_strategy: str = "ALL",
@@ -527,7 +560,7 @@ class WorkflowRuntime:
             # task，current_task 拿到的是内层 task，而 _running_tasks 里是外层 _schedule
             # task，排除不完全 → 分支等外层、外层等分支 → 自死锁。
             preexisting = set(self._running_tasks)
-            executed_before = set(self.ctx.executed)
+            order_before = self._order_counter
             await self._schedule(entry.id)
             deadline = time.monotonic() + 3600
             while time.monotonic() < deadline:
@@ -536,8 +569,7 @@ class WorkflowRuntime:
                     break
                 await asyncio.wait(pending, timeout=0.2,
                                    return_when=asyncio.FIRST_COMPLETED)
-            results[bid] = {nid: self.ctx.get_node_output(nid)
-                            for nid in self.ctx.executed if nid not in executed_before}
+            results[bid] = self._collect_new_outputs(entry.id, order_before)
             return bid
 
         tasks = [asyncio.create_task(_run_branch(b)) for b in branch_ids]
@@ -565,6 +597,12 @@ class WorkflowRuntime:
         return results
 
     # ==================== 状态检查(需求 5:DB 状态驱动控制) ====================
+
+    def _check_cancelled(self) -> None:
+        """复合节点（LOOP/ITERATION 等）轮询内的取消检查：
+        任意节点调度入口或 run() 收尾已把 status 置为 CANCELLED 时立即终止。"""
+        if self.status == STATUS_CANCELLED:
+            raise WorkflowCancelled()
 
     async def _checkpoint(self) -> None:
         """节点状态检查点:每个节点执行前调用一次(经注入的 hook 查 DB 状态)。
@@ -614,18 +652,27 @@ class WorkflowRuntime:
             return False
 
     async def _persist_state(self, paused: bool = False) -> None:
+        start = time.perf_counter()
         """执行状态落库钩子(service 层注入,引擎不直接依赖 ORM)。"""
         if self.state_persist_hook:
             try:
                 await self.state_persist_hook(self, paused)
             except Exception:  # noqa: BLE001
                 pass
+        end = time.perf_counter()
+        log.info("state persist hook took {} ms", (end - start) * 1000)
 
     def _collect_outputs(self) -> dict:
-        """收集 END 节点输出（多 END 合并；无 END 则空）。"""
+        """收集 END 节点输出（多 END 合并；无 END 则空）；
+        并按执行顺序合并 REPLY 指定回复节点的输出（后执行的覆盖先执行的），
+        使回复内容直接出现在 workflow.completed 的 outputs 中。"""
         outputs = {}
         for end_node in self.graph.find_end_nodes():
             outputs.update(self.ctx.get_node_output(end_node.id))
+        for nid in sorted(self.node_states, key=lambda n: self.node_states[n].order):
+            node = self.graph.get_node(nid)
+            if node is not None and node.type == "REPLY":
+                outputs.update(self.ctx.get_node_output(nid))
         return outputs
 
     def node_states_dict(self) -> dict:

@@ -143,7 +143,7 @@ function handleChange() {
       <VariableInput
         v-model="formData.promptTemplate"
         :current-node-id="nodeId"
-        placeholder="使用 {{变量名}} 引用上游节点输出"
+        :placeholder="'使用 {{变量名}} 引用上游节点输出'"
         :multiline="true"
         @change="handleChange"
       />
@@ -243,7 +243,7 @@ function handleChange() {
         <a-select
           v-model:value="formData.imageVariables"
           mode="tags"
-          placeholder="输入图像变量引用，如 {{start.image}}"
+          :placeholder="'输入图像变量引用，如 {{start.image}}'"
           @change="handleChange"
         />
         <div class="form-hint">输入包含图像的变量引用，支持多个图像</div>

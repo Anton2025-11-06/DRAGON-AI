@@ -15,6 +15,7 @@ import {
   BookOutlined,
   BranchesOutlined,
   CodeOutlined,
+  CommentOutlined,
   DatabaseOutlined,
   FileTextOutlined,
   PlayCircleOutlined,
@@ -29,6 +30,8 @@ import { Handle, Position } from '@vue-flow/core';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import { outputHandleForBranch } from '../../domain/ports';
+
+import NodeStatusBadge from '../node-display/NodeStatusBadge.vue';
 
 // ==================== Props ====================
 
@@ -87,6 +90,7 @@ const iconComponent = computed(() => {
     PARALLEL: ApartmentOutlined,
     CODE: CodeOutlined,
     TEMPLATE: FileTextOutlined,
+    REPLY: CommentOutlined,
     DOC_EXTRACTOR: BookOutlined,
     LIST_OPERATOR: DatabaseOutlined,
     HTTP_REQUEST: ApiOutlined,
@@ -177,6 +181,11 @@ const inputSummary = computed(() => {
       const fields = config.value.fields || [];
       return fields.length > 0 ? `${fields.length} 个输入` : '无输入';
     }
+    case 'REPLY': {
+      return config.value.replyType === 'VARIABLE'
+        ? '引用参数'
+        : '自定义文本';
+    }
     default: {
       return '点击配置';
     }
@@ -265,6 +274,14 @@ function getBranchHandleY(index: number): number {
         <span v-else class="icon-text">{{ iconText }}</span>
       </div>
       <div class="node-title">{{ data.label || nodeType }}</div>
+      <!-- 执行状态与耗时 -->
+      <NodeStatusBadge
+        v-if="data.executionStatus"
+        :status="data.executionStatus"
+        :duration="data.executionDuration ?? undefined"
+        :english="false"
+        class="node-execution-status"
+      />
     </div>
 
     <!-- 节点内容 - 非分支节点 -->
@@ -448,6 +465,12 @@ function getBranchHandleY(index: number): number {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  .node-execution-status {
+    flex-shrink: 0;
+    transform: scale(0.92);
+    transform-origin: right center;
+  }
 }
 
 .node-body {
@@ -557,13 +580,21 @@ function getBranchHandleY(index: number): number {
   }
 }
 
-// Handle 样式 - 悬停放大并显示+号效果
+// Handle 样式 - 加大圆圈与命中区域，悬停放大并显示+号效果
 :deep(.vue-flow__handle) {
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   background: #fff;
   border: 2px solid #d9d9d9;
   transition: all 0.2s ease;
+
+  // 透明伪元素扩大鼠标命中区域，避免小圆点难点中
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -7px;
+    border-radius: 50%;
+  }
 
   &::after {
     content: '+';
@@ -576,32 +607,33 @@ function getBranchHandleY(index: number): number {
     color: #fff;
     opacity: 0;
     transition: all 0.2s ease;
+    pointer-events: none;
   }
 
   &:hover {
-    width: 20px;
-    height: 20px;
+    width: 26px;
+    height: 26px;
     background: #1890ff;
     border-color: #1890ff;
     cursor: crosshair;
 
     &::after {
-      font-size: 14px;
+      font-size: 15px;
       opacity: 1;
     }
   }
 }
 
 .input-handle {
-  left: -6px;
+  left: -8px;
 }
 
 .output-handle {
-  right: -6px;
+  right: -8px;
 }
 
 .branch-handle {
-  right: -6px;
+  right: -8px;
   // top 由 style 属性动态设置
 }
 </style>

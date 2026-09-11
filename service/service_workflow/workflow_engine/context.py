@@ -74,7 +74,32 @@ class ExecutionContext:
     # ==================== 变量解析 ====================
 
     def resolve(self, ref: str) -> Any:
-        """解析单个变量引用（不带 {{}}）。找不到时返回 None（非 strict 场景）。"""
+        """解析单个变量引用（兼容 {{}} 包裹与裸引用两种写法）。找不到时返回 None（非 strict 场景）。
+
+        支持的引用格式（对齐前端 VariableSelector 生成的完整作用域前缀）：
+        - {{inputs.xxx}}：工作流输入（START 输入字段，支持嵌套路径）
+        - {{nodes.{nodeId}.{var}[.path]}}：节点输出（nodeId 支持 label 别名）
+        - {{global.xxx}}：全局变量（VARIABLE_ASSIGNER 写入）
+        - {{nodeId.var}} / {{label.var}}：裸节点引用（历史格式/引擎直用，保持兼容）
+
+        前端 VariableInput 存入 {{node.var}} 模板串、引擎直用与旧数据存裸引用，
+        因此入口统一剥壳（REPLY/END 各自剥壳为历史特例，幂等保留）。
+        """
+        # 兼容 {{...}} 包裹格式：剥掉首尾大括号后按裸引用解析
+        ref = (ref or "").strip()
+        if ref.startswith("{{") and ref.endswith("}}"):
+            ref = ref[2:-2].strip()
+        # 前端生成格式：inputs./nodes. 作用域前缀
+        if ref.startswith("inputs."):
+            return _dig(self.inputs, ref[len("inputs."):])
+        if ref.startswith("nodes."):
+            rest = ref[len("nodes."):]
+            node_id, _, path = rest.partition(".")
+            out = self.node_outputs.get(node_id)
+            if out is None:
+                node = self.graph.resolve_node(node_id)
+                out = self._value_of_node(node.id) if node is not None else None
+            return out if (not path and out is not None) else _dig(out, path)
         node = self.graph.resolve_node(ref)
         if node is not None:
             return self._value_of_node(node.id)
@@ -158,10 +183,15 @@ class ExecutionContext:
 
 
 def _dig(value: Any, path: str) -> Any:
-    """按点分路径取嵌套值，支持数组下标：a.b.0.c。"""
+    """按路径取嵌套值，支持点分 key 与数组下标（方括号/点下标两种写法）：
+    a.b[0].c / a.b.0.c / [0] / items[2].name。
+    """
     if value is None:
         return None
-    for part in path.split("."):
+    tokens = [t for t in re.split(r"[.\[\]]+", path or "") if t]
+    if not tokens:
+        return value
+    for part in tokens:
         if isinstance(value, dict):
             value = value.get(part)
         elif isinstance(value, (list, tuple)):

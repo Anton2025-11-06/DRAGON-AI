@@ -15,7 +15,7 @@ import re
 from typing import Optional
 
 from service.service_workflow.workflow_engine.comparators import evaluate_conditions
-from service.service_workflow.workflow_engine.context import ExecutionContext
+from service.service_workflow.workflow_engine.context import ExecutionContext, _dig
 from service.service_workflow.workflow_engine.nodes.base import (
     BaseNodeExecutor, NodeResult, issue,
 )
@@ -33,7 +33,12 @@ class StartNodeExecutor(BaseNodeExecutor):
             name = f.get("name")
             if not name:
                 continue
-            value = ctx.inputs.get(name, f.get("defaultValue"))
+            # 空值（None/空串）视为未填写，落入字段默认值；
+            # 注意不能用 ctx.inputs.get(name, default)：key 存在（如 {query: ""}）时
+            # .get 会直接返回空串，默认值永远不会生效
+            value = ctx.inputs.get(name)
+            if value is None or value == "":
+                value = f.get("defaultValue")
             if value is None and f.get("required"):
                 raise ValueError(f"缺少必填输入参数: {name}（{f.get('label') or name}）")
             output[name] = value
@@ -144,7 +149,12 @@ class IfElseNodeExecutor(BaseNodeExecutor):
 
 
 class VariableAssignerNodeExecutor(BaseNodeExecutor):
-    """VARIABLE_ASSIGNER：写全局变量（EXPRESSION 暂按安全表达式子集：len/str/int/float 包装）。"""
+    """VARIABLE_ASSIGNER：写全局变量。
+
+    EXPRESSION 走安全表达式子集：变量引用（含 JSON 点路径/数组下标取值，如
+    {{nodes.xx.output}}.key / {{ref}}[0].name / nodes.xx.output.key / value.key / value[0]）、
+    len/str/int/float(value) 包装、value.upper/lower/strip/title() 字符串操作。
+    """
 
     node_type = "VARIABLE_ASSIGNER"
 
@@ -172,18 +182,52 @@ class VariableAssignerNodeExecutor(BaseNodeExecutor):
             else ctx.render(value)
         if not expression:
             return base
-        # 白名单表达式：len(x) / str(x) / int(x) / float(x) / x.upper() / x.lower() / x.strip()
         expr = expression.strip()
+        # ① 引用表达式（含 JSON 点路径/数组下标取值）：
+        #    {{nodes.xx.output.key}} / {{nodes.xx.output}}.key / {{ref}}[0].name
+        m = re.fullmatch(r"\{\{\s*([^{}]+?)\s*\}\}([\w.\u4e00-\u9fa5\[\]]*)", expr)
+        if m:
+            resolved = ctx.resolve(m.group(1))
+            path = m.group(2)
+            if path.startswith("."):
+                path = path[1:]
+            return _dig(resolved, path) if path and resolved is not None else resolved
+        # ② 白名单包装：len(value) / str(value) / int(value) / float(value)
         m = re.fullmatch(r"(len|str|int|float)\(\s*value\s*\)", expr)
         if m:
             try:
                 return {"len": len, "str": str, "int": int, "float": float}[m.group(1)](base)
             except (TypeError, ValueError):
                 return base
-        m = re.fullmatch(r"value\.(upper|lower|strip|title)\(\)", expr)
-        if m and isinstance(base, str):
-            return getattr(base, m.group(1))()
-        raise ValueError(f"不支持的表达式: {expression}（支持 len/str/int/float(value) 与 value.upper/lower/strip()）")
+        # ③ value 操作：字符串方法或 JSON 路径/数组下标提取
+        if expr.startswith("value.") or expr.startswith("value["):
+            op = expr[len("value"):]  # '.upper()' / '.metadata.name' / '[0].name'
+            m = re.fullmatch(r"\.(upper|lower|strip|title)\(\)", op)
+            if m and isinstance(base, str):
+                return getattr(base, m.group(1))()
+            # 方法形态（带括号）未命中 → 明确报错，避免误入路径解析
+            if op.endswith("()"):
+                raise ValueError(
+                    f"不支持的表达式: {expression}（value 字符串方法仅支持 upper/lower/strip/title）")
+            # 路径提取：value.metadata.name / value[0].name（base 为 dict/list，或 render 后的 JSON 字符串）
+            path = op[1:] if op.startswith(".") else op
+            target = base
+            if isinstance(target, str):
+                try:
+                    target = json.loads(target)
+                except (ValueError, json.JSONDecodeError):
+                    target = None
+            if isinstance(target, (dict, list)):
+                return _dig(target, path)
+            raise ValueError(
+                f"不支持的表达式: {expression}（value 不是对象，无法按路径 {path} 取值）")
+        # ④ 裸引用（含点路径）：nodes.xx.output.key / inputs.xx / global.xx / n_start.doc
+        resolved = ctx.resolve(expr)
+        if resolved is not None:
+            return resolved
+        raise ValueError(
+            f"不支持的表达式: {expression}（支持 {{节点引用}}(可带 .key / [index] 路径)、"
+            f"len/str/int/float(value)、value.upper/lower/strip()、value.点路径 / [index]）")
 
     @staticmethod
     def _coerce(value: str, vtype: Optional[str]):

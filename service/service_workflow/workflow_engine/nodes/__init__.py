@@ -18,7 +18,7 @@ from service.service_workflow.workflow_engine.nodes.control_nodes import (
 )
 from service.service_workflow.workflow_engine.nodes.data_nodes import (
     CodeNodeExecutor, DocExtractorNodeExecutor, KnowledgeRetrievalNodeExecutor,
-    ListOperatorNodeExecutor, TemplateNodeExecutor,
+    ListOperatorNodeExecutor, ReplyNodeExecutor, TemplateNodeExecutor,
 )
 from service.service_workflow.workflow_engine.nodes.external_nodes import (
     HttpRequestNodeExecutor, ToolNodeExecutor,
@@ -42,6 +42,7 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     VariableAggregatorNodeExecutor.node_type: VariableAggregatorNodeExecutor,
     # 数据
     TemplateNodeExecutor.node_type: TemplateNodeExecutor,
+    ReplyNodeExecutor.node_type: ReplyNodeExecutor,
     CodeNodeExecutor.node_type: CodeNodeExecutor,
     ListOperatorNodeExecutor.node_type: ListOperatorNodeExecutor,
     DocExtractorNodeExecutor.node_type: DocExtractorNodeExecutor,
@@ -51,10 +52,10 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     ToolNodeExecutor.node_type: ToolNodeExecutor,
 }
 
-# 前端 20 种节点类型全集（types.ts NodeType）
+# 前端 21 种节点类型全集（types.ts NodeType）
 ALL_NODE_TYPES = [
     "START", "END", "LLM", "AGENT", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
-    "CODE", "TEMPLATE", "HTTP_REQUEST", "TOOL", "KNOWLEDGE_RETRIEVAL",
+    "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "KNOWLEDGE_RETRIEVAL",
     "PARAMETER_EXTRACTOR", "QUESTION_CLASSIFIER", "LIST_OPERATOR",
     "VARIABLE_AGGREGATOR", "VARIABLE_ASSIGNER", "DOC_EXTRACTOR",
 ]

@@ -94,7 +94,7 @@
                     <VariableInput
                       v-model="group.sourceVariables[varIndex]"
                       :current-node-id="nodeId"
-                      placeholder="{{nodeName.variable}}"
+                      :placeholder="'{{nodeName.variable}}'"
                       class="source-var-input"
                       @change="handleChange"
                     />

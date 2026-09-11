@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -20,7 +21,7 @@ from typing import Optional
 
 from sqlalchemy import func, select
 
-from common.common_arq.queue import enqueue_job
+from common.common_arq.queue import enqueue_job, next_split_number
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from service.service_workflow.models.workflow_entity import (
@@ -29,6 +30,7 @@ from service.service_workflow.models.workflow_entity import (
 from service.service_workflow.services.event_pubsub import (
     publish_event_hook, subscribe_event_channel,
 )
+from service.service_workflow.services.workflow_file_service import WorkflowFileService
 from service.service_workflow.workflow_engine.engine import (
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_PAUSED,
     STATUS_RUNNING, WorkflowRuntime,
@@ -39,6 +41,12 @@ from service.service_workflow.workflow_engine.model_client import (
     ModelConfigProvider,
 )
 from common.common_httpx.httpx import httpx_pool
+import time
+
+
+# 投递选片(按切片数轮询分发):切片数配置在 arq Redis 的 workflow_queue:split_number
+# (不存在默认 1,由 system 监控页修改),按 execution_id 的 crc32 取模选切片队列
+# (workflow_queue:split_{N});同一执行稳定落同一切片,见 common_arq.queue.next_split_number。
 
 
 def get_shared_http():
@@ -77,6 +85,7 @@ class WorkflowExecutionService:
             "arq_tasks.tasks.workflow.execute_workflow",
             [execution_id],
             job_id=execution_id,
+            split_number=await next_split_number(execution_id),
         )
         if not ok:
             # 理论上不会发生(job_id 为新建 UUID);兜底把记录标记失败,避免悬挂
@@ -214,6 +223,8 @@ class WorkflowExecutionService:
             # 事件总线:节点事件(含 node.delta)经 pub hook 实时 PUBLISH 到 Redis 频道,
             # 供其他进程的 SSE 订阅者跨进程实时消费
             event_bus=EventBus(execution_id, publish_hook=publish_event_hook),
+            # DOC_EXTRACTOR 文件加载：fileId/本地路径 → (text, metadata)
+            file_loader=WorkflowFileService.load_and_extract,
             trigger_type=trigger_type,
             user_id=user_id,
             workflow_id=workflow_id,
@@ -232,6 +243,7 @@ class WorkflowExecutionService:
 
     @staticmethod
     async def _persist_node(runtime: WorkflowRuntime, node, state) -> None:
+        start = time.monotonic()
         """节点状态变化落库（RUNNING→新增行，COMPLETED/FAILED→更新行）。"""
         async with mysql_client.get_session() as session:
             if state.status == STATUS_RUNNING:
@@ -254,6 +266,9 @@ class WorkflowExecutionService:
                     existing.duration_ms = state.duration
                     existing.completed_at = datetime.now()
                     await session.commit()
+        end = time.monotonic()
+        # loguru 只认 {} 占位符，%s 风格不会被替换（静默失效）
+        log.info("node persist done took={}ms", int((end - start) * 1000))
 
     @staticmethod
     async def _persist_state(runtime: WorkflowRuntime, paused: bool = False) -> None:
@@ -482,6 +497,7 @@ class WorkflowExecutionService:
             "arq_tasks.tasks.workflow.resume_workflow",
             [execution_id],
             job_id=f"resume:{execution_id}",
+            split_number=await next_split_number(execution_id),
         )
 
     @staticmethod

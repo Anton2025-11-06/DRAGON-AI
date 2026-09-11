@@ -165,6 +165,34 @@ watch(
   { deep: true },
 );
 
+// 预览运行：节点状态与耗时同步到画布
+watch(
+  nodeTraces,
+  (traces) => {
+    traces.forEach((trace) => {
+      if (
+        trace.status === 'completed' ||
+        trace.status === 'failed' ||
+        trace.status === 'running'
+      ) {
+        workflowStore.highlightNode(
+          trace.nodeId,
+          trace.status,
+          trace.duration ?? undefined,
+        );
+      }
+    });
+  },
+  { deep: true },
+);
+
+// 新一次预览运行开始时清除画布旧高亮
+watch(isRunning, (running) => {
+  if (running) {
+    workflowStore.resetNodeHighlights();
+  }
+});
+
 // ==================== Methods ====================
 
 /**
@@ -708,7 +736,7 @@ defineExpose({
         <a-form-item label="条件表达式">
           <a-input
             v-model:value="editingCondition"
-            placeholder="例如: {{start.input}} === 'test'"
+            :placeholder="'例如: {{start.input}} === \'test\''"
           />
           <div class="condition-help">
             当条件为 true 时在节点边界暂停执行，支持变量引用语法。
