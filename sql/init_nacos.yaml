@@ -62,3 +62,8 @@ service_workflow:
     pool_size: 10
     max_overflow: 10
     echo: False
+
+# 文件微服务：暂不做鉴权，仅复用统一存储（type 缺省 local，落盘 WORKFLOW_FILE_DIR）
+service_file:
+  storage:
+    type: local

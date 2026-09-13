@@ -1,20 +1,56 @@
 import ast
+import asyncio
+import base64
 import json
-import shutil
 import time
 from datetime import datetime
+from typing import Optional
 
-import httpx
-from sqlalchemy import select, update, func, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 
-# MCP 连接测试超时（秒）
+# MCP 连接测试超时（秒）：SDK initialize + 工具清单握手必须在此时限内完成
 _PROBE_TIMEOUT = 5.0
-# STDIO 进程存活探测时间（秒）
-_STDIO_PROBE_KEEP = 2.0
+
+# ==================== 进程内会话缓存（官方 MCP SDK 长连接） ====================
+# MCP 服务器 id → ClientSession；SSE/STDIO 均建立后保持长连接复用，
+# 调用失败或 refresh 时重建。多进程部署（API 进程/arq worker）各自维护一份。
+
+
+class McpConnectionRegistry:
+    """MCP 长连接注册表：管理 ClientSession 生命周期（建连/复用/关闭）。"""
+
+    _sessions: dict[int, object] = {}
+    _lock = asyncio.Lock()
+
+    @classmethod
+    async def get(cls, mcp_id: int, row=None) -> object:
+        """取缓存会话；未命中则按配置建连并 initialize，返回前已就绪。"""
+        async with cls._lock:
+            session = cls._sessions.get(mcp_id)
+            if session is not None:
+                return session
+            if row is None:
+                row = await McpServerService.get_by_id(mcp_id)
+                if not row:
+                    raise ValueError("MCP 连接不存在")
+            session = await McpServerService._connect(row)
+            cls._sessions[mcp_id] = session
+            return session
+
+    @classmethod
+    async def drop(cls, mcp_id: int) -> None:
+        """断开并移除缓存会话（refresh 接口 / 连接失败自动重建时调用）。"""
+        async with cls._lock:
+            session = cls._sessions.pop(mcp_id, None)
+            if session is not None:
+                await McpServerService._close_session(session)
+
+    @classmethod
+    def size(cls) -> int:
+        return len(cls._sessions)
 
 
 class McpServerService:
@@ -63,10 +99,184 @@ class McpServerService:
                         FROM tb_mcp_server WHERE id = :id"""), {"id": id_})).first()
             return row
 
+    # ==================== SDK 连接与会话管理 ====================
+
+    @staticmethod
+    async def _connect(row) -> object:
+        """按配置行建立官方 SDK 连接并完成 initialize 握手，返回就绪的 ClientSession。
+
+        row 结构（与 get_by_id 一致）：(id, name, type, url, command, args, env, status, created_by)。
+        - SSE：mcp.client.sse.sse_client(url, headers)
+        - STDIO：mcp.client.stdio.stdio_client(StdioServerParameters(command, args, env))
+        """
+        try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+        except ImportError as e:  # noqa: BLE001
+            raise ValueError("mcp SDK 未安装，请执行 pip install mcp") from e
+
+        type_ = str(row[2] or "SSE").upper()
+        streams = None
+        if type_ == "SSE":
+            url = row[3]
+            if not url:
+                raise ValueError("SSE 连接地址不能为空")
+            if not url.startswith(("http://", "https://")):
+                raise ValueError("SSE 地址需以 http:// 或 https:// 开头")
+            McpServerService._parse_json(row[6], "env")  # 仅校验 env 格式合法；沿用旧格式时静默
+            streams = sse_client(url, headers={"Accept": "text/event-stream"})
+        elif type_ == "STDIO":
+            command = row[4]
+            if not command:
+                raise ValueError("STDIO 启动命令不能为空")
+            cmd_args = McpServerService._parse_json(row[5], "args")
+            if cmd_args and not isinstance(cmd_args, list):
+                raise ValueError("STDIO 参数必须是 JSON 数组格式")
+            env_dict = McpServerService._parse_json(row[6], "env") or None
+            params = StdioServerParameters(
+                command=command,
+                args=[str(a) for a in (cmd_args or [])],
+                env=env_dict,
+            )
+            streams = stdio_client(params)
+        else:
+            raise ValueError(f"不支持的连接类型: {type_}")
+
+        reader, writer = await streams.__aenter__()
+        session = ClientSession(reader, writer)
+        # 保持 async generator 存活：streams 若随 _connect 返回而失去引用，
+        # 会被 GC 提前 close（GeneratorExit → shutdown），导致后续请求 Connection closed
+        session._mcp_streams = streams  # type: ignore[attr-defined]
+        try:
+            await session.__aenter__()
+            await session.initialize()
+        except Exception:
+            await McpServerService._close_session_entries(session, streams, reader, writer)
+            raise
+        return session
+
+    @staticmethod
+    async def _close_session(session) -> None:
+        """关闭 ClientSession（SDK 2.x 无公开 close，走 context manager 出口）。
+
+        同时关闭建连时挂载的底层 streams（_connect 中持有引用防 GC），
+        顺序：先会话、后传输层。
+        """
+        try:
+            await session.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        streams = getattr(session, "_mcp_streams", None)
+        if streams is not None:
+            try:
+                await streams.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    async def _close_session_entries(session, streams, reader, writer) -> None:
+        """连接失败时兜底清理：session + 底层流 + streams 上下文。"""
+        try:
+            await session.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await writer.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await reader.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await streams.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ==================== 工具清单 / 工具调用 ====================
+
     @staticmethod
     async def batch_tools(server_ids: list) -> list:
-        """批量返回工具清单（demo 探测结果缓存于内存，真实连接信息由测试连接接口输出）"""
-        return []
+        """并发获取多个 MCP 服务器的真实工具清单（tools/list）。
+
+        只统计启用且连接成功的服务器；单个失败不影响其他服务器（返回降级处理）。
+        """
+        if not server_ids:
+            return []
+        results: list = []
+
+        async def _one(server_id: int) -> None:
+            try:
+                session = await McpConnectionRegistry.get(server_id)
+                listed = await session.list_tools()
+                for t in (listed.tools or []):
+                    # SDK 2.x Tool 模型字段为 input_schema；兜底兼容 inputSchema
+                    schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", None)
+                    results.append({
+                        "server_id": server_id,
+                        "name": getattr(t, "name", ""),
+                        "description": getattr(t, "description", "") or "",
+                        "inputSchema": dict(schema) if schema else {},
+                    })
+            except Exception as e:  # noqa: BLE001
+                log.warning("mcp list_tools failed server={}: {}", server_id, e)
+
+        await asyncio.gather(*(_one(sid) for sid in server_ids))
+        return results
+
+    @staticmethod
+    async def call_tool(mcp_id: int, tool_name: str, arguments: dict = None) -> dict:
+        """调用 MCP 工具（tools/call）；调用失败自动重建会话重试一次。
+
+        返回 {content, urls, isError, structured}：文本/资源内容提取为 content，
+        图片/音频二进制转 data URI，便于上层节点与前端直接消费。
+        """
+        arguments = arguments or {}
+        try:
+            session = await McpConnectionRegistry.get(mcp_id)
+            result = await session.call_tool(tool_name, arguments)
+        except Exception as e:  # noqa: BLE001
+            log.warning("mcp call_tool fail server={} tool={}, reconnect once: {}",
+                        mcp_id, tool_name, e)
+            await McpConnectionRegistry.drop(mcp_id)
+            session = await McpConnectionRegistry.get(mcp_id)
+            result = await session.call_tool(tool_name, arguments)
+        return McpServerService._tool_result_to_dict(result)
+
+    @staticmethod
+    def _tool_result_to_dict(result) -> dict:
+        """CallToolResult → 可 JSON 序列化 dict（文本/资源提取 + 二进制转 data URI）。"""
+        texts: list = []
+        urls: list = []
+        for block in getattr(result, "content", None) or []:
+            btype = getattr(block, "type", None)
+            text = getattr(block, "text", None)
+            if text:
+                texts.append(str(text))
+            elif btype in ("image", "audio"):
+                data = getattr(block, "data", None)
+                mime = getattr(block, "mimeType", None) or ""
+                if isinstance(data, bytes):
+                    data = base64.b64encode(data).decode()
+                if data:
+                    urls.append(f"data:{mime};base64,{data}")
+            elif btype == "resource":
+                uri = getattr(block, "uri", None) or getattr(block, "blob", None)
+                if uri and not isinstance(uri, bytes):
+                    urls.append(str(uri))
+        return {
+            "content": "\n".join(texts),
+            "urls": urls,
+            "isError": bool(getattr(result, "isError", False)),
+            "structured": getattr(result, "structuredContent", None),
+        }
+
+    @staticmethod
+    async def refresh(mcp_id: int) -> None:
+        """断开并清除缓存会话（配置变更/异常后调用；下次调用自动重连）。"""
+        await McpConnectionRegistry.drop(mcp_id)
+        log.info("McpServer session refreshed: id={}", mcp_id)
 
     # ==================== 新增 / 更新 / 删除 ====================
     @staticmethod
@@ -144,75 +354,41 @@ class McpServerService:
                           command: str = None, args: str = None, env: str = None) -> dict:
         """
         按参数测试连接（添加/编辑表单"测试"按钮使用，无需保存即可验证）：
-        - SSE：发起流式请求握手，检查状态码与响应头
-        - STDIO：校验命令可执行 + 参数 JSON 合法 + 进程能存活启动
+        官方 SDK 真实握手——SSE/STDIO 都完成 initialize + tools/list，
+        toolCount 返回真实工具数（_PROBE_TIMEOUT=5s 内未完成视为失败）。
         """
         start = time.perf_counter()
         try:
             t = (type_ or 'SSE').upper()
-            if t == 'SSE':
-                detail = await McpServerService._probe_sse(url, env)
-            elif t == 'STDIO':
-                detail = await McpServerService._probe_stdio(command, args, env)
-            else:
+            if t not in ('SSE', 'STDIO'):
                 raise ValueError(f"不支持的连接类型: {type_}")
+            row = [0, name or "MCP Server", t, url, command, args, env, 1, 0]
+
+            async def _handshake() -> int:
+                session = await McpServerService._connect(row)
+                try:
+                    listed = await session.list_tools()
+                    return len(listed.tools or [])
+                finally:
+                    await McpServerService._close_session(session)
+
+            tool_count = await asyncio.wait_for(_handshake(), timeout=_PROBE_TIMEOUT)
             cost_ms = int((time.perf_counter() - start) * 1000)
             return {"success": True, "serverName": name or "MCP Server",
-                    "toolCount": detail.get("toolCount", 0), "responseTime": cost_ms,
-                    "errorMessage": detail.get("message", "连接正常")}
-        except Exception as e:
+                    "toolCount": tool_count, "responseTime": cost_ms,
+                    "errorMessage": f"连接正常，发现 {tool_count} 个工具"}
+        except asyncio.TimeoutError:
             cost_ms = int((time.perf_counter() - start) * 1000)
-            log.warning(f"McpServer test failed: {str(e)}")
+            log.warning("McpServer test timeout: type={} name={}", type_, name)
+            return {"success": False, "serverName": name or "MCP Server",
+                    "toolCount": 0, "responseTime": cost_ms,
+                    "errorMessage": f"连接超时（{_PROBE_TIMEOUT}s）：服务器未在时限内完成握手"}
+        except Exception as e:  # noqa: BLE001
+            cost_ms = int((time.perf_counter() - start) * 1000)
+            log.warning("McpServer test failed: {}", str(e))
             return {"success": False, "serverName": name or "MCP Server",
                     "toolCount": 0, "responseTime": cost_ms,
                     "errorMessage": str(e) or "连接失败"}
-
-    @staticmethod
-    async def _probe_sse(url: str, env: str = None) -> dict:
-        """SSE 握手探测：能建立连接并收到响应头即视为可达"""
-        if not url:
-            raise ValueError("SSE 连接地址不能为空")
-        if not url.startswith(("http://", "https://")):
-            raise ValueError("SSE 地址需以 http:// 或 https:// 开头")
-        headers = {"Accept": "text/event-stream"}
-        McpServerService._parse_json(env, "env")  # 仅校验 env 格式合法
-        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, trust_env=False,
-                                     headers=headers) as client:
-            async with client.stream("GET", url) as resp:
-                if resp.status_code >= 400:
-                    raise ValueError(f"连接被拒绝（HTTP {resp.status_code}）")
-                return {"message": f"SSE 连接正常（HTTP {resp.status_code}）", "toolCount": 0}
-
-    @staticmethod
-    async def _probe_stdio(command: str, args: str, env: str = None) -> dict:
-        """STDIO 探测：命令可执行 + 参数合法 + 进程可启动并存活"""
-        if not command:
-            raise ValueError("STDIO 命令不能为空")
-        exe = shutil.which(command.split()[0]) if command else None
-        if not exe:
-            raise ValueError(f"命令不可执行: {command.split()[0]}")
-        cmd_args = McpServerService._parse_json(args, "args")
-        if cmd_args and not isinstance(cmd_args, list):
-            raise ValueError("STDIO 参数必须是 JSON 数组格式")
-        env_dict = McpServerService._parse_json(env, "env")
-
-        import subprocess
-        full_cmd = [command] + [str(a) for a in (cmd_args or [])]
-        try:
-            process = subprocess.Popen(
-                full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env=env_dict or None, shell=True if len(full_cmd) == 1 else False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            import asyncio
-            await asyncio.sleep(_STDIO_PROBE_KEEP)
-            if process.poll() is not None:
-                stderr = process.stderr.read().decode("utf-8", "ignore") if process.stderr else ""
-                process.kill()
-                raise ValueError(f"进程启动即退出（code={process.returncode}）{stderr[:200]}")
-            process.kill()
-            return {"message": f"STDIO 进程启动正常（{command}）", "toolCount": 0}
-        except FileNotFoundError:
-            raise ValueError(f"命令不存在: {command}")
 
     @staticmethod
     def _parse_json(value: str, field: str):

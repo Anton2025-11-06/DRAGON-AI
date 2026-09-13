@@ -464,23 +464,13 @@ export interface WorkflowNodeDefinitionResp {
   defaultConfig: Record<string, any>;
 }
 
-export interface ModelSuffixOption {
-  /** 接口后缀路径，如 /v1/chat/completions */
-  url: string;
-  /** 后缀说明（模型广场维护，展示给用户） */
-  desc?: string;
-}
-
 export interface AiModelOption {
   id: number;
   provider: string;
+  /** 能力类型（12 类 code：text_to_text/... 即 tb_model.category） */
   type: string;
   name: string;
   baseUrl?: string;
-  /** 是否直连：1=baseUrl 含完整接口路径；0=非直连(baseUrl+接口后缀) */
-  isDirect?: number;
-  /** 非直连时支持的后缀列表 */
-  suffixes?: ModelSuffixOption[];
 }
 
 export interface WorkflowAgentOption {
@@ -809,17 +799,14 @@ export interface ContextVariable {
 
 /**
  * LLM 大模型节点配置 (Workflow Model Node)
- * 调用 LLM 进行推理，支持 Vision、Memory、结构化输出
+ * 经 common_model 支持 12 种能力类型（按所选模型登记的 category 类型化直连），
+ * 支持 Vision、Memory、结构化输出，及各能力类型的媒体输入变量。
  */
 export interface LLMNodeConfig {
   /** 模型 ID */
   modelId?: number;
-  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  /** 能力类型（12 类 code，决定模型下拉数据源与节点分发调用） */
   modelType?: string;
-  /** 所选接口后缀（非直连模型时生效，base_url + suffix 拼接调用地址） */
-  suffix?: string;
-  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
-  modelIsDirect?: number;
   /** 系统提示词 */
   systemPrompt?: string;
   /** 用户提示词模板 (支持变量引用: {{nodeName.variableName}}) */
@@ -828,14 +815,36 @@ export interface LLMNodeConfig {
   temperature?: number;
   /** 最大 Token 数 */
   maxTokens?: number;
+  /** 深度思考（仅支持 stream 的三类有意义） */
+  thinking?: boolean;
   /** 是否流式输出 */
   streaming?: boolean;
   /** 输出变量名 */
   outputVariable?: string;
-  /** Vision 开关（图像理解） */
+  /** 文本类输入变量（向量/文本重排查询外的纯文本输入，支持引用） */
+  inputVariable?: string;
+  /** 图片输入变量（图片理解/OCR/图片向量/图生视频，引用或 URL） */
+  imageVariable?: string;
+  /** Vision 开关（图像理解，text_to_text 多模态对话用） */
   visionEnabled?: boolean;
   /** 图像变量列表（Vision 启用时有效） */
   imageVariables?: string[];
+  /** 音频输入变量（音频转文字） */
+  audioVariable?: string;
+  /** 视频输入变量（视频理解） */
+  videoVariable?: string;
+  /** 重排查询变量（text_rerank） */
+  queryVariable?: string;
+  /** 重排文档变量（text_rerank，引用字符串数组） */
+  documentsVariable?: string;
+  /** 重排保留数量 top_n */
+  topN?: number;
+  /** 生成尺寸（文生图/文生视频/图生视频） */
+  size?: string;
+  /** 生成图片数量（文生图 n） */
+  imageN?: number;
+  /** 音色（文生音频） */
+  voice?: string;
   /** Memory 开关（对话记忆） */
   memoryEnabled?: boolean;
   /** 记忆窗口大小 */
@@ -943,12 +952,8 @@ export interface ClassCategory {
 export interface QuestionClassifierConfig {
   /** 分类使用的模型 ID */
   modelId?: number;
-  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  /** 能力类型（问题分类器固定 text_to_text） */
   modelType?: string;
-  /** 所选接口后缀（非直连模型时生效） */
-  suffix?: string;
-  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
-  modelIsDirect?: number;
   /** 输入变量（要分类的文本，支持变量引用格式: {{nodeName.variableName}}） */
   inputVariable?: string;
   /** 分类指导说明 */
@@ -1002,12 +1007,8 @@ export interface ExtractParameter {
 export interface ParameterExtractorConfig {
   /** 提取使用的模型 ID */
   modelId?: number;
-  /** 模型类型（text_gen/multimodal，决定模型下拉数据源） */
+  /** 能力类型（参数提取器固定 text_to_text） */
   modelType?: string;
-  /** 所选接口后缀（非直连模型时生效） */
-  suffix?: string;
-  /** 所选模型是否直连：0=非直连（必须配置 suffix）1=直连（画布校验用） */
-  modelIsDirect?: number;
   /** 输入变量（要提取参数的文本，支持变量引用格式: {{nodeName.variableName}}） */
   inputVariable?: string;
   /** 提取指导说明 */

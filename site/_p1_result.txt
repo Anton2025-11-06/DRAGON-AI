@@ -1,0 +1,39 @@
+===== Phase1 模型测试按钮真实联测 (ModelService.test, 36 组合) =====
+汇总: {'PASS': 28, 'GRACEFUL-REJECT': 5, 'EXPECTED-UNREACHABLE': 3}
+
+[PASS               ] audio_to_text    x dashscope paraformer-v2              3829ms  调用成功（3829ms）：文本='Hello word, 这里是阿里巴巴语音实验室。' | 文本='Hello word, 这里是阿里巴巴语音实验室。'
+[PASS               ] audio_to_text    x zhipu     glm-asr                    1046ms  调用成功（1046ms）：文本='哈喽我的这里是阿里巴巴语音实验室' | 文本='哈喽我的这里是阿里巴巴语音实验室'
+[PASS               ] image_embedding  x dashscope multimodal-embedding-v1     264ms  调用成功（264ms）：向量维度=1024，共 1 条 | 向量维度=1024，共 1 条
+[PASS               ] image_to_video   x dashscope wanx2.1-i2v-turbo        214389ms  调用成功（214389ms）：产物URL=https://dashscope-result-wlcb-acdr-1.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/ed | 产物URL=https://dashscope-result-wlcb-acdr-1.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/ed
+[PASS               ] image_to_video   x zhipu     cogvideox-flash           41235ms  调用成功（41235ms）：产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/202609122350309f31ba3959f14a | 产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/202609122350309f31ba3959f14a
+[PASS               ] image_understand x dashscope qwen-vl-plus               7500ms  调用成功（2844ms）：文本='这张图片展示了一个温馨的场景，发生在海滩上。以下是图片中的主要元素：\n\n1. **人物**：一位女性坐在沙滩上，她穿着格子衬衫和深色裤子，脚上没有穿鞋。她的头发'；流式 chunks=236 | 文本='这张图片展示了一个温馨的场景，发生在海滩上。以下是图片中的主要元素：\n\n1. **人物**：一位女性坐在沙滩上，她穿着格子衬衫和深色裤子，脚上没有穿鞋。她的头发'；流式 chunks=236
+[PASS               ] image_understand x openai    qwen-vl-plus               7750ms  调用成功（2202ms）：文本='这张照片展示了一个温馨的场景，发生在海滩上。以下是照片中的主要元素：\n\n1. **人物**：一位女性坐在沙滩上，她穿着格子衬衫和深色裤子，脚上没有穿鞋。她的表情'；流式 chunks=273 | 文本='这张照片展示了一个温馨的场景，发生在海滩上。以下是照片中的主要元素：\n\n1. **人物**：一位女性坐在沙滩上，她穿着格子衬衫和深色裤子，脚上没有穿鞋。她的表情'；流式 chunks=273
+[PASS               ] image_understand x zhipu     glm-4v-flash               6938ms  调用成功（3813ms）：文本='这张图片展示了一位女士和她的狗在沙滩上享受美好的时光。具体来说，图片中间是一位穿着格子衬衫和黑色裤子的年轻女子坐在沙滩上，她微笑着看向右侧，她的右手边有一只戴着'；流式 chunks=93 | 文本='这张图片展示了一位女士和她的狗在沙滩上享受美好的时光。具体来说，图片中间是一位穿着格子衬衫和黑色裤子的年轻女子坐在沙滩上，她微笑着看向右侧，她的右手边有一只戴着'；流式 chunks=93
+[PASS               ] ocr              x dashscope qwen-vl-ocr                1015ms  调用成功（1015ms）：文本='' | 文本=''
+[PASS               ] ocr              x openai    qwen-vl-plus                891ms  调用成功（891ms）：文本='图片中的文字内容如下：\n\n```\n（无文字）\n```\n\n图片中没有明显的文字内容。' | 文本='图片中的文字内容如下：\n\n```\n（无文字）\n```\n\n图片中没有明显的文字内容。'
+[PASS               ] ocr              x zhipu     glm-4v-flash               2094ms  调用成功（2094ms）：文本='这张图片中没有可识别的文字。' | 文本='这张图片中没有可识别的文字。'
+[PASS               ] text_embedding   x dashscope text-embedding-v3           438ms  调用成功（438ms）：向量维度=1024，共 1 条 | 向量维度=1024，共 1 条
+[PASS               ] text_embedding   x openai    text-embedding-v3           438ms  调用成功（438ms）：向量维度=1024，共 1 条 | 向量维度=1024，共 1 条
+[PASS               ] text_embedding   x zhipu     embedding-3                 438ms  调用成功（438ms）：向量维度=2048，共 1 条 | 向量维度=2048，共 1 条
+[PASS               ] text_rerank      x dashscope gte-rerank-v2               139ms  调用成功（139ms）：重排 2 条，首条={'index': 0, 'relevance_score': 0.45575749035410607} | 重排 2 条，首条={'index': 0, 'relevance_score': 0.45575749035410607}
+[PASS               ] text_rerank      x zhipu     rerank                      342ms  调用成功（342ms）：重排 2 条，首条={'index': 0, 'relevance_score': 1.0} | 重排 2 条，首条={'index': 0, 'relevance_score': 1.0}
+[PASS               ] text_to_audio    x dashscope qwen-tts                    890ms  调用成功（890ms）：产物URL=http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/9e/20260912/e6c1b | 产物URL=http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/9e/20260912/e6c1b
+[PASS               ] text_to_audio    x zhipu     glm-tts                     828ms  调用成功（828ms）：音频字节=118800 | 音频字节=118800
+[PASS               ] text_to_image    x dashscope wanx2.1-t2i-turbo          9500ms  调用成功（9500ms）：产物URL=https://dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/91/20260912/77c9 | 产物URL=https://dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/91/20260912/77c9
+[PASS               ] text_to_image    x zhipu     cogview-3-flash            8562ms  调用成功（8562ms）：产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/2026091223494131868075677c40 | 产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/2026091223494131868075677c40
+[PASS               ] text_to_text     x dashscope qwen-turbo                  703ms  调用成功（453ms）：文本='好。'；流式 chunks=4 | 文本='好。'；流式 chunks=4
+[PASS               ] text_to_text     x openai    qwen-turbo                 1045ms  调用成功（843ms）：文本='好。'；流式 chunks=4 | 文本='好。'；流式 chunks=4
+[PASS               ] text_to_text     x zhipu     glm-4-flash                1828ms  调用成功（1000ms）：文本='好'；流式 chunks=2 | 文本='好'；流式 chunks=2
+[PASS               ] text_to_video    x dashscope wanx2.1-t2v-turbo         30828ms  调用成功（30828ms）：产物URL=https://dashscope-result-wlcb-acdr-1.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/9d | 产物URL=https://dashscope-result-wlcb-acdr-1.oss-cn-wulanchabu-acdr-1.aliyuncs.com/1d/9d
+[PASS               ] text_to_video    x zhipu     cogvideox-flash           61469ms  调用成功（61469ms）：产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/20260912235200106a059201f348 | 产物URL=https://maas-watermark-prod-new.cn-wlcb.ufileos.com/20260912235200106a059201f348
+[PASS               ] video_understand x dashscope qwen-vl-plus              24750ms  调用成功（15203ms）：文本='这段视频是一部名为《Sintel》的动画短片，由Blender Foundation制作。以下是视频的主要内容概述：\n\n1. **开场场景**：\n   - 视频'；流式 chunks=439 | 文本='这段视频是一部名为《Sintel》的动画短片，由Blender Foundation制作。以下是视频的主要内容概述：\n\n1. **开场场景**：\n   - 视频'；流式 chunks=439
+[PASS               ] video_understand x openai    qwen-vl-plus              27030ms  调用成功（16328ms）：文本='这段视频是一部名为《Sintel》的动画短片，由Blender Foundation制作。以下是视频的主要内容概述：\n\n1. **开场场景**：视频开始于一个被'；流式 chunks=401 | 文本='这段视频是一部名为《Sintel》的动画短片，由Blender Foundation制作。以下是视频的主要内容概述：\n\n1. **开场场景**：视频开始于一个被'；流式 chunks=401
+[PASS               ] video_understand x zhipu     glm-4v-plus               13920ms  调用成功（7828ms）：文本='视频以一个开场白开始，然后展示了一个男人站在雪地中，手里拿着一根棍子。接着，视频切换到一个女人在街上走，同时拿着一把剑。然后，视频展示了一个男人和女人在街上走，'；流式 chunks=73 | 文本='视频以一个开场白开始，然后展示了一个男人站在雪地中，手里拿着一根棍子。接着，视频切换到一个女人在街上走，同时拿着一把剑。然后，视频展示了一个男人和女人在街上走，'；流式 chunks=73
+[GRACEFUL-REJECT    ] image_embedding  x openai    unknown-model                 0ms  image_embedding 类型下供应商 openai 无可用实现（当前支持：['dashscope']）
+[GRACEFUL-REJECT    ] image_embedding  x zhipu     unknown-model                 0ms  image_embedding 类型下供应商 zhipu 无可用实现（当前支持：['dashscope']）
+[GRACEFUL-REJECT    ] image_to_video   x openai    unknown-model                 0ms  image_to_video 类型下供应商 openai 无可用实现（当前支持：['dashscope', 'zhipu']）
+[GRACEFUL-REJECT    ] text_rerank      x openai    unknown-model                 0ms  text_rerank 类型下供应商 openai 无可用实现（当前支持：['dashscope', 'zhipu']）
+[GRACEFUL-REJECT    ] text_to_video    x openai    unknown-model                 0ms  text_to_video 类型下供应商 openai 无可用实现（当前支持：['dashscope', 'zhipu']）
+[EXPECTED-UNREACHABLE] audio_to_text    x openai    whisper-1                   827ms  测试异常：NotFoundError: Error code: 404
+[EXPECTED-UNREACHABLE] text_to_audio    x openai    tts-1                        46ms  测试异常：NotFoundError: Error code: 404
+[EXPECTED-UNREACHABLE] text_to_image    x openai    dall-e-3                     47ms  测试异常：NotFoundError: Error code: 404

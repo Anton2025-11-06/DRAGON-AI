@@ -6,13 +6,13 @@
 2. 模型一致性：body.model（模型标识）与 Redis(model_rate_limit_config) 中 model_name 比对
 3. 限流：QPS（每秒固定窗口）+ 日调用上限（按天计数），Lua 原子计数
 4. 管理端密钥回查 MySQL（明文密钥不进 Redis）
-5. 按分类映射上游 OpenAI 兼容端点，body 包装（调用方参数原样透传，extra_body 展开合并）后转发
-6. 流式响应 SSE 透传（httpx stream 边读边吐），非流式缓冲返回
+5. 按 Redis 配置的 category(12 类型) + provider(3 家) 走 common_model 分发到对应子类
+   （各供应商子类直连本厂商端点，无任何跨厂商桥接），body 经 entry.body_to_kwargs 翻译为类型化入参
+6. 产出经 entry 封装回 OpenAI 协议：支持 stream 的类型走 astream→SSE，其余 ainvoke→JSONResponse
 """
 import json
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -20,59 +20,13 @@ from common.common_entity.response_schema import ApiResponse
 from common.common_log.log_init import log
 from service.service_gateway.util.model_gateway_cache import ModelGatewayCache
 from common.common_utils.rate_limiter import RateLimiter
-
-# 全局复用转发客户端：连接池 keep-alive；trust_env=False 跳过 Windows 系统代理
-# 超时：连接 10s / 读 300s（LLM 长输出常见 30s+，流式首 token 等待放宽）
-from common.common_httpx.httpx import httpx_pool
+from common.common_model import entry as cm_entry
+from common.common_model.model_types import ModelInvokeError
 
 
-async def _forward(upstream: httpx.Response, stream: bool):
-    """流式请求 → SSE 透传；失败响应（>=400）→ 读全文后按 OpenAI 错误映射返回"""
-    if stream and upstream.status_code < 400:
-        return StreamingResponse(upstream.aiter_bytes(),
-                                 status_code=upstream.status_code,
-                                 headers={"content-type": "text/event-stream",
-                                          "cache-control": "no-cache"})
-    # 非流式或上游错误：读取完整响应
-    try:
-        body = await upstream.aread()
-    except Exception as e:  # noqa: BLE001
-        log.error(f"read upstream response failed: {e}")
-        Response(content="模型响应读取失败",
-                 status_code=upstream.status_code,
-                 media_type=upstream.headers.get("content-type", "application/json"))
-    try:
-        await upstream.aclose()
-    except Exception:  # noqa: BLE001
-        pass
-    if upstream.status_code >= 400:
-        # 错误透传：429 不暴露上游限流细节，统一 429 文案；其余按上游状态码
-        detail = "模型服务错误"
-        try:
-            data = json.loads(body) if body else {}
-            err = data.get("error") if isinstance(data, dict) else None
-            detail = (err or {}).get("message", detail) if isinstance(err, dict) else detail
-        except (json.JSONDecodeError, AttributeError):
-            detail = body[:200].decode("utf-8", errors="ignore") or detail
-        if upstream.status_code == 429:
-            return Response(content="模型请求频率过快，请稍后再试",
-                            status_code=upstream.status_code,
-                            media_type=upstream.headers.get("content-type", "application/json"))
-        return Response(content=detail,
-                        status_code=upstream.status_code if upstream.status_code < 500 else 502,
-                        media_type=upstream.headers.get("content-type", "application/json"))
-    return Response(content=body,
-                    status_code=upstream.status_code,
-                    media_type=upstream.headers.get("content-type", "application/json"))
-
-
-async def model_proxy(request: Request, forward: bool, suffix_url: str = None):
-    """
-    forward: 是否直连；
-    是：模型管理base_url维护的模型base_url + suffix_url
-    否：模型管理base_url维护的模型base_url，需要根据客户端request.url.path截取suffix_url进行 base_url + suffix_url转发
-    suffix_url: base_url的后缀路径
-    """
+async def model_proxy(request: Request):
+    """OpenAI 兼容统一入口：鉴权 + 限流后，按 Redis 配置的 (category, provider)
+    交给 common_model 对应子类直连本厂商端点（端点由子类自拼，无接口后缀概念）。"""
     # ==================== 1. api-key 鉴权 ====================
     api_key = (request.headers.get("X-User-Api-Key")
                or request.headers.get("x-user-api-key")
@@ -112,45 +66,45 @@ async def model_proxy(request: Request, forward: bool, suffix_url: str = None):
         if not await RateLimiter.check_model_qps(model_id, qps_limit):
             return ApiResponse.error(429, "模型请求频率超限（QPS），请稍后再试")
 
-    # ==================== 5. 判断直连/非直连 → 拼上游端点 ====================
+    # ==================== 5. 校验上游基址 ====================
     base_url = (config.get("base_url") or "").rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         return ApiResponse.error(502, "模型接口地址未配置，请联系管理员")
 
-    # 非直连：base_url（接口基础地址）+ 接口后缀；后缀需在模型维护的能力列表中（未配置列表则放行）
-    if not forward:
-        suffix = (suffix_url or "").strip()
-        if not suffix:
-            return ApiResponse.error(400, "非直连模型必须指定接口后缀（如 /v1/chat/completions）")
-        if not suffix.startswith("/"):
-            suffix = "/" + suffix
-        allowed = [s for s in (config.get("suffixes") or []) if s]
-        if allowed and suffix not in allowed:
-            return ApiResponse.error(404, f"该模型不支持接口后缀 {suffix}，请确认模型维护的接口能力")
-        base_url = base_url + suffix
-
-    headers = {
-        "Authorization": f"Bearer {config.get('api_key')}",
-        "Content-Type": "application/json",
-    }
-    stream = bool(body.get("stream"))
-
-    # ==================== 7. 转发 ====================
+    # ==================== 6. 走 common_model：按 (类型, 供应商) 分发到对应子类 ====================
+    # 不再透传原始 HTTP：redis 配置的 category(12 类型) + provider(3 家) 决定具体实现，
+    # 由各供应商子类直连本厂商端点（无任何跨厂商桥接）。
+    category = config.get("category")
+    provider = config.get("provider")
+    if not cm_entry.supports(category, provider):
+        return ApiResponse.error(404, f"模型能力类型/供应商暂不支持调用：{category}/{provider}")
+    model_config = cm_entry.config_from_row(config)
     try:
-        if stream:
-            req = httpx_pool.client.build_request("POST", base_url, json=body, headers=headers)
-            upstream = await httpx_pool.client.send(req, stream=True)
-        else:
-            upstream = await httpx_pool.client.post(base_url, json=body, headers=headers)
-        log.info(f"Model proxy: model_id={model_id} model={req_model} "
-                 f"stream={stream} upstream={upstream.status_code} ({base_url})")
-        return await _forward(upstream, stream)
-    except httpx.TimeoutException:
-        log.error(f"model proxy timeout: {base_url}")
-        return ApiResponse.error(504, "模型响应超时，请重试")
-    except httpx.RequestError as e:
-        log.error(f"model proxy forward failed: {base_url} {e}")
-        return ApiResponse.error(502, "模型请求失败，请重试")
+        kwargs = cm_entry.body_to_kwargs(category, body)
+    except ModelInvokeError as e:
+        return ApiResponse.error(400, str(e))
+
+    stream = bool(body.get("stream"))
+    try:
+        inst = cm_entry.instantiate(category, model_config)
+        if stream and category in cm_entry.MODEL_TYPES_STREAMABLE:
+            gen = cm_entry.stream_to_openai_sse(category, model_config.model_name,
+                                                inst.astream(**kwargs))
+            log.info(f"Model proxy(common_model stream): model_id={model_id} "
+                     f"category={category} provider={provider} model={req_model}")
+            return StreamingResponse(gen, media_type="text/event-stream",
+                                     headers={"cache-control": "no-cache"})
+        result = await inst.ainvoke(**kwargs)
+        data = cm_entry.result_to_openai(category, model_config.model_name, result)
+        log.info(f"Model proxy(common_model): model_id={model_id} category={category} "
+                 f"provider={provider} model={req_model}")
+        return JSONResponse(content=data)
+    except ModelInvokeError as e:
+        code = e.status_code or 502
+        log.warning(f"model proxy common_model error: {category}/{provider} {e}")
+        return Response(content=str(e.message),
+                        status_code=code if 400 <= code < 500 else 502,
+                        media_type="application/json")
     except Exception as e:  # noqa: BLE001
         log.error(f"model proxy unexpected error: {e}")
         return ApiResponse.error(500, "内部错误，请联系管理员")

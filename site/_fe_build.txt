@@ -1,0 +1,44 @@
+﻿[36mvite v7.2.2 [32mbuilding client environment for production...[36m[39m
+transforming...
+..\..\node_modules\.bin\vite.CMD : 
+所在位置 行:1 字符: 29
++ ... s\web-antd; ..\..\node_modules\.bin\vite.CMD build --mode production  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ WARN  [baseline-browser-mapping] The data in this module is over two months old.  To ensure accurate Baseline data, pl
+ease update: npm i baseline-browser-mapping@latest -D
+
+
+ WARN  Browserslist: browsers data (caniuse-lite) is 10 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+
+[32m鉁?[39m 2 modules transformed.
+
+ ERROR  [31m鉁?[39m Build failed in 659ms
+
+
+ ERROR  [31merror during build:
+[31m[vite:css] Failed to load PostCSS config (searchPath: D:/ai澶фā鍨?DRAGON-AI-master/ui-ai/apps/web-antd): [Error] Loa
+ding PostCSS Plugin failed: Cannot find module 'cssnano'
+Require stack:
+- D:\ai澶фā鍨媆DRAGON-AI-master\ui-ai\apps\web-antd\postcss.config.mjs
+
+(@D:\ai澶фā鍨媆DRAGON-AI-master\ui-ai\apps\web-antd\postcss.config.mjs)
+Error: Loading PostCSS Plugin failed: Cannot find module 'cssnano'
+Require stack:
+- D:\ai澶фā鍨媆DRAGON-AI-master\ui-ai\apps\web-antd\postcss.config.mjs
+
+(@D:\ai澶фā鍨媆DRAGON-AI-master\ui-ai\apps\web-antd\postcss.config.mjs)
+    at load$1 (file:///D:/ai%E5%A4%A7%E6%A8%A1%E5%9E%8B/DRAGON-AI-master/ui-ai/node_modules/.pnpm/vite@7.2.2_@types+nod
+e@24.1_c55dbe387a47a86661ab2ddb31340087/node_modules/vite/dist/node/chunks/config.js:7875:10)
+    at async Promise.all (index 0)
+    at async plugins (file:///D:/ai%E5%A4%A7%E6%A8%A1%E5%9E%8B/DRAGON-AI-master/ui-ai/node_modules/.pnpm/vite@7.2.2_@ty
+pes+node@24.1_c55dbe387a47a86661ab2ddb31340087/node_modules/vite/dist/node/chunks/config.js:7897:11)
+    at async processResult (file:///D:/ai%E5%A4%A7%E6%A8%A1%E5%9E%8B/DRAGON-AI-master/ui-ai/node_modules/.pnpm/vite@7.2
+.2_@types+node@24.1_c55dbe387a47a86661ab2ddb31340087/node_modules/vite/dist/node/chunks/config.js:7936:13)[31m
+file: [36mD:/ai澶фā鍨?DRAGON-AI-master/ui-ai/apps/web-antd/index.html?html-proxy&inline-css&index=0.css[31m
+[39m
+

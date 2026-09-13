@@ -159,7 +159,9 @@ class HttpRequestNodeExecutor(BaseNodeExecutor):
 class ToolNodeExecutor(BaseNodeExecutor):
     """TOOL 工具节点：调用 tb_tool 动态函数工具 / tb_mcp_server MCP 工具。
 
-    通过 runtime.tool_invoker 钩子注入（生产=ToolService/MCP 客户端；测试=内存实现）。
+    通过 runtime.tool_invoker 钩子注入（workflow_execution_service 注册）：
+    mcpServerId 非空 → McpServerService 官方 SDK 会话调用 tools/call；
+    否则按工具名称执行 tb_tool 动态函数（受限沙箱，10s 超时）。
     toolParams 值支持 {{变量引用}}。
     """
 

@@ -289,7 +289,6 @@ class WorkflowService:
         stmt = (
             select(
                 Model.id, Model.provider, Model.category, Model.name, Model.base_url,
-                Model.is_direct, Model.suffixes,
             )
             .join(ModelApply, ModelApply.model_id == Model.id)
             .where(
@@ -305,8 +304,6 @@ class WorkflowService:
             return [{
                 "id": r["id"], "provider": r["provider"], "type": r["category"],
                 "name": r["name"], "baseUrl": r["base_url"],
-                "isDirect": int(r["is_direct"]),
-                "suffixes": r["suffixes"] or [],
             } for r in rows]
 
     @staticmethod

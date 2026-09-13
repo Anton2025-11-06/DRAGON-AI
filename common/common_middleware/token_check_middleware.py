@@ -32,6 +32,8 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
     WHITE_LIST_PREFIX = [
         "/internal/",
         "/api/model",
+        # 文件上传/下载（暂不做鉴权，供模型拉取可访问 URL）
+        "/api/file",
     ]
 
     async def dispatch(self, request: Request, call_next):

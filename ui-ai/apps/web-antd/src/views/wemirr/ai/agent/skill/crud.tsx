@@ -12,7 +12,7 @@ import * as api from './api';
 export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
-  const { onPreview, onReplace, toggleStatus } = props.context;
+  const { onPreview, onReplace, onRename, toggleStatus } = props.context;
   return {
     crudOptions: {
       request: {
@@ -49,10 +49,20 @@ export default function createCrudOptions(
             type: 'link',
             text: '替换目录',
             size: 'small',
-            title: '替换技能文件夹',
+            title: '替换技能压缩包',
             order: 1,
             click(context: any) {
               onReplace?.(context.row);
+            },
+          },
+          rename: {
+            type: 'link',
+            text: '重命名',
+            size: 'small',
+            title: '重命名技能',
+            order: 1.5,
+            click(context: any) {
+              onRename?.(context.row);
             },
           },
           preview: {

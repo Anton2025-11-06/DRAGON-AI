@@ -25,6 +25,9 @@ export default function createCrudOptions(
   return {
     crudOptions: {
       request: {
+        pageRequest: async (query: any) => {
+          return await api.PageList(query);
+        },
         transformQuery: ({ page, form, sort }: any) => {
           const order =
             sort === null ? {} : { column: sort.prop, asc: sort.asc };
@@ -35,8 +38,12 @@ export default function createCrudOptions(
             ...order,
           };
         },
-        // 编辑弹窗打开时拉取完整详情（列表接口只返回源码摘要）
+        // 编辑弹窗打开时拉取完整详情（列表接口只返回源码摘要）；
+        // 注意：fast-crud 在 openAdd 时也会调用 infoRequest，此时 row 不存在，需守卫
         infoRequest: async ({ row }: any) => {
+          if (!row || row.id === undefined || row.id === null) {
+            return {};
+          }
           return await api.GetDetail(row.id);
         },
         addRequest: async ({ form }: AddReq) => await api.AddObj(form),
@@ -76,19 +83,20 @@ export default function createCrudOptions(
         },
         function_code: {
           title: '函数源码',
-          type: 'text',
+          // 注意：fast-crud 渲染表单组件看 component.name（缺省为 a-input），
+          // component.is 只是透传 prop 不会参与组件选择
           form: {
             col: { span: 24 },
             wrapperCol: { span: 24 },
             rules: [{ required: true, message: '请输入函数源码' }],
             component: {
+              name: CodeEditor,
               is: CodeEditor,
               vModel: 'command',
-              // @ts-expect-error 透传给组件布局参数
               style: { height: '300px' },
             },
             helper:
-              '定义 run() 函数或任意函数，测试时将以关键字参数调用；危险内建（文件IO/网络）已被禁用',
+              '定义 run()/main() 函数（与工作流 CODE 节点一致），测试时将以关键字参数调用；危险内建（文件IO/网络）已被禁用',
           },
           column: {
             width: 300,
@@ -103,11 +111,11 @@ export default function createCrudOptions(
             col: { span: 24 },
             component: {
               placeholder:
-                '{"example": {"a": 1, "b": 2}, "description": "参数说明"}',
+                '{"parameters": [{"name": "a", "type": "number", "required": true, "default": 1}]}',
               rows: 3,
             },
             helper:
-              'JSON 格式：example 参数示例（测试弹窗自动填充）、description 参数说明',
+              'JSON 格式：{"parameters": [{"name":"a","type":"number","required":true,"default":1,"description":"说明"}]}，测试弹窗按此渲染动态表单；也兼容 {"example": {…}} 旧格式',
           },
           column: { show: false },
         },

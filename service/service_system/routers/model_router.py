@@ -52,6 +52,11 @@ async def categories(request: Request):
     })
 
 
+@router.get("/registry", summary="模型标识注册表（已验证标识，按类型/厂家过滤）")
+async def registry(request: Request, provider: str = None, category: str = None):
+    return ApiResponse.success(data=await ModelService.registry(provider, category))
+
+
 @router.get("/my-keys", summary="我的 API Key（申请通过后可见）")
 async def my_keys(request: Request):
     login_user = await get_login_user(request)

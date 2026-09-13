@@ -5,6 +5,7 @@ from fastapi import Depends
 from service.service_workflow.routers.mcp_router import router as mcp_router
 from service.service_workflow.routers.model_chat_router import router as model_chat_router
 from service.service_workflow.routers.sandbox_router import router as sandbox_router
+from service.service_workflow.routers.skill_router import router as skill_router
 from service.service_workflow.routers.tool_router import router as tool_router
 from service.service_workflow.routers.workflow_router import (
     router as workflow_router,
@@ -26,7 +27,7 @@ from service.service_workflow.services.workflow_service import ensure_initialize
 app = create_app(
     service_name=SERVICE_WORKFLOW,
     default_port=SERVICE_WORKFLOW_PORT,
-    routers=[mcp_router, tool_router, sandbox_router, model_chat_router],
+    routers=[mcp_router, tool_router, sandbox_router, skill_router, model_chat_router],
 )
 
 # 工作流相关路由：统一追加「懒加载初始化」依赖（DB 就绪前调用自愈，不阻断其他路由）

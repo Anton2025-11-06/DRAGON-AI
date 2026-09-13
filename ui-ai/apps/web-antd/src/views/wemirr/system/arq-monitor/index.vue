@@ -59,14 +59,15 @@ async function handleRefresh() {
   }
 }
 
-/** 自动刷新开关 */
-function toggleAutoRefresh(checked: boolean) {
-  autoRefresh.value = checked;
+/** 自动刷新开关（antd Switch change 参数为 CheckedType，取真值判断） */
+function toggleAutoRefresh(checked: boolean | string | number) {
+  const on = checked === true || checked === 'true' || checked === 1;
+  autoRefresh.value = on;
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
-  if (checked) {
+  if (on) {
     timer = setInterval(refresh, REFRESH_INTERVAL);
   }
 }

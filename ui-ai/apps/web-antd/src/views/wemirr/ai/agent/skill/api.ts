@@ -43,9 +43,9 @@ export interface SkillSaveReq {
   tags?: string[];
 }
 
-export interface SkillUploadReq extends SkillSaveReq {
-  files: File[];
-  relativePaths: string[];
+export interface SkillZipUploadReq extends SkillSaveReq {
+  /** SKILL.zip 单文件压缩包（内含 SKILL.md） */
+  file: File;
 }
 
 export interface SkillFileUpdateReq {
@@ -72,29 +72,31 @@ export const DownloadSkill = (item: SkillPageResp) =>
 export const UpdateSkillFile = (id: number, data: SkillFileUpdateReq) =>
   defHttp.put(`${BASE_URL}/${id}/files`, data);
 
-const buildSkillPackageFormData = (data: SkillUploadReq) => {
+export const RenameObj = (id: number, name: string) =>
+  defHttp.request(`${BASE_URL}/${id}/rename`, {
+    method: 'PATCH',
+    data: { name },
+  });
+
+const buildSkillFormData = (data: SkillZipUploadReq) => {
   const formData = new FormData();
   formData.append('name', data.name);
   formData.append('code', data.code);
   data.description && formData.append('description', data.description);
   data.category && formData.append('category', data.category);
   data.icon && formData.append('icon', data.icon);
-  data.tags?.forEach((tag) => formData.append('tags', tag));
-  data.files.forEach((file, index) => {
-    const relativePath = data.relativePaths[index] || file.name;
-    formData.append('files', file, relativePath);
-    formData.append('relativePaths', relativePath);
-  });
+  data.tags?.length && formData.append('tags', JSON.stringify(data.tags));
+  formData.append('file', data.file);
   return formData;
 };
 
-export const AddObj = (data: SkillUploadReq) =>
-  defHttp.post(`${BASE_URL}/upload`, buildSkillPackageFormData(data), {
+export const AddObj = (data: SkillZipUploadReq) =>
+  defHttp.post(`${BASE_URL}/upload`, buildSkillFormData(data), {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 
-export const UpdateObj = (id: number, data: SkillUploadReq) =>
-  defHttp.put(`${BASE_URL}/${id}/upload`, buildSkillPackageFormData(data), {
+export const UpdateObj = (id: number, data: SkillZipUploadReq) =>
+  defHttp.put(`${BASE_URL}/${id}/upload`, buildSkillFormData(data), {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 

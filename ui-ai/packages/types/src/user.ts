@@ -17,6 +17,16 @@ interface UserInfo extends BasicUserInfo {
   token: string;
 
   /**
+   * 手机号（后端 user.phone）
+   */
+  mobile?: string;
+
+  /**
+   * 邮箱（后端 user.email）
+   */
+  email?: string;
+
+  /**
    * 真实姓名（后端 real_name）
    */
   realName?: string;

@@ -460,11 +460,11 @@ function beautifyLayout() {
     ids.forEach((id, idx) => {
       const n = nodeList.find((x) => x.id === id);
       if (!n) return;
-      const w = n.measured?.width || NODE_W;
-      const h = n.measured?.height || NODE_H;
+      // vue-flow GraphNode.dimensions 为已渲染尺寸（宽高校准布局用）
+      const { width: w, height: h } = n.dimensions ?? {};
       posMap.set(id, {
-        x: PAD + lv * (NODE_W + GAP_X) + (NODE_W - w) / 2,
-        y: yCursor + idx * (NODE_H + GAP_Y) + (NODE_H - h) / 2,
+        x: PAD + lv * (NODE_W + GAP_X) + (NODE_W - (w || NODE_W)) / 2,
+        y: yCursor + idx * (NODE_H + GAP_Y) + (NODE_H - (h || NODE_H)) / 2,
       });
     });
     yCursor += layerH + GAP_Y;

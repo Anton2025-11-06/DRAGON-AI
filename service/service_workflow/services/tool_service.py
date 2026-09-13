@@ -1,6 +1,7 @@
 import asyncio
 import builtins
 import inspect
+import json
 import time
 
 from sqlalchemy import text
@@ -118,7 +119,7 @@ class ToolService:
             await session.commit()
             return result.rowcount > 0
 
-    # ==================== 执行测试 ====================
+    # ==================== 执行测试 / 按名执行（工作流工具节点复用） ====================
     @staticmethod
     def _compile_code(source: str):
         """编译校验源码：语法错误直接抛 ValueError（带行号）"""
@@ -128,6 +129,36 @@ class ToolService:
             compile(source, "<tool>", "exec")
         except SyntaxError as e:
             raise ValueError(f"源码语法错误: 第{e.lineno}行 {e.msg}")
+
+    @staticmethod
+    async def _run_guarded(source: str, parameters: dict) -> dict:
+        """受限环境执行 + 超时守卫：线程池执行，10s 超时，异常/超时返回错误态。"""
+        start = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, ToolService._execute, source, parameters or {}),
+                timeout=FUNC_TIMEOUT)
+            return {"success": True, "result": ToolService._json_safe(result),
+                    "duration_ms": int((time.perf_counter() - start) * 1000)}
+        except asyncio.TimeoutError:
+            log.warning("Tool execution timeout")
+            return {"success": False, "error": f"执行超时（>{FUNC_TIMEOUT}s），请检查函数是否死循环",
+                    "duration_ms": int((time.perf_counter() - start) * 1000)}
+        except Exception as e:  # noqa: BLE001
+            log.warning("Tool execution failed: {}", str(e))
+            return {"success": False, "error": f"{type(e).__name__}: {e}",
+                    "duration_ms": int((time.perf_counter() - start) * 1000)}
+
+    @staticmethod
+    def _json_safe(value):
+        """结果 JSON 可序列化兜底：set/bytes 等不可序列化时转为字符串，避免接口 500"""
+        try:
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            return str(value)
 
     @staticmethod
     async def test(id_: int, parameters: dict = None) -> dict:
@@ -142,32 +173,29 @@ class ToolService:
             raise ValueError("工具不存在")
         if not row[5]:
             raise ValueError("工具已停用，请先启用后再测试")
+        return await ToolService._run_guarded(row[3], parameters or {})
 
-        start = time.perf_counter()
-        loop = asyncio.get_running_loop()
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, ToolService._execute, row[3], parameters or {}),
-                timeout=FUNC_TIMEOUT)
-            return {"success": True, "result": result,
-                    "duration_ms": int((time.perf_counter() - start) * 1000)}
-        except asyncio.TimeoutError:
-            log.warning(f"Tool execution timeout: id={id_}")
-            return {"success": False, "error": f"执行超时（>{FUNC_TIMEOUT}s），请检查函数是否死循环",
-                    "duration_ms": int((time.perf_counter() - start) * 1000)}
-        except Exception as e:
-            log.warning(f"Tool execution failed: id={id_}, {str(e)}")
-            return {"success": False, "error": f"{type(e).__name__}: {e}",
-                    "duration_ms": int((time.perf_counter() - start) * 1000)}
+    @staticmethod
+    async def execute_by_name(name: str, parameters: dict = None) -> dict:
+        """按名称执行启用中的工具（工作流 TOOL 节点 invoker 复用同一受限沙箱）。"""
+        async with mysql_client.get_session() as session:
+            row = (await session.execute(
+                text("""SELECT id, function_code, status FROM tb_tool
+                        WHERE name = :name ORDER BY id DESC LIMIT 1"""),
+                {"name": name})).first()
+        if not row:
+            raise ValueError(f"工具不存在: {name}")
+        if not row[2]:
+            raise ValueError(f"工具已停用: {name}")
+        return await ToolService._run_guarded(row[1], parameters or {})
 
     @staticmethod
     def _execute(source: str, parameters: dict):
         """在线程中执行用户函数（同步部分），返回 JSON 可序列化结果"""
         namespace = {"__builtins__": _SAFE_BUILTINS}
         exec(compile(source, "<tool>", "exec"), namespace)
-        # 找到入口函数：优先 run，否则取源码中第一个用户函数（以全局命名空间归属识别）
-        fn = namespace.get("run")
+        # 找到入口函数：优先 run/main（与工作流 CODE 节点一致），否则取源码中第一个用户函数
+        fn = namespace.get("run") or namespace.get("main")
         if fn is None:
             for name, obj in namespace.items():
                 if name.startswith("_"):
@@ -176,8 +204,9 @@ class ToolService:
                     fn = obj
                     break
         if fn is None:
-            raise ValueError("源码中未定义任何函数，请定义 run 或任意函数")
+            raise ValueError("源码中未定义任何函数，请定义 run/main 或任意函数")
 
-        if isinstance(parameters, dict) and parameters:
+        if isinstance(parameters, dict):
+            # 空 dict 时等价于调用 fn()；非空 dict 按关键字传入
             return fn(**parameters)
         return fn(parameters)

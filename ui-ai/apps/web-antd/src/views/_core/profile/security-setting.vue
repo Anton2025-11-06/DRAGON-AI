@@ -182,7 +182,7 @@ async function sendCode(type: 'email' | 'phone') {
     return;
   }
 
-  const target = type === 'phone' ? formState.phone : formState.email;
+  // 发送验证码（后端暂未提供验证码接口，保留交互占位）
   try {
     // 后端暂未提供验证码接口，保留交互占位
     message.info('验证码功能开发中，敬请期待');

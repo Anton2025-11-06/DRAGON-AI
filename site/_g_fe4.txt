@@ -1,0 +1,4 @@
+adapter\component\index.ts:370:loadingSlot: 'suffixIcon',
+adapter\component\index.ts:384:loadingSlot: 'suffixIcon',
+api\ai-workflow\const.ts:7:* 「直连/非直连 is_direct + 接口后缀 suffixes」概念已整体废弃，登记只需
+views\wemirr\ai\model-plaza\components\CreateModelDialog.vue:11:* 【设计对齐 2026-09】「直连/非直连 is_direct + 接口后缀 suffixes」概念已整体废弃：

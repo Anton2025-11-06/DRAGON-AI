@@ -22,15 +22,12 @@ withDefaults(
     showModelSelect?: boolean;
     /** 是否显示流式输出开关 */
     showStreamSwitch?: boolean;
-    /** 非直连模型的接口后缀选项（非直连时显示后缀下拉选择器） */
-    suffixOptions?: { desc?: string; url: string }[];
   }>(),
   {
     models: () => [],
     selectedModelId: undefined,
     showModelSelect: true,
     showStreamSwitch: false,
-    suffixOptions: () => [],
   },
 );
 
@@ -45,8 +42,6 @@ const modelId = defineModel<number | undefined>('modelId');
 const deepThinking = defineModel<boolean>('deepThinking', { default: false });
 const webSearch = defineModel<boolean>('webSearch', { default: false });
 const stream = defineModel<boolean>('stream', { default: true });
-/** 非直连模型选中的接口后缀 URI */
-const suffixId = defineModel<string>('suffixId', { default: '' });
 
 // ==================== 事件处理 ====================
 function handleSubmit(value: string) {
@@ -119,21 +114,6 @@ function toggleStream() {
             v-model:value="modelId"
             :options="models.map((m) => ({ label: m.name, value: m.id }))"
             placeholder="选择模型"
-            :bordered="false"
-            size="small"
-            class="model-select"
-          />
-          <!-- 非直连模型：接口后缀选择（显示后缀 URI + 能力说明） -->
-          <Select
-            v-if="suffixOptions.length > 0"
-            v-model:value="suffixId"
-            :options="
-              suffixOptions.map((s) => ({
-                label: `${s.url}（${s.desc || '接口'}）`,
-                value: s.url,
-              }))
-            "
-            placeholder="选择接口"
             :bordered="false"
             size="small"
             class="model-select"

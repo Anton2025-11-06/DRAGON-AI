@@ -1,0 +1,25 @@
+﻿src/store/auth.ts(31,5): error TS2353: Object literal may only specify known properties, and 'email' does not exist in type 'UserInfo'.
+src/views/_core/profile/security-setting.vue(185,9): error TS6133: 'target' is declared but its value is never read.
+src/views/wemirr/ai/agent/tool/crud.tsx(87,15): error TS2578: Unused '@ts-expect-error' directive.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(2,15): error TS2614: Module '"ant-design-vue"' has no exported member 'FormRules'. Did you mean to use 'import FormRules from "ant-design-vue"' instead?
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(222,5): error TS2322: Type 'string' is not assignable to type '"text_to_text" | "text_embedding" | "text_rerank" | "image_embedding" | "text_to_image" | "audio_to_text" | "image_understand" | "video_understand" | "ocr" | "image_to_video" | "text_to_video" | "text_to_audio"'.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(223,5): error TS2322: Type 'string' is not assignable to type '"openai" | "dashscope" | "zhipu"'.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(225,5): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+  Type 'undefined' is not assignable to type 'string'.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(229,5): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+  Type 'undefined' is not assignable to type 'string'.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(273,5): error TS2322: Type 'string' is not assignable to type '"text_to_text" | "text_embedding" | "text_rerank" | "image_embedding" | "text_to_image" | "audio_to_text" | "image_understand" | "video_understand" | "ocr" | "image_to_video" | "text_to_video" | "text_to_audio"'.
+src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue(274,5): error TS2322: Type 'string' is not assignable to type '"openai" | "dashscope" | "zhipu"'.
+src/views/wemirr/ai/workflow/components/node-forms/CodeNodeForm.vue(120,5): error TS2353: Object literal may only specify known properties, and 'language' does not exist in type 'CodeNodeConfig'.
+src/views/wemirr/ai/workflow/components/VueFlowCanvas.vue(463,19): error TS2339: Property 'measured' does not exist on type 'GraphNode<any, any, string>'.
+src/views/wemirr/ai/workflow/components/VueFlowCanvas.vue(464,19): error TS2339: Property 'measured' does not exist on type 'GraphNode<any, any, string>'.
+src/views/wemirr/home/api.ts(64,72): error TS2353: Object literal may only specify known properties, and 'path' does not exist in type 'RequestClientConfig'.
+src/views/wemirr/home/api.ts(69,70): error TS2353: Object literal may only specify known properties, and 'path' does not exist in type 'RequestClientConfig'.
+src/views/wemirr/home/api.ts(122,5): error TS2559: Type '{ page: number; page_size: number; }' has no properties in common with type 'RequestClientConfig'.
+src/views/wemirr/home/index.vue(631,24): error TS2339: Property 'type' does not exist on type '{ id: number; name: string; url: string; }'.
+src/views/wemirr/home/index.vue(631,48): error TS2339: Property 'command' does not exist on type '{ id: number; name: string; url: string; }'.
+src/views/wemirr/system/arq-monitor/index.vue(199,14): error TS2322: Type '(checked: boolean) => void' is not assignable to type '(checked: CheckedType, e: Event) => void'.
+  Types of parameters 'checked' and 'checked' are incompatible.
+    Type 'CheckedType' is not assignable to type 'boolean'.
+      Type 'string' is not assignable to type 'boolean'.
+src/views/wemirr/system/rate-limit/rate-limit.tsx(6,3): error TS6196: 'ValueBuilderContext' is declared but never used.

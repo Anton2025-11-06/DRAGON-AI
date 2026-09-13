@@ -1,0 +1,23 @@
+﻿
+  [32m[1mVITE[22m v7.2.2[39m  [2mready in [0m[1m3968[22m[2m[0m ms[22m
+
+  [32m鉃?[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5999[22m/[39m
+  [32m鉃?[39m  [1mNetwork[22m: [36mhttp://192.168.238.1:[1m5999[22m/[39m
+  [32m鉃?[39m  [1mNetwork[22m: [36mhttp://192.168.1.9:[1m5999[22m/[39m
+  [32m鉃?[39m  [1mNetwork[22m: [36mhttp://192.168.255.10:[1m5999[22m/[39m
+[2m[32m  鉃?[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+..\..\node_modules\.bin\vite.CMD : 
+所在位置 行:1 字符: 29
++ ... s\web-antd; ..\..\node_modules\.bin\vite.CMD --mode development --por ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ WARN  [baseline-browser-mapping] The data in this module is over two months old.  To ensure accurate Baseline data, pl
+ease update: npm i baseline-browser-mapping@latest -D
+
+
+ WARN  Browserslist: browsers data (caniuse-lite) is 10 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+

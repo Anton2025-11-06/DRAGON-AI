@@ -38,6 +38,12 @@ class McpServerPageRequest(BaseModel):
     status: Optional[bool] = None
 
 
+class McpToolCallRequest(BaseModel):
+    """调用 MCP 工具（工作流工具节点 / 页面调试）"""
+    tool_name: str = Field(..., min_length=1, max_length=128, description="工具名称")
+    arguments: dict = Field(default_factory=dict, description="调用参数 JSON 对象")
+
+
 @router.get("/page", summary="分页查询 MCP 连接")
 @has_permission("workflow:mcp:list")
 async def page_mcp(request: Request, page: int = 1, page_size: int = 10,
@@ -120,7 +126,21 @@ async def refresh_connection(request: Request, mcp_id: int):
     row = await McpServerService.get_by_id(mcp_id)
     if not row:
         return ApiResponse.error(400, "连接不存在")
-    return ApiResponse.success(message="刷新成功")
+    # 断开并清除缓存会话：下次 list_tools / call_tool 自动重连
+    await McpServerService.refresh(mcp_id)
+    return ApiResponse.success(message="刷新成功（下次调用将重新建立连接）")
+
+
+@router.post("/{mcp_id}/call-tool", summary="调用MCP工具")
+@has_permission("workflow:mcp:test")
+async def call_tool(request: Request, mcp_id: int, body: McpToolCallRequest):
+    row = await McpServerService.get_by_id(mcp_id)
+    if not row:
+        return ApiResponse.error(400, "连接不存在")
+    result = await McpServerService.call_tool(mcp_id, body.tool_name, body.arguments)
+    if result.get("isError"):
+        return ApiResponse.error(500, result.get("content") or "工具调用返回错误")
+    return ApiResponse.success(data=result)
 
 
 def _parse_status(status):

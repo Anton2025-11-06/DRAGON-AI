@@ -17,6 +17,7 @@ import { resolveApiUrl } from '#/api/helper';
 
 import * as api from './api';
 import CreateModelDialog from './components/CreateModelDialog.vue';
+import KeyBigScreen from './components/KeyBigScreen.vue';
 import ModelCard from './components/ModelCard.vue';
 
 import 'md-editor-v3/lib/style.css';
@@ -134,35 +135,45 @@ const submitApply = async () => {
   }
 };
 
-// ==================== 查看教程 ====================
-const tutorialVisible = ref(false);
-const tutorialMd = ref('');
-const tutorialRow = ref<api.ModelPageRep | null>(null);
+// ==================== 我的 Key：下载 / 大屏 ====================
+const bigScreenOpen = ref(false);
+const bigScreenKey = ref<api.MyKeyRep | null>(null);
 
-const openTutorial = async (row: api.ModelPageRep) => {
-  tutorialVisible.value = true;
-  tutorialRow.value = row;
-  tutorialMd.value = '';
-  try {
-    const detail = await api.GetDetail(row.id);
-    tutorialMd.value = detail?.tutorial_md || '暂无教程';
-  } catch {
-    tutorialMd.value = '教程加载失败';
-  }
+const openBigScreen = (k: api.MyKeyRep) => {
+  bigScreenKey.value = k;
+  bigScreenOpen.value = true;
 };
 
-/** 下载教程为 Markdown 文件（文件名带模型名） */
-const downloadTutorial = () => {
-  const content = tutorialMd.value;
-  if (!content || content === '暂无教程' || content === '教程加载失败') {
-    message.warning('暂无教程内容可下载');
-    return;
-  }
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+/** 导出单个 Key 接入信息为 Markdown 文件（文件名带模型名） */
+const downloadKey = (k: api.MyKeyRep) => {
+  const paramRows = (k.common_params || [])
+    .map(
+      (p) => `| ${p.name} | ${p.default ?? '-'} | ${p.desc || '-'} | ${p.type} |`,
+    )
+    .join('\n');
+  const md = [
+    `# ${k.name}`,
+    '',
+    `- 能力类型：${k.category_label}`,
+    `- 提供商：${k.provider_label}`,
+    `- 模型标识：${k.model_name}`,
+    `- 网关地址：${k.gateway_url || defaultGatewayUrl.value}`,
+    `- API Key：${k.api_key}`,
+    `- 限流：${k.rate_limit_qps ? '并发 ' + k.rate_limit_qps : '不限制'}`,
+    `- 支持流式：${k.supports_stream ? '是' : '否'}（开启参数：${k.stream_param || 'stream'}）`,
+    `- 支持深度思考：${k.supports_thinking ? '是' : '否'}（开启参数：${k.thinking_param || '-'}）`,
+    k.tutorial_md ? `\n## 使用教程\n\n${k.tutorial_md}` : '',
+    paramRows
+      ? `\n## 常用参数\n\n| 参数名 | 默认值 | 说明 | 类型 |\n| --- | --- | --- | --- |\n${paramRows}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${tutorialRow.value?.name || '模型'}-使用教程.md`;
+  a.download = `${k.name}-接入信息.md`;
   a.click();
   // 延迟释放，避免部分浏览器在下载开始前 URL 失效
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -189,12 +200,6 @@ const defaultGatewayUrl = computed(() => {
   const baseUrl = import.meta.env.VITE_GLOB_API_URL || '';
   return resolveApiUrl('/api/model', baseUrl);
 });
-
-/** 我的 API Key 弹窗：非直连模型的支持后缀表格列 */
-const suffixColumns = [
-  { title: '后缀 URI', dataIndex: 'url', key: 'url' },
-  { title: '接口说明', dataIndex: 'desc', key: 'desc' },
-];
 
 // ==================== 初始化 ====================
 onMounted(async () => {
@@ -250,7 +255,6 @@ onMounted(async () => {
                 :can-edit="canEdit"
                 :can-delete="canDelete"
                 @apply="openApply"
-                @tutorial="openTutorial"
                 @my-key="openMyKeys"
                 @edit="openEdit"
                 @toggle="onToggle"
@@ -316,21 +320,6 @@ onMounted(async () => {
       </a-form>
     </a-modal>
 
-    <!-- 使用教程（Markdown 在线查看 + 下载） -->
-    <a-modal v-model:open="tutorialVisible" title="使用教程" width="760px">
-      <div class="model-tutorial">
-        <MdPreview :model-value="tutorialMd" />
-      </div>
-      <template #footer>
-        <a-space>
-          <a-button @click="tutorialVisible = false">关闭</a-button>
-          <a-button type="primary" @click="downloadTutorial">
-            下载教程
-          </a-button>
-        </a-space>
-      </template>
-    </a-modal>
-
     <!-- 我的 API Key -->
     <a-modal
       v-model:open="keyVisible"
@@ -359,32 +348,6 @@ onMounted(async () => {
                   {{ k.gateway_url || defaultGatewayUrl }}
                 </a-typography-text>
               </a-descriptions-item>
-              <!-- 非直连模型：支持后缀表格（后缀 URI + 中文说明） -->
-              <a-descriptions-item
-                v-if="k.is_direct === false && (k.suffixes || []).length > 0"
-                label="支持后缀"
-              >
-                <a-table
-                  :columns="suffixColumns"
-                  :data-source="k.suffixes"
-                  :pagination="false"
-                  row-key="url"
-                  size="small"
-                  :show-header="false"
-                  class="my-key-suffix-table"
-                >
-                  <template #bodyCell="{ column, record }">
-                    <template v-if="column.key === 'url'">
-                      <a-typography-text code>
-                        {{ record.url }}
-                      </a-typography-text>
-                    </template>
-                    <template v-else-if="column.key === 'desc'">
-                      {{ record.desc || '-' }}
-                    </template>
-                  </template>
-                </a-table>
-              </a-descriptions-item>
               <a-descriptions-item label="API Key">
                 <a-typography-text code copyable style="color: #cf1322">
                   {{ k.api_key }}
@@ -393,7 +356,22 @@ onMounted(async () => {
               <a-descriptions-item label="限流">
                 并发 {{ k.rate_limit_qps || '不限' }}
               </a-descriptions-item>
+              <a-descriptions-item label="能力">
+                流式 {{ k.supports_stream ? '支持' : '不支持' }}（参数
+                {{ k.stream_param || 'stream' }}）· 深度思考
+                {{ k.supports_thinking ? '支持' : '不支持' }}（参数
+                {{ k.thinking_param || '-' }}）· 常用参数
+                {{ (k.common_params || []).length }} 个
+              </a-descriptions-item>
             </a-descriptions>
+            <div style="margin-top: 8px; text-align: right">
+              <a-space>
+                <a-button size="small" @click="downloadKey(k)">下载</a-button>
+                <a-button size="small" type="primary" @click="openBigScreen(k)">
+                  大屏查看
+                </a-button>
+              </a-space>
+            </div>
             <div v-if="k.tutorial_md" style="margin-top: 8px">
               <MdPreview :model-value="k.tutorial_md" />
             </div>
@@ -402,6 +380,9 @@ onMounted(async () => {
         <a-empty v-else description="暂无已通过的申请" />
       </a-spin>
     </a-modal>
+
+    <!-- 大屏查看我的 Key -->
+    <KeyBigScreen v-model:open="bigScreenOpen" :key-data="bigScreenKey" />
   </div>
 </template>
 
@@ -443,11 +424,5 @@ onMounted(async () => {
   max-height: 60vh;
   overflow-y: auto;
   padding: 4px;
-}
-
-/* 支持后缀表格：压缩单元格上下内边距，使首行 URI 与「支持后缀」label 顶部对齐 */
-:deep(.my-key-suffix-table .ant-table-cell) {
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
 }
 </style>

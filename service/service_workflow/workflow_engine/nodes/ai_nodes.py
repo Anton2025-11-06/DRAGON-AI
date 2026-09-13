@@ -9,24 +9,32 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from common.common_constants.model_constant import (
+    MODEL_TYPES_STREAMABLE, MT_AUDIO_TO_TEXT, MT_IMAGE_EMBEDDING,
+    MT_IMAGE_TO_VIDEO, MT_IMAGE_UNDERSTAND, MT_OCR, MT_TEXT_EMBEDDING,
+    MT_TEXT_RERANK, MT_TEXT_TO_AUDIO, MT_TEXT_TO_IMAGE, MT_TEXT_TO_TEXT,
+    MT_TEXT_TO_VIDEO, MT_VIDEO_UNDERSTAND,
+)
+from common.common_model import entry as cm_entry
+from common.common_model.base import ModelResult
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.model_client import (
-    ChatMessage, InvokeResult, WorkflowModelClient,
+    ChatMessage, WorkflowModelClient,
 )
 from service.service_workflow.workflow_engine.nodes.base import (
-    BaseNodeExecutor, NodeResult, issue,
+    BaseNodeExecutor, NodeExecutionError, NodeResult, issue,
 )
 
 
 class LLMNodeExecutor(BaseNodeExecutor):
-    """LLM 大模型节点（对照 MaxKB ai-chat-node）。
+    """LLM 大模型节点：经 common_model 支持全部 12 种能力类型（非桥接，类型化直连）。
 
-    - systemPrompt / promptTemplate 支持 {{nodeId.var}} 渲染
-    - contextVariables：声明式变量注入（name → reference）
-    - streaming：流式逐 token 发 node.delta；非流式一次 invoke
-    - structuredOutput.enabled：response_format=json_schema 约束输出
-    - visionEnabled：imageVariables 渲染为多模态 content 数组
-    - memoryEnabled：从 START 输入的 messages 历史注入（一期：inputs.conversation）
+    - 依据所选模型登记的 category（12 类之一）+ provider，交给对应 common_model 实现；
+    - 上游输入：文本(prompt/消息)、图片(imageVariable)、音频(audioVariable)、视频(videoVariable)、
+      向量输入(inputVariable)、重排(queryVariable/documentsVariable) —— 均支持 {{节点.变量}} 引用；
+    - 下游输出：文本类产出 text、向量类产出 vectors/dimension、重排产出 scores、
+      生成类产出 url/urls，供下游节点参数引用。
+    - 支持 stream 的三类（文生文/图片理解/视频理解）流式逐 token 发 node.delta。
     """
 
     node_type = "LLM"
@@ -36,16 +44,57 @@ class LLMNodeExecutor(BaseNodeExecutor):
         model_id = self.require_model_id()
         client = await WorkflowModelClient.create(
             model_id, provider=self.runtime.model_provider, http=self.runtime.http_client)
-        # 节点配置所选接口后缀（非直连时 base_url + suffix 拼接 URL）
-        client.config.use_suffix = (cfg.get("suffix") or "").strip() or None
+        category = client.config.category
+        provider = client.config.provider
+        output_var = cfg.get("outputVariable") or "output"
 
-        messages = self._build_messages(ctx)
-        kwargs = {}
+        # 动态发现校验：该 (类型, 供应商) 是否有 common_model 实现（不硬编码）
+        if not cm_entry.supports(category, provider):
+            raise NodeExecutionError(
+                f"模型能力类型/供应商暂不支持调用：{category}/{provider}")
+        _, inst = client.acall(category)
+
+        # 文生文走对话族（保留 system/记忆/上下文/结构化输出等完整能力）
+        if category == MT_TEXT_TO_TEXT:
+            return await self._run_text_to_text(ctx, inst, output_var)
+
+        # 其余 11 类：按类型翻译入参 → 类型化调用 → 映射产出
+        kwargs = self._build_kwargs(ctx, category)
+        streaming = bool(cfg.get("streaming", True)) and category in MODEL_TYPES_STREAMABLE
+        if streaming:
+            full, reasoning, usage = "", "", {}
+            async for c in inst.astream(**kwargs):
+                if c.content:
+                    full += c.content
+                    await self.emit_delta(c.content)
+                if c.reasoning_content:
+                    reasoning += c.reasoning_content
+                if c.usage:
+                    usage = c.usage
+            r = ModelResult(content=full, reasoning_content=reasoning, usage=usage)
+        else:
+            r = await inst.ainvoke(**kwargs)
+
+        if r.usage:
+            self.runtime.bump_usage(r.usage.get("prompt_tokens", 0),
+                                    r.usage.get("completion_tokens", 0))
+        output = self._map_output(category, r, output_var)
+        stream_text = r.content if category in (
+            MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_AUDIO_TO_TEXT) else None
+        return NodeResult(output=output, stream_text=stream_text)
+
+    # ---------- 文生文（对话族，功能最全） ----------
+
+    async def _run_text_to_text(self, ctx, inst, output_var) -> NodeResult:
+        cfg = self.config
+        messages = [m.to_openai() for m in self._build_messages(ctx)]
+        kwargs: dict = {"messages": messages}
         if cfg.get("temperature") is not None:
             kwargs["temperature"] = float(cfg["temperature"])
         if cfg.get("maxTokens"):
             kwargs["max_tokens"] = int(cfg["maxTokens"])
-
+        if cfg.get("thinking"):
+            kwargs["thinking"] = True
         so = cfg.get("structuredOutput") or {}
         if so.get("enabled") and so.get("jsonSchema"):
             schema = self._parse_schema(so["jsonSchema"])
@@ -55,14 +104,10 @@ class LLMNodeExecutor(BaseNodeExecutor):
                     "json_schema": {"name": "output", "schema": schema,
                                     "strict": bool(so.get("strictMode", False))},
                 }
-
-        output_var = cfg.get("outputVariable") or "output"
         streaming = bool(cfg.get("streaming", True))
-
-        full_text, reasoning = "", ""
-        usage: dict = {}
+        full_text, reasoning, usage = "", "", {}
         if streaming:
-            async for chunk in client.stream(messages, **kwargs):
+            async for chunk in inst.astream(**kwargs):
                 if chunk.content:
                     full_text += chunk.content
                     await self.emit_delta(chunk.content)
@@ -71,26 +116,162 @@ class LLMNodeExecutor(BaseNodeExecutor):
                 if chunk.usage:
                     usage = chunk.usage
         else:
-            result: InvokeResult = await client.invoke(messages, **kwargs)
-            full_text, reasoning, usage = result.content, result.reasoning_content, result.usage
-
+            r = await inst.ainvoke(**kwargs)
+            full_text, reasoning, usage = r.content, r.reasoning_content, r.usage
         if usage:
             self.runtime.bump_usage(usage.get("prompt_tokens", 0),
-                                     usage.get("completion_tokens", 0))
-
+                                    usage.get("completion_tokens", 0))
         output = {output_var: full_text, "text": full_text}
         if reasoning:
             output["reasoning"] = reasoning
         if usage:
             output["usage"] = {"inputTokens": usage.get("prompt_tokens"),
                                "outputTokens": usage.get("completion_tokens")}
-        # 结构化输出：尝试解析为 JSON 附加字段
         if so.get("enabled"):
             try:
                 output["structured"] = json.loads(full_text)
             except (json.JSONDecodeError, TypeError):
                 output["structured"] = None
         return NodeResult(output=output, stream_text=full_text)
+
+    # ---------- 按类型翻译入参（解析上游变量引用，兼容直接贴 URL/文本） ----------
+
+    def _ref(self, ctx, ref):
+        """单值解析：先按变量引用解析；解析不到则当作字面量（URL/文本）。"""
+        if ref is None:
+            return None
+        if not isinstance(ref, str):
+            return ref
+        s = ref.strip()
+        if not s:
+            return None
+        val = ctx.resolve(s)
+        return val if val is not None else s
+
+    def _ref_list(self, ctx, ref) -> list:
+        """列表解析：引用/字面量归一为字符串数组（图片 URL 列表用）。"""
+        v = self._ref(ctx, ref)
+        if v is None:
+            return []
+        if isinstance(v, (list, tuple)):
+            return [str(x) for x in v if x]
+        return [str(v)]
+
+    def _ref_one(self, ctx, ref):
+        """单值媒体引用：若解析为列表（如上游 urls）取首个，归一为字符串 URL。"""
+        v = self._ref(ctx, ref)
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else None
+        return str(v) if v is not None else None
+
+    def _text(self, ctx, key) -> str:
+        """取渲染后的提示词模板（promptTemplate）。"""
+        tpl = self.cfg(key) or ""
+        return ctx.render(tpl) if tpl else ""
+
+    def _build_kwargs(self, ctx, category) -> dict:
+        cfg = self.config
+        kw: dict = {}
+        if category == MT_IMAGE_UNDERSTAND:
+            kw["prompt"] = self._text(ctx, "promptTemplate")
+            kw["image_urls"] = self._ref_list(ctx, cfg.get("imageVariable") or cfg.get("imageVariables"))
+        elif category == MT_OCR:
+            kw["image_urls"] = self._ref_list(ctx, cfg.get("imageVariable") or cfg.get("imageVariables"))
+            p = self._text(ctx, "promptTemplate")
+            if p:
+                kw["prompt"] = p
+        elif category == MT_VIDEO_UNDERSTAND:
+            kw["prompt"] = self._text(ctx, "promptTemplate")
+            kw["video_url"] = self._ref_one(ctx, cfg.get("videoVariable"))
+        elif category == MT_TEXT_EMBEDDING:
+            kw["input"] = self._ref(ctx, cfg.get("inputVariable")) or self._text(ctx, "promptTemplate")
+        elif category == MT_IMAGE_EMBEDDING:
+            kw["image_urls"] = self._ref_list(ctx, cfg.get("imageVariable"))
+        elif category == MT_TEXT_RERANK:
+            kw["query"] = self._ref(ctx, cfg.get("queryVariable"))
+            kw["documents"] = self._ref_list(ctx, cfg.get("documentsVariable"))
+            if cfg.get("topN"):
+                kw["top_n"] = int(cfg["topN"])
+        elif category == MT_TEXT_TO_IMAGE:
+            kw["prompt"] = self._text(ctx, "promptTemplate")
+            if cfg.get("size"):
+                kw["size"] = cfg.get("size")
+            if cfg.get("imageN"):
+                kw["n"] = int(cfg.get("imageN"))
+        elif category == MT_TEXT_TO_VIDEO:
+            kw["prompt"] = self._text(ctx, "promptTemplate")
+            if cfg.get("size"):
+                kw["size"] = cfg.get("size")
+        elif category == MT_IMAGE_TO_VIDEO:
+            kw["image_url"] = self._ref_one(ctx, cfg.get("imageVariable"))
+            p = self._text(ctx, "promptTemplate")
+            if p:
+                kw["prompt"] = p
+            if cfg.get("size"):
+                kw["size"] = cfg.get("size")
+        elif category == MT_TEXT_TO_AUDIO:
+            kw["text"] = self._text(ctx, "promptTemplate") or \
+                ("" if self._ref(ctx, cfg.get("inputVariable")) is None
+                 else str(self._ref(ctx, cfg.get("inputVariable"))))
+            if cfg.get("voice"):
+                kw["voice"] = cfg.get("voice")
+        elif category == MT_AUDIO_TO_TEXT:
+            kw["audio_url"] = self._ref_one(ctx, cfg.get("audioVariable"))
+        if category in MODEL_TYPES_STREAMABLE and cfg.get("thinking"):
+            kw["thinking"] = True
+        # 生成/理解类透传采样参数（仅对话族有意义）
+        if category in (MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR):
+            if cfg.get("temperature") is not None:
+                kw["temperature"] = float(cfg["temperature"])
+            if cfg.get("maxTokens"):
+                kw["max_tokens"] = int(cfg["maxTokens"])
+        # 剔除 None/空列表，避免覆盖 common_model 内部默认
+        return {k: v for k, v in kw.items()
+                if v is not None and not (isinstance(v, (list, str)) and len(v) == 0)}
+
+    # ---------- 产出映射为下游可引用变量 ----------
+
+    def _map_output(self, category, r: ModelResult, output_var) -> dict:
+        out: dict = {}
+        if category in (MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_AUDIO_TO_TEXT):
+            out[output_var] = r.content
+            out["text"] = r.content
+            if r.reasoning_content:
+                out["reasoning"] = r.reasoning_content
+        elif category in (MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING):
+            vectors = r.vectors or []
+            out[output_var] = vectors
+            out["vectors"] = vectors
+            out["count"] = len(vectors)
+            out["dimension"] = len(vectors[0]) if vectors else 0
+        elif category == MT_TEXT_RERANK:
+            out[output_var] = r.scores or []
+            out["scores"] = r.scores or []
+        elif category == MT_TEXT_TO_IMAGE:
+            urls = r.urls or ([r.url] if r.url else [])
+            out[output_var] = urls
+            out["urls"] = urls
+            out["url"] = urls[0] if urls else None
+        elif category in (MT_TEXT_TO_VIDEO, MT_IMAGE_TO_VIDEO):
+            out[output_var] = r.url
+            out["url"] = r.url
+            out["video_url"] = r.url
+        elif category == MT_TEXT_TO_AUDIO:
+            # 不同厂商 TTS 返回形态不同：通义 qwen-tts 返回远程 url，智谱 glm-tts 直接返回音频字节流。
+            # 无 url 但有二进制时，编码为 base64 data URI，保证下游/前端拿到可直接播放的 audio 源。
+            audio_url = r.url
+            if not audio_url and r.audio_bytes:
+                import base64
+                fmt = (r.raw or {}).get("format") or "wav"
+                audio_url = "data:audio/{};base64,{}".format(
+                    fmt, base64.b64encode(r.audio_bytes).decode())
+            out[output_var] = audio_url
+            out["url"] = audio_url
+            out["audio_url"] = audio_url
+        if r.usage:
+            out["usage"] = {"inputTokens": r.usage.get("prompt_tokens"),
+                            "outputTokens": r.usage.get("completion_tokens")}
+        return out
 
     def _build_messages(self, ctx: ExecutionContext) -> list[ChatMessage]:
         messages: list[ChatMessage] = []
@@ -151,11 +332,11 @@ class LLMNodeExecutor(BaseNodeExecutor):
         data = node.data or {}
         if not data.get("modelId"):
             issues.append(issue("LLM_NO_MODEL", "ERROR", "LLM 节点未选择模型", node))
-        if not data.get("promptTemplate"):
-            issues.append(issue("LLM_NO_PROMPT", "WARNING", "LLM 节点未填写提示词模板", node))
-        # 非直连模型必须配置接口后缀（前端选中模型时写入 modelIsDirect=0）
-        if data.get("modelIsDirect") == 0 and not str(data.get("suffix") or "").strip():
-            issues.append(issue("LLM_NO_SUFFIX", "ERROR", "LLM 节点模型为非直连，必须选择接口后缀", node))
+        if not data.get("promptTemplate") and not any(
+                data.get(k) for k in
+                ("inputVariable", "imageVariable", "audioVariable",
+                 "videoVariable", "queryVariable", "documentsVariable")):
+            issues.append(issue("LLM_NO_PROMPT", "WARNING", "LLM 节点未填写输入（提示词/媒体变量）", node))
         return issues
 
 
@@ -169,8 +350,6 @@ class QuestionClassifierNodeExecutor(BaseNodeExecutor):
         model_id = self.require_model_id()
         client = await WorkflowModelClient.create(
             model_id, provider=self.runtime.model_provider, http=self.runtime.http_client)
-        # 节点配置所选接口后缀（非直连时 base_url + suffix 拼接 URL）
-        client.config.use_suffix = (cfg.get("suffix") or "").strip() or None
         categories = cfg.get("categories") or []
         if not categories:
             raise ValueError("问题分类器未定义分类类别")
@@ -188,8 +367,7 @@ class QuestionClassifierNodeExecutor(BaseNodeExecutor):
                 f"{instructions}\n\n类别列表（输出类别 ID，不要输出其他内容）：\n{cat_lines}\n\n"
                 f"用户问题：{input_text}\n\n请只输出一个类别 ID。")
 
-        result = await client.invoke(
-            [ChatMessage(role="user", content=prompt)], temperature=0.0)
+        result = await client.chat(prompt=prompt, temperature=0.0)
         self.runtime.bump_usage(result.usage.get("prompt_tokens", 0),
                                  result.usage.get("completion_tokens", 0))
         matched_id = self._match_category(result.content, categories)
@@ -254,9 +432,6 @@ class QuestionClassifierNodeExecutor(BaseNodeExecutor):
             issues.append(issue("QC_NO_MODEL", "ERROR", "问题分类器未选择模型", node))
         if not data.get("categories"):
             issues.append(issue("QC_NO_CATEGORIES", "ERROR", "问题分类器未定义类别", node))
-        # 非直连模型必须配置接口后缀
-        if data.get("modelIsDirect") == 0 and not str(data.get("suffix") or "").strip():
-            issues.append(issue("QC_NO_SUFFIX", "ERROR", "问题分类器模型为非直连，必须选择接口后缀", node))
         return issues
 
 
@@ -271,8 +446,6 @@ class ParameterExtractorNodeExecutor(BaseNodeExecutor):
         model_id = self.require_model_id()
         client = await WorkflowModelClient.create(
             model_id, provider=self.runtime.model_provider, http=self.runtime.http_client)
-        # 节点配置所选接口后缀（非直连时 base_url + suffix 拼接 URL）
-        client.config.use_suffix = (cfg.get("suffix") or "").strip() or None
         parameters = cfg.get("parameters") or []
         if not parameters:
             raise ValueError("参数提取器未定义提取参数")
@@ -300,9 +473,8 @@ class ParameterExtractorNodeExecutor(BaseNodeExecutor):
             f"严格输出 JSON 对象，字段：{json.dumps(properties, ensure_ascii=False)}"
             + (f"，必填字段：{required}" if required else ""))
 
-        messages = [ChatMessage(role="user", content=prompt)]
-        result = await client.invoke(
-            messages, temperature=0.0,
+        result = await client.chat(
+            prompt=prompt, temperature=0.0,
             response_format={"type": "json_object"},
         )
         self.runtime.bump_usage(result.usage.get("prompt_tokens", 0),
@@ -345,9 +517,6 @@ class ParameterExtractorNodeExecutor(BaseNodeExecutor):
             issues.append(issue("PE_NO_MODEL", "ERROR", "参数提取器未选择模型", node))
         if not data.get("parameters"):
             issues.append(issue("PE_NO_PARAMS", "ERROR", "参数提取器未定义参数", node))
-        # 非直连模型必须配置接口后缀
-        if data.get("modelIsDirect") == 0 and not str(data.get("suffix") or "").strip():
-            issues.append(issue("PE_NO_SUFFIX", "ERROR", "参数提取器模型为非直连，必须选择接口后缀", node))
         return issues
 
 

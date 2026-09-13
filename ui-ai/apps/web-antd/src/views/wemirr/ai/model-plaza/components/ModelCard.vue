@@ -6,13 +6,18 @@
 import { computed } from 'vue';
 
 import {
-  MODEL_CATEGORY_AUDIO_GEN,
-  MODEL_CATEGORY_EMBEDDING,
-  MODEL_CATEGORY_IMAGE_GEN,
-  MODEL_CATEGORY_MULTIMODAL,
-  MODEL_CATEGORY_RERANK,
-  MODEL_CATEGORY_TEXT_GEN,
-  MODEL_CATEGORY_VIDEO_GEN,
+  MT_AUDIO_TO_TEXT,
+  MT_IMAGE_EMBEDDING,
+  MT_IMAGE_TO_VIDEO,
+  MT_IMAGE_UNDERSTAND,
+  MT_OCR,
+  MT_TEXT_EMBEDDING,
+  MT_TEXT_RERANK,
+  MT_TEXT_TO_AUDIO,
+  MT_TEXT_TO_IMAGE,
+  MT_TEXT_TO_TEXT,
+  MT_TEXT_TO_VIDEO,
+  MT_VIDEO_UNDERSTAND,
 } from '#/api/ai-workflow/const';
 
 import type * as api from '../api';
@@ -26,22 +31,26 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   apply: [model: api.ModelPageRep];
-  tutorial: [model: api.ModelPageRep];
   myKey: [model: api.ModelPageRep];
   edit: [model: api.ModelPageRep];
   toggle: [model: api.ModelPageRep];
   delete: [model: api.ModelPageRep];
 }>();
 
-/** 分类 emoji 图标（maxkb 卡片图标位） */
+/** 分类 emoji 图标（maxkb 卡片图标位，12 能力类型） */
 const categoryEmoji: Record<string, string> = {
-  [MODEL_CATEGORY_TEXT_GEN]: '✍️',
-  [MODEL_CATEGORY_EMBEDDING]: '📐',
-  [MODEL_CATEGORY_RERANK]: '🔀',
-  [MODEL_CATEGORY_MULTIMODAL]: '🧠',
-  [MODEL_CATEGORY_IMAGE_GEN]: '🎨',
-  [MODEL_CATEGORY_AUDIO_GEN]: '🎙️',
-  [MODEL_CATEGORY_VIDEO_GEN]: '🎬',
+  [MT_TEXT_TO_TEXT]: '✍️',
+  [MT_TEXT_EMBEDDING]: '📐',
+  [MT_TEXT_RERANK]: '🔀',
+  [MT_IMAGE_EMBEDDING]: '🖼️',
+  [MT_TEXT_TO_IMAGE]: '🎨',
+  [MT_AUDIO_TO_TEXT]: '🎧',
+  [MT_IMAGE_UNDERSTAND]: '🧠',
+  [MT_VIDEO_UNDERSTAND]: '🎞️',
+  [MT_OCR]: '🔍',
+  [MT_IMAGE_TO_VIDEO]: '🎬',
+  [MT_TEXT_TO_VIDEO]: '📽️',
+  [MT_TEXT_TO_AUDIO]: '🎙️',
 };
 
 /** 申请状态展示 */
@@ -108,6 +117,18 @@ const canApply = computed(
           并发 {{ model.rate_limit_qps || '不限' }}
         </span>
       </div>
+      <div class="model-card__row">
+        <span class="model-card__label">能力</span>
+        <a-tooltip
+          :title="`开启流式参数：${model.stream_param || 'stream'}；开启思考参数：${model.thinking_param || '-'}`"
+        >
+          <span class="model-card__value model-card__value--ellipsis">
+            流式:{{ model.supports_stream ? '支持' : '不支持' }} ·
+            深度思考:{{ model.supports_thinking ? '支持' : '不支持' }} ·
+            常用参数:{{ (model.common_params || []).length }} 个
+          </span>
+        </a-tooltip>
+      </div>
     </div>
 
     <!-- 操作区 -->
@@ -121,9 +142,6 @@ const canApply = computed(
         >
           {{ model.apply_status === 2 ? '重新申请' : '申请使用' }}
         </a-button>
-        <a-button size="small" @click="emit('tutorial', model)"
-          >查看教程</a-button
-        >
         <a-button
           v-if="model.apply_status === 1"
           size="small"

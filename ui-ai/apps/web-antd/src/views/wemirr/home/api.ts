@@ -48,6 +48,10 @@ export interface McpToolOption {
   id: number;
   name: string;
   url: string;
+  /** MCP 连接类型（sse/http/stdio） */
+  type?: string;
+  /** stdio 类型本地命令 */
+  command?: string;
 }
 
 /** 知识库（用于挂载） */
@@ -61,12 +65,12 @@ export interface KbOption {
 
 /** 沙箱工作区目录列表 */
 export function SandboxFiles(path = '') {
-  return defHttp.get<SandboxFilesRep>('/api/workflow/sandbox/files', { path });
+  return defHttp.get<SandboxFilesRep>('/api/workflow/sandbox/files', { params: { path } });
 }
 
 /** 查看沙箱文本文件 */
 export function SandboxFile(path: string) {
-  return defHttp.get<SandboxFileRep>('/api/workflow/sandbox/file', { path });
+  return defHttp.get<SandboxFileRep>('/api/workflow/sandbox/file', { params: { path } });
 }
 
 /** 上传文件到当前目录（path 通过 FormData 传递） */
@@ -119,6 +123,6 @@ export function McpServersPage(params: { current: number; size: number }) {
 export function KbList(params: { page: number; page_size: number }) {
   return defHttp.get<{ items: KbOption[]; total: number }>(
     '/api/rag/kb',
-    params,
+    { params },
   );
 }

@@ -9,32 +9,29 @@ import httpx
 from sqlalchemy import func, select, update
 
 from common.common_constants.model_constant import (
-    MODEL_CATEGORY_EMBEDDING,
-    MODEL_CATEGORY_LABELS,
-    MODEL_CATEGORY_RERANK,
+    MODEL_TYPE_LABELS,
+    MODEL_TYPES_ALL,
+    MODEL_TYPES_STREAMABLE,
+    PROVIDERS_ALL,
+    PROVIDER_LABELS,
+    MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR,
 )
+from common.common_constants.model_registry import MODEL_REGISTRY
 from common.common_entity.rbac_entity import Dept
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_model import entry as cm_entry
 from service.service_gateway.util.model_gateway_cache import ModelGatewayCache
 from service.service_system.models.model import Model, ModelApply
 from service.service_system.schemas.model_schema import (
     ApplyPageRequest, ModelApplyRequest, ModelAuditRequest, ModelPageRequest,
     ModelSaveRequest, ModelTestRequest,
 )
-from common.common_httpx.httpx import httpx_pool
 
-# 模型分类字典（统一入口：common.common_constants.model_constant，本名保留供路由导出）
-CATEGORIES = MODEL_CATEGORY_LABELS
-# 模型提供商
-PROVIDERS = {
-    "deepseek": "DeepSeek",
-    "qwen": "通义千问",
-    "doubao": "豆包",
-    "hunyuan": "腾讯混元",
-    "kimi": "Kimi",
-    "openai": "OpenAI",
-}
+# 模型分类字典（12 类型，统一入口：common.common_constants.model_constant）
+CATEGORIES = MODEL_TYPE_LABELS
+# 模型提供商：仅 common_model 实现的 3 家（openai=通用 OpenAI 兼容客户端，其余 OpenAI 兼容厂商归此）
+PROVIDERS = PROVIDER_LABELS
 # api-key 前缀
 API_KEY_PREFIX = "mk_"
 APPLY_STATUS = {0: "待审批", 1: "已通过", 2: "已拒绝"}
@@ -42,6 +39,43 @@ APPLY_STATUS = {0: "待审批", 1: "已通过", 2: "已拒绝"}
 
 class ModelService:
     """模型广场：模型管理 + 申请审批 + api-key 签发"""
+
+    # ==================== 常用参数派生 ====================
+
+    @staticmethod
+    def _cast_default(value, ptype: str):
+        """按参数类型把 common_params 的 default 转为调用注入值；转换失败原样返回。"""
+        if value is None or value == "":
+            return None
+        try:
+            if ptype == "boolean":
+                if isinstance(value, str):
+                    return value.strip().lower() in ("1", "true", "yes", "on")
+                return bool(value)
+            if ptype == "integer":
+                return int(float(value))
+            if ptype == "number":
+                return float(value)
+            if ptype == "object":
+                return json.loads(value) if isinstance(value, str) else value
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return value
+        return value
+
+    @staticmethod
+    def _derive_model_params(common_params) -> dict:
+        """由 common_params 富列表派生调用注入字典 {name: 转型后default}。"""
+        out = {}
+        for p in (common_params or []):
+            name = p.get("name") if isinstance(p, dict) else getattr(p, "name", None)
+            if not name:
+                continue
+            default = p.get("default") if isinstance(p, dict) else getattr(p, "default", None)
+            ptype = p.get("type") if isinstance(p, dict) else getattr(p, "type", "string")
+            casted = ModelService._cast_default(default, ptype or "string")
+            if casted is not None:
+                out[name] = casted
+        return out
 
     # ==================== 模型网关缓存 ====================
 
@@ -55,12 +89,12 @@ class ModelService:
             "model_name": m.model_name,
             "provider": m.provider,
             "base_url": m.base_url or "",
-            # 直连标志 + 后缀列表（网关非直连时校验后缀合法性）
-            "is_direct": 1 if m.is_direct else 0,
-            "suffixes": [s.get("url") for s in (m.suffixes or []) if s.get("url")],
             "rate_limit_qps": m.rate_limit_qps,
             "status": 1 if m.status else 0,
             "api_key": m.api_key,
+            "model_params": m.model_params or {},
+            "supports_stream": int(m.supports_stream or 0),
+            "supports_thinking": int(m.supports_thinking or 0),
         }
 
     # ==================== 模型 CRUD ====================
@@ -78,10 +112,13 @@ class ModelService:
             "model_name": m.model_name,
             "base_url": m.base_url,
             "gateway_url": m.gateway_url,
-            "is_direct": bool(m.is_direct),
-            "suffixes": m.suffixes or [],
             "rate_limit_qps": m.rate_limit_qps,
             "status": bool(m.status),
+            "supports_stream": bool(m.supports_stream),
+            "supports_thinking": bool(m.supports_thinking),
+            "stream_param": m.stream_param,
+            "thinking_param": m.thinking_param,
+            "common_params": m.common_params or [],
             "created_by": m.created_by,
             "create_time": m.create_time,
             "update_time": m.update_time,
@@ -146,41 +183,29 @@ class ModelService:
 
     @staticmethod
     def _validate_meta(category: str, provider: str):
-        if category not in CATEGORIES:
-            raise ValueError(f"不支持的分类: {category}，可选: {', '.join(CATEGORIES)}")
-        if provider not in PROVIDERS:
-            raise ValueError(f"不支持的提供商: {provider}，可选: {', '.join(PROVIDERS)}")
-
-    @staticmethod
-    def _normalize_suffixes(items) -> list:
-        """后缀列表归一化：仅保留有 url 的行，url 统一补前导 /，去重"""
-        seen, result = set(), []
-        for item in items or []:
-            url = (item.url if isinstance(item, dict) else getattr(item, "url", "") or "").strip()
-            if not url:
-                continue
-            if not url.startswith("/"):
-                url = "/" + url
-            if url in seen:
-                continue
-            seen.add(url)
-            desc = ((item.desc if isinstance(item, dict) else getattr(item, "desc", "")) or "").strip()
-            result.append({"url": url, "desc": desc})
-        return result
+        if category not in MODEL_TYPES_ALL:
+            raise ValueError(f"不支持的分类: {category}，可选: {', '.join(MODEL_TYPES_ALL)}")
+        if provider not in PROVIDERS_ALL:
+            raise ValueError(f"不支持的提供商: {provider}，可选: {', '.join(PROVIDERS_ALL)}")
 
     @staticmethod
     async def create(req: ModelSaveRequest, created_by: int = 0) -> int:
-        """新增模型：分类/提供商校验 + 限流参数归一"""
+        """新增模型：分类/提供商校验 + 限流参数归一 + 常用参数派生注入"""
         ModelService._validate_meta(req.category, req.provider)
+        common_params = [p.model_dump() for p in (req.common_params or [])]
         async with mysql_client.get_session() as session:
             m = Model(
                 name=req.name, category=req.category, provider=req.provider,
                 model_name=req.model_name, base_url=req.base_url or None,
-                is_direct=1 if req.is_direct else 0,
                 gateway_url=req.gateway_url or None,
-                suffixes=ModelService._normalize_suffixes(req.suffixes) or None,
                 api_key=req.api_key or None,
                 rate_limit_qps=max(0, req.rate_limit_qps),
+                supports_stream=1 if req.supports_stream else 0,
+                supports_thinking=1 if req.supports_thinking else 0,
+                stream_param=req.stream_param or None,
+                thinking_param=req.thinking_param or None,
+                common_params=common_params or None,
+                model_params=ModelService._derive_model_params(common_params) or None,
                 tutorial_md=req.tutorial_md or None,
                 status=1 if req.status else 0, created_by=created_by or 0,
             )
@@ -188,14 +213,15 @@ class ModelService:
             await session.commit()
             await session.refresh(m)
             log.info(f"Model created: {req.name} ({req.category}/{req.provider})")
-            # MySQL 为主数据源：同步写入网关缓存（失败不阻塞，由对账兜底）
+            # MySQL 为主数据源：同步写入网关缓存（失败不阻塞，由对账兑底）
             await ModelGatewayCache.write_config(ModelService._config_dict(m))
             return m.id
-
+    
     @staticmethod
     async def update(model_id: int, req: ModelSaveRequest) -> bool:
         """修改模型：None 字段（base_url/api_key/tutorial_md）保持原值，空串表示清空"""
         ModelService._validate_meta(req.category, req.provider)
+        common_params = [p.model_dump() for p in (req.common_params or [])]
         async with mysql_client.get_session() as session:
             m = await session.get(Model, model_id)
             if not m:
@@ -204,18 +230,21 @@ class ModelService:
             m.category = req.category
             m.provider = req.provider
             m.model_name = req.model_name
-            m.is_direct = 1 if req.is_direct else 0
             if req.gateway_url is not None:
                 m.gateway_url = req.gateway_url or None
             if req.base_url is not None:
                 m.base_url = req.base_url or None
-            if req.suffixes is not None:
-                m.suffixes = ModelService._normalize_suffixes(req.suffixes) or None
             if req.api_key is not None:
                 m.api_key = req.api_key or None
             if req.tutorial_md is not None:
                 m.tutorial_md = req.tutorial_md or None
             m.rate_limit_qps = max(0, req.rate_limit_qps)
+            m.supports_stream = 1 if req.supports_stream else 0
+            m.supports_thinking = 1 if req.supports_thinking else 0
+            m.stream_param = req.stream_param or None
+            m.thinking_param = req.thinking_param or None
+            m.common_params = common_params or None
+            m.model_params = ModelService._derive_model_params(common_params) or None
             m.status = 1 if req.status else 0
             await session.commit()
             log.info(f"Model updated: id={model_id}")
@@ -256,70 +285,98 @@ class ModelService:
             return True
 
     @staticmethod
+    async def registry(provider: str = None, category: str = None) -> list:
+        """模型标识注册表（全部条目经真实 API 调用验证，数据源 common_constants/model_registry.py）。
+
+        添加模型弹窗下拉数据源：按 (类型, 厂家) 过滤；未填时返回全部。
+        """
+        items = []
+        for prov, cats in MODEL_REGISTRY.items():
+            if provider and prov != provider:
+                continue
+            for cat, models in cats.items():
+                if category and cat != category:
+                    continue
+                for m in models:
+                    items.append({
+                        "provider": prov, "provider_label": PROVIDERS.get(prov, prov),
+                        "category": cat, "category_label": CATEGORIES.get(cat, cat),
+                        "model_name": m,
+                    })
+        return items
+
+    @staticmethod
     async def test(req: ModelTestRequest) -> dict:
-        """连通性测试：按分类调用对应 OpenAI 兼容探测端点，返回耗时与结果"""
+        """模型测试：走 common_model 按 (类型, 供应商) 真实调用。
+
+        - 无 inputs 时用 PROBE_PAYLOADS 默认探测入参；有 inputs 时按类型翻译为真实入参。
+        - params 合并进 model_params 注入调用；thinking 仅对话类生效（走 kwargs）。
+        - stream 且类型支持流式时聚合 astream 逐块输出。
+        """
+        import time as _t
         base_url = (req.base_url or "").rstrip("/")
         if not base_url:
             raise ValueError("请填写接口地址")
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("接口地址需以 http(s):// 开头")
-        # 非直连模型：拼接接口后缀进行探测（如 /v1/chat/completions）
-        if req.suffix_url:
-            base_url = base_url + "/" + req.suffix_url.lstrip("/")
-
-        headers = {}
-        if req.api_key:
-            headers["Authorization"] = f"Bearer {req.api_key}"
-
-        # 按分类选择通用探测端点（OpenAI 兼容协议）
-        if req.category == MODEL_CATEGORY_EMBEDDING:
-            body = {"model": req.model_name, "input": "hi"}
-        elif req.category == MODEL_CATEGORY_RERANK:
-            body = {"model": req.model_name, "query": "hi", "documents": ["hello", "hi"]}
-        else:
-            body = {
-                "model": req.model_name,
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 5,
-                "stream": False
-            }
-        start = time.time()
-        try:
-            resp = await httpx_pool.client.post(base_url, json=body, headers=headers)
-            latency = int((time.time() - start) * 1000)
-            try:
-                data = resp.json()
-            except ValueError:
-                # 非 JSON 响应（如 HTML 错误页）：降级为纯文本（完整返回）
-                data = resp.text
-            if resp.status_code < 300:
-                log.info(f"Model test OK: {base_url} ({resp.status_code}, {latency}ms)")
-                return {"success": True,
-                        "message": f"调用成功（HTTP {resp.status_code}，{latency}ms）",
-                        "latency_ms": latency,
-                        "data": data}
-            try:
-                detail = data.get("error", {}).get("message") if isinstance(data, dict) else ""
-                if not detail:
-                    detail = data.get("message", "") if isinstance(data, dict) else ""
-                if not detail:
-                    detail = str(data)[:200]
-            except Exception:
-                detail = resp.text[:200]
-            log.warning(f"Model test HTTP {resp.status_code}: {base_url} {detail}")
+        if req.category not in MODEL_TYPES_ALL:
+            raise ValueError(f"不支持的分类: {req.category}")
+        if req.provider not in PROVIDERS_ALL:
+            raise ValueError(f"不支持的提供商: {req.provider}")
+        config = cm_entry.config_from_row({
+            "model_id": 0, "category": req.category, "provider": req.provider,
+            "model_name": req.model_name, "base_url": base_url, "api_key": req.api_key or "",
+            "model_params": req.params or {}, "status": 1,
+        })
+        if not cm_entry.supports(req.category, req.provider):
             return {"success": False,
-                    "message": f"接口返回 HTTP {resp.status_code}：{detail}",
-                    "latency_ms": latency,
-                    "data": data}
-        except httpx.TimeoutException:
-            log.warning(f"Model test timeout: {base_url}")
-            return {"success": False, "message": "请求超时（15s），请检查接口地址与网络"}
-        except httpx.HTTPError as e:
-            log.warning(f"Model test connect fail: {base_url} {e}")
-            return {"success": False, "message": f"连接失败：{e}"}
-        except Exception as e:
-            log.error(f"Model test error: {base_url} {e}")
-            return {"success": False, "message": f"测试异常：{e}"}
+                    "message": f"{req.category} 类型下供应商 {req.provider} 无可用实现"}
+        t0 = _t.monotonic()
+        try:
+            inst = cm_entry.instantiate(req.category, config)
+            if req.inputs:
+                kwargs = cm_entry.body_to_kwargs(req.category, req.inputs)
+            else:
+                kwargs = dict(cm_entry.PROBE_PAYLOADS.get(req.category, {}))
+            # thinking 仅对话类子类会 pop 处理，非对话类传入会被 SDK 拒收
+            if req.thinking and req.category in (
+                    MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR):
+                kwargs["thinking"] = True
+            stream_on = bool(req.stream) and req.category in MODEL_TYPES_STREAMABLE
+            if stream_on:
+                content, reasoning, usage = "", "", {}
+                n = 0
+                async for c in inst.astream(**kwargs):
+                    n += 1
+                    content += c.content or ""
+                    reasoning += c.reasoning_content or ""
+                    if c.usage:
+                        usage = c.usage
+                r = cm_entry.ModelResult(content=content, reasoning_content=reasoning, usage=usage)
+            else:
+                r = await inst.ainvoke(**kwargs)
+            ms = int((_t.monotonic() - t0) * 1000)
+            urls = list(r.urls or []) if r.urls else ([r.url] if r.url else [])
+            if not urls and r.audio_bytes:
+                import base64
+                fmt = (r.raw or {}).get("format") or "wav"
+                urls = ["data:audio/{};base64,{}".format(
+                    fmt, base64.b64encode(r.audio_bytes).decode())]
+            vectors = None
+            if r.vectors:
+                dim = len(r.vectors[0]) if r.vectors else 0
+                vectors = {"dim": dim, "count": len(r.vectors or []),
+                           "sample": [round(v, 4) for v in (r.vectors[0][:8] if r.vectors else [])]}
+            return {"success": True, "message": f"调用成功（{ms}ms）", "latency_ms": ms,
+                    "data": {"category": req.category, "provider": req.provider,
+                             "model": inst.model, "streamed": stream_on,
+                             "content": r.content or None,
+                             "reasoning": r.reasoning_content or None,
+                             "urls": urls, "vectors": vectors, "scores": r.scores,
+                             "usage": r.usage}}
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "latency_ms": int((_t.monotonic() - t0) * 1000),
+                    "message": f"测试异常：{type(e).__name__}: {str(e)[:200]}"}
 
     # ==================== 申请审批 ====================
 
@@ -438,9 +495,13 @@ class ModelService:
                 "category": m.category, "category_label": CATEGORIES.get(m.category, m.category),
                 "provider": m.provider, "provider_label": PROVIDERS.get(m.provider, m.provider),
                 "model_name": m.model_name, "base_url": m.base_url, "api_key": a.api_key,
-                "gateway_url": m.gateway_url, "is_direct": bool(m.is_direct),
-                "suffixes": m.suffixes or [],
+                "gateway_url": m.gateway_url,
                 "tutorial_md": m.tutorial_md or "",
                 "rate_limit_qps": m.rate_limit_qps,
+                "supports_stream": bool(m.supports_stream),
+                "supports_thinking": bool(m.supports_thinking),
+                "stream_param": m.stream_param,
+                "thinking_param": m.thinking_param,
+                "common_params": m.common_params or [],
                 "apply_time": a.apply_time,
             } for a, m in rows]

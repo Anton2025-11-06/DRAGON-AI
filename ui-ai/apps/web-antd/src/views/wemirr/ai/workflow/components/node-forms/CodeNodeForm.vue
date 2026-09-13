@@ -117,7 +117,6 @@ function typeHint(type?: CodeParameterType): string {
 // 处理配置变更
 function handleChange() {
   const config: CodeNodeConfig = {
-    language: 'PYTHON',
     code: formData.code || '',
     // 不过滤空名参数：刚添加的参数 name 为空，过滤会导致 config 回写时
     // watch 重置 formData，新加的参数行被冲掉（“添加参数没反应”的根因）；

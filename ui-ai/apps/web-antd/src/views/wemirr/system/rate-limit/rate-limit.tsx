@@ -3,7 +3,6 @@ import type {
   CreateCrudOptionsRet,
   DelReq,
   EditReq,
-  ValueBuilderContext,
 } from '@fast-crud/fast-crud';
 
 import { message } from 'ant-design-vue';

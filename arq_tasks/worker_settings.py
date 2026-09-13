@@ -32,6 +32,7 @@ class WorkerSettings:
 
     # redis 连接参数(与生产端同源,保证投递/消费指向同一 Redis)
     redis_settings = RedisSettings.from_dsn(ARQ_REDIS_URL)
+    redis_settings.password = "123456"
     redis_settings.max_connections = 100
 
     # 进程启动/退出钩子(每 worker 进程各执行一次,替代旧 celery 方案的每任务幂等 bootstrap)

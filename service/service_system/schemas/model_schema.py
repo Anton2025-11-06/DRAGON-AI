@@ -1,40 +1,50 @@
 # -*- coding: utf-8 -*-
 """模型广场请求模型"""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 
-class ModelSuffixItem(BaseModel):
-    """非直连模型的接口后缀：后缀 URI + 接口能力说明"""
-    url: str = Field(..., min_length=1, max_length=200, description="接口后缀 URI，如 /v1/chat/completions")
-    desc: Optional[str] = Field(None, max_length=200, description="接口能力说明")
+class CommonParam(BaseModel):
+    """常用参数条目：底层以 JSON 存储的富列表，展示/编辑用；调用时按 type 转型 default 注入 model_params。"""
+    name: str = Field(..., min_length=1, max_length=64, description="参数名")
+    default: Optional[Any] = Field(None, description="默认值")
+    desc: Optional[str] = Field(None, max_length=255, description="参数说明")
+    type: str = Field("string", description="参数类型：boolean/integer/number/object/string")
 
 
 class ModelSaveRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="模型名称")
-    category: str = Field(..., description="分类（TEXT_GEN/EMBEDDING/RERANK/MULTIMODAL/IMAGE_GEN/AUDIO_GEN/VIDEO_GEN）")
-    provider: str = Field(..., description="提供商（deepseek/qwen/doubao/hunyuan/kimi/openai）")
+    category: str = Field(..., description="能力类型（12 类 code：text_to_text/text_embedding/text_rerank/image_embedding/text_to_image/audio_to_text/image_understand/video_understand/ocr/image_to_video/text_to_video/text_to_audio）")
+    provider: str = Field(..., description="供应商（openai/dashscope/zhipu）")
     model_name: str = Field(..., min_length=1, max_length=128, description="模型标识(API 调用时使用)")
-    base_url: Optional[str] = Field(None, max_length=500, description="模型真实地址(直连=含接口完整路径，非直连=接口基础地址)")
+    # 模型真实地址与密钥为必填（需求 1）
+    base_url: str = Field(..., min_length=1, max_length=500, description="模型接口基础地址（各厂商 OpenAI 兼容/原生基础 URL，端点由 common_model 各类型子类自拼）")
     gateway_url: Optional[str] = Field(None, max_length=500, description="模型网关地址(展示给调用方)")
-    # 是否直连：直连=base_url+接口后缀不可用；非直连=base_url+接口后缀转发
-    is_direct: bool = Field(True, description="是否直连 1直连 0非直连")
-    # 非直连时维护的后缀列表（每行：后缀 URI + 能力说明）
-    suffixes: Optional[List[ModelSuffixItem]] = Field(None, description="接口后缀列表（非直连时维护）")
-    api_key: Optional[str] = Field(None, max_length=500, description="管理端密钥")
+    api_key: str = Field(..., min_length=1, max_length=500, description="管理端密钥")
     rate_limit_qps: int = Field(0, ge=0, description="每秒并发限制 0=不限")
+    # 高级设置（需求 2）
+    supports_stream: bool = Field(False, description="是否支持流消息")
+    supports_thinking: bool = Field(False, description="是否支持思考模式")
+    stream_param: Optional[str] = Field(None, max_length=64, description="开启流式的参数键名")
+    thinking_param: Optional[str] = Field(None, max_length=64, description="开启思考的参数键名")
+    common_params: Optional[List[CommonParam]] = Field(None, description="常用参数列表")
     tutorial_md: Optional[str] = Field(None, description="使用教程 Markdown")
     status: bool = Field(True, description="启用状态")
 
 
 class ModelTestRequest(BaseModel):
-    """模型连通性测试请求：按分类调用对应探测端点"""
-    category: str = Field(..., description="分类（TEXT_GEN/EMBEDDING/RERANK/...）")
+    """模型测试请求：走 common_model 按 (类型, 供应商) 真实调用，支持输入内容/流式/思考/常用参数。"""
+    category: str = Field(..., description="能力类型（12 类 code：text_to_text/text_embedding/...）")
+    provider: str = Field(..., description="供应商（openai/dashscope/zhipu）")
     model_name: str = Field(..., min_length=1, max_length=128, description="模型标识")
-    base_url: Optional[str] = Field(None, max_length=500, description="接口基础地址")
+    base_url: Optional[str] = Field(None, max_length=500, description="接口基础地址（OpenAI 兼容基址）")
     api_key: Optional[str] = Field(None, max_length=500, description="管理端密钥")
-    suffix_url: Optional[str] = Field(None, max_length=200, description="接口后缀 URI（非直连模型测试时拼接，如 /v1/chat/completions）")
+    # 富测试（需求 2.5）：按类型的输入 + 流式/思考开关 + 常用参数值
+    inputs: Optional[Dict[str, Any]] = Field(None, description="按能力类型的输入体（prompt/messages/input/image_url/...）")
+    stream: bool = Field(False, description="是否流式")
+    thinking: bool = Field(False, description="是否思考模式")
+    params: Optional[Dict[str, Any]] = Field(None, description="常用参数键值（覆盖 model_params）")
 
 
 class ModelPageRequest(BaseModel):

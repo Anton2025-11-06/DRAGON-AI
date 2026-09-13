@@ -2,7 +2,11 @@
 import type { Key } from 'ant-design-vue/es/table/interface';
 import type { UploadFile } from 'ant-design-vue';
 
-import type { SkillDetailResp, SkillPageResp, SkillUploadReq } from './api';
+import type {
+  SkillDetailResp,
+  SkillPageResp,
+  SkillZipUploadReq,
+} from './api';
 
 import { computed, nextTick, onMounted, reactive, ref } from 'vue';
 
@@ -16,6 +20,7 @@ import {
   EditOutlined,
   EyeOutlined,
   FileOutlined,
+  FormOutlined,
   FileMarkdownOutlined,
   FileTextOutlined,
   FolderOutlined,
@@ -131,6 +136,7 @@ const { crudBinding, crudExpose, crudRef } = useFs({
   context: {
     onPreview: (item: SkillPageResp) => openPreview(item),
     onReplace: (item: SkillPageResp) => openReplaceDrawer(item),
+    onRename: (item: SkillPageResp) => openRename(item),
     toggleStatus: (item: SkillPageResp, checked: boolean) =>
       toggleStatus(item, checked),
   },
@@ -258,28 +264,23 @@ function buildPreviewFileMap(skill: SkillDetailResp) {
   return fileMap;
 }
 
-function relativePathOf(file: File) {
-  return (file as any).webkitRelativePath || (file as any).relativePath || file.name;
-}
-
 function normalizeSkillCode(value: string) {
-  const normalized = value
+  const normalized = (value || '')
     .trim()
     .replaceAll('\\', '/')
     .split('/')
-    .filter(Boolean)[0]
-    ?.replaceAll(/[^-\w]/g, '-')
+    .filter(Boolean)
+    .pop()
+    ?.replace(/\.zip$/i, '')
+    .replaceAll(/[^-\w]/g, '-')
     .replaceAll(/-+/g, '-')
     .replaceAll(/^-|-$/g, '');
   return normalized || 'skill';
 }
 
-function deriveSkillCode(relativePaths: string[]) {
-  const skillFilePath =
-    relativePaths.find((path) => path === 'SKILL.md' || path.endsWith('/SKILL.md')) ||
-    relativePaths[0] ||
-    '';
-  return normalizeSkillCode(skillFilePath);
+/** 技能标识：从 zip 文件名推断（去目录、去 .zip 后缀） */
+function deriveSkillCode(zipFileName: string) {
+  return normalizeSkillCode(zipFileName);
 }
 
 function parseTags(input?: string) {
@@ -287,16 +288,6 @@ function parseTags(input?: string) {
     .split(/[,，\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function resolveUploadFiles(fileList: UploadFile[]) {
-  const files = fileList
-    .map((item) => item.originFileObj || item)
-    .filter(Boolean) as unknown as File[];
-  return {
-    files,
-    relativePaths: files.map(relativePathOf),
-  };
 }
 
 function resetForm() {
@@ -334,34 +325,40 @@ function beforeUpload() {
 }
 
 function handleUploadChange({ fileList }: { fileList: UploadFile[] }) {
-  formState.skillPackage = fileList;
+  // 仅接受 .zip 压缩包（过滤其他文件），最多保留一个
+  const zipList = fileList.filter((item) => {
+    const file = item.originFileObj || item;
+    const ok = /\.zip$/i.test(file.name || '');
+    if (!ok) {
+      message.warning(`已忽略非 zip 文件: ${file.name}`);
+    }
+    return ok;
+  });
+  formState.skillPackage = zipList.slice(-1);
 }
 
-function buildUploadReq(): SkillUploadReq {
-  const { files, relativePaths } = resolveUploadFiles(formState.skillPackage);
+function buildUploadReq(): SkillZipUploadReq {
   if (!formState.name.trim()) {
     throw new Error('请输入技能名称');
   }
-  if (files.length === 0) {
-    throw new Error('请选择技能文件夹');
-  }
-  if (!relativePaths.some((path) => path === 'SKILL.md' || path.endsWith('/SKILL.md'))) {
-    throw new Error('技能文件夹必须包含 SKILL.md');
+  const uploadItem = formState.skillPackage[0];
+  const file = (uploadItem?.originFileObj || uploadItem) as File | undefined;
+  if (!file) {
+    throw new Error('请选择 SKILL.zip 压缩包');
   }
   return {
     category: formState.category?.trim() || undefined,
-    code: editingSkill.value?.code || deriveSkillCode(relativePaths),
+    code: editingSkill.value?.code || deriveSkillCode(file.name),
     description: formState.description?.trim() || undefined,
-    files,
+    file,
     icon: formState.icon?.trim() || undefined,
     name: formState.name.trim(),
-    relativePaths,
     tags: parseTags(formState.tagsInput),
   };
 }
 
 async function submitSkill() {
-  let payload: SkillUploadReq;
+  let payload: SkillZipUploadReq;
   try {
     payload = buildUploadReq();
   } catch (error: any) {
@@ -471,6 +468,37 @@ async function toggleStatus(item: SkillPageResp, checked: boolean) {
   }
 }
 
+const renameModalVisible = ref(false);
+const renameTarget = ref<SkillPageResp | null>(null);
+const renameInput = ref('');
+const renameSaving = ref(false);
+
+function openRename(item: SkillPageResp) {
+  renameTarget.value = item;
+  renameInput.value = item.name;
+  renameModalVisible.value = true;
+}
+
+async function confirmRename() {
+  if (!renameTarget.value) return;
+  const name = renameInput.value.trim();
+  if (!name) {
+    message.warning('请输入技能名称');
+    return;
+  }
+  renameSaving.value = true;
+  try {
+    await api.RenameObj(renameTarget.value.id, name);
+    message.success('重命名成功');
+    renameModalVisible.value = false;
+    await crudExpose.doRefresh();
+  } catch (error: any) {
+    message.error(error?.message || '重命名失败');
+  } finally {
+    renameSaving.value = false;
+  }
+}
+
 onMounted(() => {
   nextTick(() => {
     crudExpose.doRefresh();
@@ -485,7 +513,7 @@ onMounted(() => {
         <template #actionbar-left>
           <a-button type="primary" @click="openCreateDrawer">
             <template #icon><UploadOutlined /></template>
-            上传技能文件夹
+            上传技能压缩包
           </a-button>
         </template>
         <template #default>
@@ -547,6 +575,11 @@ onMounted(() => {
                       <template #icon><DownloadOutlined /></template>
                     </a-button>
                   </a-tooltip>
+                  <a-tooltip title="重命名">
+                    <a-button type="text" size="small" @click="openRename(item)">
+                      <template #icon><FormOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
                   <a-tooltip title="替换目录">
                     <a-button
                       type="text"
@@ -573,7 +606,7 @@ onMounted(() => {
           <Empty v-else class="skill-empty" description="还没有技能目录">
             <a-button type="primary" @click="openCreateDrawer">
               <template #icon><UploadOutlined /></template>
-              上传技能文件夹
+              上传技能压缩包
             </a-button>
           </Empty>
         </template>
@@ -582,7 +615,7 @@ onMounted(() => {
 
     <Drawer
       v-model:open="uploadDrawerVisible"
-      :title="editingSkill ? '替换技能文件夹' : '上传技能文件夹'"
+      :title="editingSkill ? '替换技能压缩包' : '上传技能压缩包'"
       width="560"
     >
       <Form layout="vertical">
@@ -617,20 +650,20 @@ onMounted(() => {
             placeholder="多个标签用逗号分隔"
           />
         </a-form-item>
-        <a-form-item label="技能文件夹" required>
+        <a-form-item label="技能压缩包" required>
           <Upload.Dragger
+            :accept="'.zip'"
             :before-upload="beforeUpload"
-            :directory="true"
             :file-list="formState.skillPackage"
-            :multiple="true"
+            :max-count="1"
             @change="handleUploadChange"
           >
             <p class="ant-upload-drag-icon">
               <InboxOutlined />
             </p>
-            <p class="ant-upload-text">选择或拖入技能文件夹</p>
+            <p class="ant-upload-text">选择或拖入 SKILL.zip 压缩包</p>
             <p class="ant-upload-hint">
-              文件夹内必须包含 SKILL.md，其他资源文件会随目录一起上传到 OSS。
+              压缩包内必须包含 SKILL.md，上传后解压为技能目录存储；支持单层目录包裹。
             </p>
           </Upload.Dragger>
         </a-form-item>
@@ -644,6 +677,21 @@ onMounted(() => {
         </a-space>
       </template>
     </Drawer>
+
+    <Modal
+      v-model:open="renameModalVisible"
+      :confirm-loading="renameSaving"
+      ok-text="保存"
+      title="重命名技能"
+      @ok="confirmRename"
+    >
+      <Input
+        v-model:value="renameInput"
+        :maxlength="100"
+        placeholder="请输入新的技能名称"
+        show-count
+      />
+    </Modal>
 
     <Modal
       :open="previewModalVisible"

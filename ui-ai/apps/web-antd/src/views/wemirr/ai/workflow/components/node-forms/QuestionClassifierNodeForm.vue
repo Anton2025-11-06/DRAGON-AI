@@ -3,9 +3,7 @@
     <ModelSelect
       v-model:model-value="formData.modelId"
       v-model:model-type="formData.modelType"
-      v-model:suffix-value="formData.suffix"
-      v-model:model-is-direct="formData.modelIsDirect"
-      :type-options="LLM_TYPE_OPTIONS"
+      :type-options="CHAT_TYPE_OPTIONS"
       placeholder="选择用于分类的模型"
       @change="handleChange"
     />
@@ -137,9 +135,10 @@
 <script setup lang="ts">
 /**
  * 问题分类器节点配置表单
- * 使用 LLM 对问题进行智能分类，路由到不同的处理分支
+ * 使用 LLM（文生文）对问题进行智能分类，路由到不同的处理分支
+ * 【设计对齐 2026-09】模型固定为 text_to_text，「直连/后缀」概念已废弃
  */
-import { LLM_TYPE_OPTIONS, MODEL_TYPE_TEXT_GEN } from '#/api/ai-workflow/const';
+import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
 import type {
   ClassCategory,
   QuestionClassifierConfig,
@@ -151,7 +150,7 @@ import {
   PlusOutlined,
   QuestionCircleOutlined,
 } from '@ant-design/icons-vue';
-import { reactive, ref, watch } from 'vue';
+import { reactive, watch } from 'vue';
 import draggable from 'vuedraggable';
 
 import { ModelSelect } from '../model-select';
@@ -191,9 +190,7 @@ type QuestionClassifierFormData = Omit<
 // 表单数据
 const formData = reactive<QuestionClassifierFormData>({
   modelId: undefined,
-  modelType: MODEL_TYPE_TEXT_GEN,
-  suffix: undefined,
-  modelIsDirect: undefined,
+  modelType: MT_TEXT_TO_TEXT,
   inputVariable: '',
   instructions: '',
   categories: [...defaultCategories],
@@ -207,9 +204,7 @@ watch(
   (config) => {
     Object.assign(formData, {
       modelId: config.modelId,
-      modelType: config.modelType || MODEL_TYPE_TEXT_GEN,
-      suffix: config.suffix,
-      modelIsDirect: config.modelIsDirect,
+      modelType: config.modelType || MT_TEXT_TO_TEXT,
       inputVariable: config.inputVariable || '',
       instructions: config.instructions || '',
       categories:
@@ -246,9 +241,7 @@ function removeCategory(index: number) {
 function handleChange() {
   const config: QuestionClassifierConfig = {
     modelId: formData.modelId,
-    modelType: formData.modelType,
-    suffix: formData.suffix || undefined,
-    modelIsDirect: formData.modelIsDirect,
+    modelType: MT_TEXT_TO_TEXT,
     inputVariable: formData.inputVariable,
     instructions: formData.instructions,
     categories: formData.categories.filter(

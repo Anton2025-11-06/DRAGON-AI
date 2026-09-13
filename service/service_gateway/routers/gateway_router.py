@@ -24,19 +24,16 @@ _EXCLUDED_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
 
 
 
-@router.post("/api/model", summary="直连模型：api-key 鉴权，转发模型真实地址（完整路径）")
+@router.post("/api/model", summary="模型网关：api-key 鉴权，按 (类型,供应商) 走 common_model 直连")
 async def model_proxy_forward(request: Request):
-    """直连：模型 base_url 维护的是完整接口路径，直接转发"""
-    return await model_proxy(request, True)
+    """统一入口：模型登记只需 base_url（厂商接口基础地址）+ provider + category，端点由 common_model 子类自拼。"""
+    return await model_proxy(request)
 
 
-@router.post("/api/model/{path:path}", summary="非直连模型：api-key 鉴权，base_url + 接口后缀转发")
+@router.post("/api/model/{path:path}", summary="模型网关（OpenAI SDK 兼容别名：忽略接口路径，同 /api/model）")
 async def model_proxy_entry(path: str, request: Request):
-    """
-    非直连：模型 base_url 维护的是接口基础地址，path 为接口后缀（如 v1/chat/completions），
-    网关拼接 base_url + /path 后转发，并校验 path 在模型维护的后缀列表中
-    """
-    return await model_proxy(request, False, path)
+    """兼容 OpenAI 风格客户端（base_url 后自动追加 /chat/completions 等）：path 仅作路由别名，不再参与转发。"""
+    return await model_proxy(request)
 
 
 @router.api_route("/api/{service_name}/{path:path}",
@@ -58,15 +55,24 @@ async def proxy(service_name: str, path: str, request: Request):
         raise HTTPException(status_code=404, detail="无效请求")
 
     # Nacos 发现失败（服务端不可用/实例未注册）时回退到静态实例表
-    nacos_service = getattr(request.app.state, "nacos_service", None)
-    target = None
-    if nacos_service is not None:
-        try:
-            target = await nacos_service.get_one_healthy_instance(service_name)
-        except Exception as e:
-            log.warning(f"Nacos discovery failed for {service_name}: {e}")
-    if target is None:
-        raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
+    # nacos_service = getattr(request.app.state, "nacos_service", None)
+    # target = None
+    # if nacos_service is not None:
+    #     try:
+    #         target = await nacos_service.get_one_healthy_instance(service_name)
+    #     except Exception as e:
+    #         log.warning(f"Nacos discovery failed for {service_name}: {e}")
+    # if target is None:
+    #     raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
+    if service_name == "service_workflow":
+        target = ("127.0.0.1", 9003)
+    if service_name == "service_login":
+        target = ("127.0.0.1", 9004)
+    if service_name == "service_system":
+        target = ("127.0.0.1", 9001)
+    if service_name == "service_file":
+        target = ("127.0.0.1", 9007)
+
 
     ip, port = target
     url = f"http://{ip}:{port}/{path}"

@@ -69,5 +69,6 @@ minio>=7.2.20
 modelscope>=1.35.0
 dashscope>=1.27.4
 openai>=2.54.0
-litellm>=1.100.0
 arq>=0.28.0
+# MCP 官方 SDK（ClientSession：initialize / tools.list / tools.call）
+mcp>=1.8.0

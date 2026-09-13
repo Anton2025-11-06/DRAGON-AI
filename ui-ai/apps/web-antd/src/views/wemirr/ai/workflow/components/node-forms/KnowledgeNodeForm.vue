@@ -245,7 +245,6 @@ onMounted(() => {
       <ModelSelect
         v-model:model-value="formData.rerankConfig.rerankModelId"
         :default-type="MODEL_TYPE_RERANK"
-        :show-suffix="false"
         placeholder="选择重排序模型"
         @change="handleChange"
       />

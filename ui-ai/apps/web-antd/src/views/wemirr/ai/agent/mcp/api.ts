@@ -43,6 +43,8 @@ export interface McpConnectionTestResult {
 export interface McpToolInfo {
   name: string;
   description?: string;
+  /** MCP 工具输入参数 JSON Schema（tools/list 返回，仅展示） */
+  inputSchema?: Record<string, any>;
 }
 
 // 分页查询

@@ -1,0 +1,15 @@
+[OK ] 200 /  bytes=3160  err=[]
+[OK ] 200 /src/api/ai-workflow/const.ts  bytes=11673  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/api.ts  bytes=10421  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/components/CreateModelDialog.vue  bytes=56476  err=[]
+[OK ] 200 /src/views/wemirr/ai/workflow/components/model-select/ModelSelect.vue  bytes=19262  err=[]
+[OK ] 200 /src/views/wemirr/ai/workflow/components/node-forms/LLMNodeForm.vue  bytes=72878  err=[]
+[OK ] 200 /src/views/wemirr/ai/workflow/components/node-forms/QuestionClassifierNodeForm.vue  bytes=34409  err=[]
+[OK ] 200 /src/views/wemirr/ai/workflow/components/node-forms/ParameterExtractorNodeForm.vue  bytes=47157  err=[]
+[OK ] 200 /src/views/wemirr/ai/workflow/components/node-forms/KnowledgeNodeForm.vue  bytes=52215  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/chat/api.ts  bytes=23565  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/chat/index.vue  bytes=48821  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/chat/components/ChatInput.vue  bytes=3160  err=[]
+[OK ] 200 /src/views/wemirr/ai/model-plaza/index.vue  bytes=50767  err=[]
+
+ALL_OK=True

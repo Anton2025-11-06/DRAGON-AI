@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """模型调用数据结构的公共定义（网关 / 工作流引擎共用）。
 
-- 原定义于 service_workflow/workflow_engine/model_client.py，为支撑"直连 httpx /
-  非直连 litellm"双路由下沉到 common 层，model_client.py 仅做 re-export 保持兼容。
-- ModelConfig.model_url() 为直连模式（is_direct=1）的 URL 拼接逻辑；非直连走
-  litellm_adapter，不再使用该方法。
+- 原定义于 service_workflow/workflow_engine/model_client.py，为支撑网关/工作流统一复用，
+  下沉到 common 层，model_client.py 仅做 re-export 保持兼容。
+- ModelConfig 描述一个已登记模型的能力形态（category=12 类型之一 / provider=3 家之一）；
+  实际调用由 common_model 对应 (category, provider) 子类直连本厂商端点（无跨厂商桥接）。
 """
 from __future__ import annotations
 
@@ -23,25 +23,8 @@ class ModelConfig:
     model_name: str = ""
     base_url: str = ""
     api_key: str = ""
-    is_direct: int = 1
-    suffixes: list = field(default_factory=list)
-    # 节点配置所选接口后缀（非直连时优先用它拼接；None 则自动匹配 suffixes）
-    use_suffix: Optional[str] = None
     model_params: dict = field(default_factory=dict)
     status: int = 1
-
-    def model_url(self) -> str:
-        """对话接口地址（LLM/分类/参数提取节点，仅直连模式使用）。
-
-        直连：base_url 已含完整路径；非直连：base_url + 节点配置后缀 use_suffix
-        （模型广场约定非直连必须选择后缀，未配置时返回 None 由业务层拦截）。
-        （非直连模型现已由 litellm_adapter 路由，不再走本方法。）
-        """
-        if self.is_direct == 1:
-            return self.base_url
-        if self.use_suffix:
-            return self.base_url.rstrip("/") + self.use_suffix
-        return None
 
 
 @dataclass
@@ -85,10 +68,10 @@ class ModelNotFoundError(Exception):
 
 
 class ModelInvokeError(Exception):
-    """模型调用失败（HTTP 网络 / 上游错误 / litellm 协议映射）。
+    """模型调用失败（HTTP 网络 / 上游错误 / 端点协议映射）。
 
     status_code：可映射的上游状态码（401/429/404/...），供网关层直接转响应；
-    litellm 适配层据此归一化异常，直连层保持原有透传语义。
+    各 common_model 子类据此归一化异常，网关按状态码透传。
     """
 
     def __init__(self, message: str = "", status_code: Optional[int] = None):
