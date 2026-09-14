@@ -9,7 +9,7 @@
  * - 文生图/文生视频/图生视频/文生音频/音频转文字：对应生成入参
  * 上游媒体/文本均以 {{节点.变量}} 引用，或直接粘贴 URL/文本（后端 _build_kwargs 解析）。
  */
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 
 import {
   MODEL_TYPES_STREAMABLE,
@@ -17,6 +17,7 @@ import {
   MT_IMAGE_EMBEDDING,
   MT_IMAGE_TO_VIDEO,
   MT_IMAGE_UNDERSTAND,
+  MT_MULTIMODAL_EMBEDDING,
   MT_OCR,
   MT_TEXT_EMBEDDING,
   MT_TEXT_RERANK,
@@ -29,7 +30,11 @@ import {
 } from '#/api/ai-workflow/const';
 import type { LLMNodeConfig, StructuredOutput } from '#/api/ai-workflow/types';
 
-import { QuestionCircleOutlined } from '@ant-design/icons-vue';
+import {
+  DeleteOutlined,
+  PlusOutlined,
+  QuestionCircleOutlined,
+} from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
 import { ModelSelect } from '../model-select';
@@ -63,6 +68,7 @@ const formData = reactive<
   LLMNodeConfig & { structuredOutput: StructuredOutput }
 >({
   modelId: undefined,
+  modelName: '',
   modelType: MT_TEXT_TO_TEXT,
   systemPrompt: '',
   promptTemplate: '',
@@ -88,11 +94,93 @@ const formData = reactive<
   structuredOutput: { ...defaultStructuredOutput },
 });
 
+// ==================== 节点级常用参数（按所选模型登记的 common_params 预置，可改值/新增/删除）====================
+interface ParamRow {
+  name: string;
+  type: 'boolean' | 'integer' | 'number' | 'object' | 'string';
+  value: any;
+  desc?: string;
+}
+
+const PARAM_TYPE_OPTIONS: { label: string; value: ParamRow['type'] }[] = [
+  { label: '布尔', value: 'boolean' },
+  { label: '整数', value: 'integer' },
+  { label: '浮点数', value: 'number' },
+  { label: 'JSON', value: 'object' },
+  { label: '字符串', value: 'string' },
+];
+
+const paramRows = ref<ParamRow[]>([]);
+
+function addParam() {
+  paramRows.value.push({ name: '', type: 'string', value: '', desc: '' });
+  handleChange();
+}
+function removeParam(idx: number) {
+  paramRows.value.splice(idx, 1);
+  handleChange();
+}
+/** 切换参数类型时归一默认值，避免残留不匹配类型的旧值 */
+function onParamTypeChange(p: ParamRow) {
+  p.value =
+    p.type === 'boolean'
+      ? false
+      : p.type === 'object'
+        ? '{}'
+        : undefined;
+  handleChange();
+}
+/** 按类型转换值（object 解析 JSON，数字转 number）；后端仅合并不再二次转型 */
+function castParamRow(p: ParamRow): ParamRow {
+  let value = p.value;
+  if (p.type === 'object' && typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      /* 非法 JSON 保持字符串 */
+    }
+  } else if (
+    (p.type === 'integer' || p.type === 'number') &&
+    value !== '' &&
+    value !== null &&
+    value !== undefined
+  ) {
+    value = Number(value);
+  }
+  return {
+    name: p.name?.trim() || '',
+    type: p.type,
+    value,
+    desc: p.desc || '',
+  };
+}
+/** 拉取所选模型登记的 common_params，预置为可编辑参数行（用户切换模型时调用） */
+async function seedParamsFromModel() {
+  const id = Number(formData.modelId);
+  if (!id) {
+    paramRows.value = [];
+    return;
+  }
+  try {
+    const detail = await modelApi.GetDetail(id);
+    paramRows.value = (detail.common_params || []).map((p) => ({
+      name: p.name || '',
+      type: (p.type || 'string') as ParamRow['type'],
+      value: p.default,
+      desc: p.desc || '',
+    }));
+  } catch {
+    paramRows.value = [];
+  }
+  handleChange();
+}
+
 watch(
   () => props.config,
   (config) => {
     Object.assign(formData, {
       modelId: config.modelId,
+      modelName: config.modelName || '',
       modelType: config.modelType || MT_TEXT_TO_TEXT,
       systemPrompt: config.systemPrompt || '',
       promptTemplate: config.promptTemplate || '',
@@ -119,6 +207,15 @@ watch(
         ? { ...defaultStructuredOutput, ...config.structuredOutput }
         : { ...defaultStructuredOutput },
     });
+    // 回填：用已存 config.params 覆盖（编辑既有工作流保留用户配置）
+    paramRows.value = Array.isArray(config.params)
+      ? config.params.map((p) => ({
+          name: p.name || '',
+          type: (p.type || 'string') as ParamRow['type'],
+          value: p.value,
+          desc: p.desc || '',
+        }))
+      : [];
   },
   { immediate: true, deep: true },
 );
@@ -151,13 +248,21 @@ const showThinking = computed(() => showStream.value);
 const showVision = computed(() => isChat.value);
 const showMemory = computed(() => isChat.value);
 const showStructured = computed(() => isChat.value);
-const showInput = computed(() => cat.value === MT_TEXT_EMBEDDING);
-const showImageVar = computed(() =>
-  [MT_IMAGE_UNDERSTAND, MT_OCR, MT_IMAGE_EMBEDDING, MT_IMAGE_TO_VIDEO].includes(
-    cat.value,
-  ),
+const showInput = computed(() =>
+  [MT_TEXT_EMBEDDING, MT_MULTIMODAL_EMBEDDING].includes(cat.value),
 );
-const showVideoVar = computed(() => cat.value === MT_VIDEO_UNDERSTAND);
+const showImageVar = computed(() =>
+  [
+    MT_IMAGE_UNDERSTAND,
+    MT_OCR,
+    MT_IMAGE_EMBEDDING,
+    MT_MULTIMODAL_EMBEDDING,
+    MT_IMAGE_TO_VIDEO,
+  ].includes(cat.value),
+);
+const showVideoVar = computed(() =>
+  [MT_VIDEO_UNDERSTAND, MT_MULTIMODAL_EMBEDDING].includes(cat.value),
+);
 const showAudioVar = computed(() => cat.value === MT_AUDIO_TO_TEXT);
 const showRerank = computed(() => cat.value === MT_TEXT_RERANK);
 const showSize = computed(() =>
@@ -196,7 +301,7 @@ async function openModelTest() {
   }
 }
 
-/** 测试台提交：携带 inputs/stream/thinking/params 调 /models/test */
+/** 测试台提交：携带 inputs/stream/thinking/params 走 SSE 调 /models/test，逐块实时显示 */
 async function onTryRun(payload: {
   inputs: Record<string, any>;
   params: Record<string, any>;
@@ -207,18 +312,36 @@ async function onTryRun(payload: {
   if (!d) return;
   testRunning.value = true;
   testError.value = null;
+  testResult.value = null;
+  let accContent = '';
+  let accReasoning = '';
   try {
-    const res = await modelApi.TestModel({
-      category: d.category,
-      provider: d.provider,
-      model_name: d.model_name,
-      base_url: d.base_url,
-      api_key: d.api_key,
-      inputs: payload.inputs,
-      stream: payload.stream,
-      thinking: payload.thinking,
-      params: payload.params,
-    });
+    const res = await modelApi.TestModelStream(
+      {
+        category: d.category,
+        provider: d.provider,
+        model_name: d.model_name,
+        base_url: d.base_url,
+        api_key: d.api_key,
+        inputs: payload.inputs,
+        stream: payload.stream,
+        thinking: payload.thinking,
+        params: payload.params,
+      },
+      (chunk) => {
+        // 流式增量：逐块累积并回填结果区（面板读 result.data.content/reasoning 渲染）
+        if (chunk.content) accContent += chunk.content;
+        if (chunk.reasoningContent) accReasoning += chunk.reasoningContent;
+        if (accContent || accReasoning) {
+          testResult.value = {
+            success: true,
+            message: '输出中…',
+            data: { content: accContent, reasoning: accReasoning || undefined },
+          };
+        }
+      },
+    );
+    // 汇总帧覆盖增量态（含 urls/vectors/scores/latency 等完整产出）
     testResult.value = res || null;
   } catch (e: any) {
     testResult.value = null;
@@ -231,6 +354,7 @@ async function onTryRun(payload: {
 function handleChange() {
   const config: LLMNodeConfig = {
     modelId: formData.modelId,
+    modelName: formData.modelName,
     modelType: formData.modelType,
     outputVariable: formData.outputVariable,
     promptTemplate: formData.promptTemplate,
@@ -258,20 +382,30 @@ function handleChange() {
     structuredOutput: formData.structuredOutput.enabled
       ? { ...formData.structuredOutput }
       : undefined,
+    params: paramRows.value.map((p) => castParamRow(p)),
   };
   emit('update:config', config);
 }
 
-// 类型切换：清空与该类型无关的输入，避免脏数据传给后端
-function handleTypeChange() {
+// 类型/模型切换：清空无关输入 + 重新拉取该模型登记的常用参数预置
+async function handleTypeChange() {
   handleChange();
+  await seedParamsFromModel();
 }
+
+// 旧工作流节点（尚未携带 params）首次挂载：若已选模型则按模型登记参数预置
+onMounted(() => {
+  if (formData.modelId && !(props.config.params && props.config.params.length)) {
+    seedParamsFromModel();
+  }
+});
 </script>
 
 <template>
   <a-form layout="vertical" :model="formData" class="node-form">
     <ModelSelect
       v-model:model-value="formData.modelId"
+      v-model:model-name="formData.modelName"
       v-model:model-type="formData.modelType"
       :type-options="LLM_TYPE_OPTIONS"
       @change="handleTypeChange"
@@ -603,6 +737,90 @@ function handleTypeChange() {
       </template>
     </template>
 
+    <!-- 常用参数：按所选模型登记的参数预置，可改值（覆盖默认）/新增（未登记）/删除；运行时合并进 model_params -->
+    <a-divider orientation="left" style="font-size: 12px; margin: 16px 0 12px">
+      常用参数
+    </a-divider>
+    <div class="param-edit">
+      <div class="param-edit__head">
+        <span class="pc-name">参数名</span>
+        <span class="pc-type">类型</span>
+        <span class="pc-val">值</span>
+        <span class="pc-desc">说明</span>
+        <span class="pc-op"></span>
+      </div>
+      <div v-for="(p, i) in paramRows" :key="i" class="param-edit__row">
+        <a-input
+          v-model:value="p.name"
+          class="pc-name"
+          size="small"
+          :maxlength="64"
+          placeholder="如 temperature"
+          @change="handleChange"
+        />
+        <a-select
+          v-model:value="p.type"
+          class="pc-type"
+          size="small"
+          :options="PARAM_TYPE_OPTIONS"
+          @change="onParamTypeChange(p)"
+        />
+        <span class="pc-val">
+          <a-switch
+            v-if="p.type === 'boolean'"
+            v-model:checked="p.value"
+            size="small"
+            @change="handleChange"
+          />
+          <a-input-number
+            v-else-if="p.type === 'integer' || p.type === 'number'"
+            v-model:value="p.value"
+            size="small"
+            :precision="p.type === 'integer' ? 0 : undefined"
+            style="width: 100%"
+            @change="handleChange"
+          />
+          <a-input
+            v-else
+            v-model:value="p.value"
+            size="small"
+            :placeholder="p.type === 'object' ? 'JSON' : '值'"
+            @change="handleChange"
+          />
+        </span>
+        <a-input
+          v-model:value="p.desc"
+          class="pc-desc"
+          size="small"
+          :maxlength="255"
+          placeholder="参数说明"
+          @change="handleChange"
+        />
+        <span class="pc-op">
+          <a-button type="text" danger size="small" @click="removeParam(i)">
+            <template #icon>
+              <DeleteOutlined />
+            </template>
+          </a-button>
+        </span>
+      </div>
+      <a-button
+        type="dashed"
+        size="small"
+        block
+        style="margin-top: 8px"
+        @click="addParam"
+      >
+        <template #icon>
+          <PlusOutlined />
+        </template>
+        添加参数
+      </a-button>
+      <div class="form-hint" style="margin-top: 6px">
+        留空则使用模型登记的默认参数；此处可修改取值（覆盖模型默认）或新增模型未登记的参数，保存后在节点真实运行时生效
+      </div>
+    </div>
+
     <a-divider style="margin: 16px 0 12px" />
 
     <a-form-item label="输出变量名">
@@ -671,5 +889,30 @@ function handleTypeChange() {
   :deep(.ant-divider-inner-text) {
     color: #8c8c8c;
   }
+}
+
+.param-edit {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+.param-edit__head,
+.param-edit__row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1.4fr 1.6fr 40px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.param-edit__head {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.pc-op {
+  text-align: center;
 }
 </style>

@@ -22,6 +22,8 @@ import type { AiModelOption } from '#/api/ai-workflow/types';
 interface Props {
   /** 已选模型 ID (v-model) */
   modelValue?: number;
+  /** 已选模型标识 (v-model:modelName)：选择时快照，供画布节点展示 */
+  modelName?: string;
   /** 已选模型类型 (v-model)；typeOptions 为空时不展示类型选择 */
   modelType?: string;
   /** 模型类型选项；为空表示固定类型（如 text_rerank），按 defaultType 直接加载 */
@@ -34,6 +36,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   modelValue: undefined,
+  modelName: '',
   modelType: '',
   typeOptions: () => [],
   defaultType: MODEL_TYPE_TEXT,
@@ -44,6 +47,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: number | undefined): void;
+  (e: 'update:modelName', value: string): void;
   (e: 'update:modelType', value: string): void;
   (e: 'change'): void;
 }>();
@@ -78,15 +82,19 @@ async function loadModels(type: string) {
 // ==================== 交互 ====================
 
 function handleTypeChange(value: string) {
-  // 类型切换：清空已选模型，重新拉列表
+  // 类型切换：清空已选模型/标识，重新拉列表
   emit('update:modelType', value);
   emit('update:modelValue', undefined);
+  emit('update:modelName', '');
   loadModels(value || props.defaultType);
   emit('change');
 }
 
 function handleModelChange(value: number) {
+  const model = models.value.find((m) => m.id === value);
   emit('update:modelValue', value);
+  // 快照模型标识（无 model_name 时回退展示名），供画布节点显示
+  emit('update:modelName', model?.modelName || model?.name || '');
   emit('change');
 }
 

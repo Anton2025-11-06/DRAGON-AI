@@ -17,7 +17,6 @@ _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # 参数最大记录长度（避免超长请求体撑爆日志表）
 _MAX_PARAMS_LEN = 2000
 
-
 # 敏感字段脱敏：日志落库前将密码类/凭证类字段替换为掩码，防止明文泄露
 _SENSITIVE_KEYS = {"password", "old_password", "new_password", "confirm_password", "token", "authorization"}
 

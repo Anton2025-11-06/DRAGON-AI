@@ -13,6 +13,7 @@ export const MT_TEXT_TO_TEXT = 'text_to_text'; // 文生文（支持 stream）
 export const MT_TEXT_EMBEDDING = 'text_embedding'; // 文本向量
 export const MT_TEXT_RERANK = 'text_rerank'; // 文本重排
 export const MT_IMAGE_EMBEDDING = 'image_embedding'; // 图片向量
+export const MT_MULTIMODAL_EMBEDDING = 'multimodal_embedding'; // 多模态向量（文本+图片+视频，仅通义）
 export const MT_TEXT_TO_IMAGE = 'text_to_image'; // 文生图
 export const MT_AUDIO_TO_TEXT = 'audio_to_text'; // 音频转文字
 export const MT_IMAGE_UNDERSTAND = 'image_understand'; // 图片理解（支持 stream）
@@ -22,12 +23,13 @@ export const MT_IMAGE_TO_VIDEO = 'image_to_video'; // 图生视频
 export const MT_TEXT_TO_VIDEO = 'text_to_video'; // 文生视频
 export const MT_TEXT_TO_AUDIO = 'text_to_audio'; // 文生音频
 
-/** 12 能力类型全集（顺序即业务定义顺序，as const 供类型推导） */
+/** 13 能力类型全集（顺序即业务定义顺序，as const 供类型推导） */
 export const MODEL_CATEGORY_LIST = [
   MT_TEXT_TO_TEXT,
   MT_TEXT_EMBEDDING,
   MT_TEXT_RERANK,
   MT_IMAGE_EMBEDDING,
+  MT_MULTIMODAL_EMBEDDING,
   MT_TEXT_TO_IMAGE,
   MT_AUDIO_TO_TEXT,
   MT_IMAGE_UNDERSTAND,
@@ -47,6 +49,7 @@ export const MODEL_CATEGORY_LABELS: Record<string, string> = {
   [MT_TEXT_EMBEDDING]: '文本向量',
   [MT_TEXT_RERANK]: '文本重排',
   [MT_IMAGE_EMBEDDING]: '图片向量',
+  [MT_MULTIMODAL_EMBEDDING]: '多模态向量',
   [MT_TEXT_TO_IMAGE]: '文生图',
   [MT_AUDIO_TO_TEXT]: '音频转文字',
   [MT_IMAGE_UNDERSTAND]: '图片理解',

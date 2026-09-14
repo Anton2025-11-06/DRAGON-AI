@@ -68,6 +68,17 @@ def http_client():
     return httpx_pool.client
 
 
+def ensure_ok(resp, label: str = "模型调用") -> None:
+    """统一 httpx 响应错误转换（仅用于 ainvoke 直连调用）。
+
+    resp.raise_for_status() 抛的 HTTPStatusError 只带状态码，会丢失厂商返回体里的
+    code/message 真实错误原因；此处显式判断状态码并把响应正文塞进 ModelInvokeError，
+    供上层（模型广场 test / 网关 / 工作流节点）展示可读错误。
+    """
+    if resp.status_code >= 400:
+        raise ModelInvokeError(f"{label}失败({resp.status_code})：{resp.text}")
+
+
 async def poll_task(fetch, is_done, is_fail, *, interval: float = 3.0, timeout: float = 600.0):
     """通用「提交-轮询」异步任务等待器（文生图/文生视频/图生视频/ASR 等）。
 

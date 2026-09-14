@@ -11,14 +11,16 @@
  *  - 输入区：按 category 复用 12 类型字段配置；url 字段旁提供「上传」按钮（调 service_file 回填可下载 URL）
  *  - 产出：{ inputs, stream, thinking, params }
  */
-import type { CommonParam } from '../api';
+import type { CommonParam, CommonParamType } from '../api';
 
 import { computed, reactive, ref, watch } from 'vue';
 
 import { message } from 'ant-design-vue';
 
 import {
+  DeleteOutlined,
   LoadingOutlined,
+  PlusOutlined,
   SendOutlined,
   ThunderboltOutlined,
   UploadOutlined,
@@ -54,7 +56,7 @@ export interface TryPayload {
   params: Record<string, any>;
 }
 
-// ==================== 12 类型输入配置（与 experience/TypeForm 对齐） ====================
+// ==================== 12 类型输入配置（category → 输入字段） ====================
 
 const TYPE_FORMS: TryFormConfig[] = [
   {
@@ -113,6 +115,16 @@ const TYPE_FORMS: TryFormConfig[] = [
     hint: '提供图片地址，模型将编码为高维向量。',
     fields: [
       { key: 'image_url', label: '图片地址', type: 'url', required: true, placeholder: 'https://…/example.jpg', extra: '可直接上传或填写公网可访问直链' },
+    ],
+  },
+  {
+    category: 'multimodal_embedding',
+    label: '多模态向量',
+    hint: '文本 / 图片 / 视频任意组合（至少填一项），一次调用返回各段内容的独立向量。',
+    fields: [
+      { key: 'text', label: '文本内容', type: 'textarea', rows: 3, placeholder: '例如：一只戴帽子的猫（文本/图片/视频至少填一项）' },
+      { key: 'image_url', label: '图片地址', type: 'url', placeholder: 'https://…/example.jpg', extra: '可直接上传或填写公网可访问直链' },
+      { key: 'video_url', label: '视频地址', type: 'url', placeholder: 'https://…/example.mp4', extra: '仅支持公网可访问的视频直链' },
     ],
   },
   {
@@ -197,19 +209,32 @@ const emit = defineEmits<{ run: [payload: TryPayload] }>();
 const form = reactive<Record<string, any>>({});
 const useStream = ref(false);
 const useThinking = ref(false);
-/** 常用参数当前值（键=参数名，可编辑覆盖默认值） */
-const paramValues = reactive<Record<string, any>>({});
-/** 每个参数的控件初始值（来自 default，按 type 归一） */
-const paramInitial = ref<Record<string, any>>({});
+/** 常用参数行：locked=true 来自模型登记的 common_params（名/类型固定），false 为用户临时添加 */
+interface TryParamRow {
+  name: string;
+  type: CommonParamType;
+  value: any;
+  desc?: string;
+  locked?: boolean;
+}
+
+const paramRows = ref<TryParamRow[]>([]);
+
+const PARAM_TYPE_OPTIONS: { label: string; value: CommonParamType }[] = [
+  { label: '布尔', value: 'boolean' },
+  { label: '整数', value: 'integer' },
+  { label: '浮点数', value: 'number' },
+  { label: 'JSON', value: 'object' },
+  { label: '字符串', value: 'string' },
+];
 
 const config = computed<TryFormConfig>(
   () => TYPE_FORMS.find((f) => f.category === props.category) || TYPE_FORMS[0]!,
 );
 
-/** 参数类型 → 控件初值 */
-function seedParamValue(p: CommonParam): any {
-  const raw = p.default;
-  switch (p.type) {
+/** 类型 → 控件初值（来自 default） */
+function seedParamValue(type: CommonParamType, raw: any): any {
+  switch (type) {
     case 'boolean': {
       return raw === true || raw === 'true' || raw === 1 || raw === '1';
     }
@@ -228,9 +253,9 @@ function seedParamValue(p: CommonParam): any {
   }
 }
 
-/** 参数当前值 → 提交类型（按声明 type 转型；object 解析 JSON） */
-function castParamValue(p: CommonParam, val: any): any {
-  switch (p.type) {
+/** 控件值 → 提交类型（按声明 type 转型；object 解析 JSON） */
+function castParamValue(type: CommonParamType, val: any): any {
+  switch (type) {
     case 'boolean': {
       return Boolean(val);
     }
@@ -256,24 +281,49 @@ function castParamValue(p: CommonParam, val: any): any {
   }
 }
 
-function resetParams() {
-  Object.keys(paramValues).forEach((k) => delete paramValues[k]);
-  const init: Record<string, any> = {};
-  for (const p of props.commonParams || []) {
-    if (!p?.name) continue;
-    init[p.name] = seedParamValue(p);
-    paramValues[p.name] = init[p.name];
-  }
-  paramInitial.value = init;
+/** 切换参数类型时归一控件值，避免残留不匹配类型的旧值 */
+function onParamTypeChange(row: TryParamRow) {
+  row.value =
+    row.type === 'boolean'
+      ? false
+      : row.type === 'object'
+        ? '{}'
+        : undefined;
 }
 
-// 切换模型（类型变化）：重置输入；参数列表变化：重置参数值
+function addParam() {
+  paramRows.value.push({
+    name: '',
+    type: 'string',
+    value: '',
+    desc: '',
+    locked: false,
+  });
+}
+function removeParam(idx: number) {
+  paramRows.value.splice(idx, 1);
+}
+
+// 切换模型（类型变化）：重置输入
 watch(() => props.category, () => {
   Object.keys(form).forEach((k) => delete form[k]);
 });
+// 参数列表变化：以模型登记的 common_params 重建「锁定行」，保留用户临时添加行
 watch(
   () => props.commonParams,
-  () => resetParams(),
+  (list) => {
+    const locked: TryParamRow[] = (list || [])
+      .filter((p) => p?.name)
+      .map((p) => ({
+        name: p.name,
+        type: (p.type || 'string') as CommonParamType,
+        value: seedParamValue((p.type || 'string') as CommonParamType, p.default),
+        desc: p.desc || '',
+        locked: true,
+      }));
+    const extras = paramRows.value.filter((r) => !r.locked);
+    paramRows.value = [...locked, ...extras];
+  },
   { immediate: true, deep: false },
 );
 
@@ -343,10 +393,11 @@ function onSubmit() {
     return;
   }
   const params: Record<string, any> = {};
-  for (const p of props.commonParams || []) {
-    if (!p?.name) continue;
-    const casted = castParamValue(p, paramValues[p.name]);
-    if (casted !== undefined) params[p.name] = casted;
+  for (const row of paramRows.value) {
+    const name = (row.name || '').trim();
+    if (!name) continue;
+    const casted = castParamValue(row.type, row.value);
+    if (casted !== undefined) params[name] = casted;
   }
   emit('run', {
     inputs: buildInputs(),
@@ -383,59 +434,117 @@ const resultUrls = computed<string[]>(() => props.result?.data?.urls || []);
       class="switch-row"
     >
       <div v-if="props.supportsStream" class="switch-item">
-        <span class="switch-label">支持流消息</span>
+        <span class="switch-label">开启流式输出</span>
         <a-switch v-model:checked="useStream" :disabled="props.running" size="small" />
       </div>
       <div v-if="props.supportsThinking" class="switch-item">
-        <span class="switch-label">支持思考模式</span>
+        <span class="switch-label">开启深度思考</span>
         <a-switch v-model:checked="useThinking" :disabled="props.running" size="small" />
       </div>
     </div>
 
-    <!-- 常用参数 -->
-    <div v-if="props.commonParams && props.commonParams.length" class="param-block">
+    <!-- 常用参数：模型登记项可改值（覆盖默认）；可临时添加模型未登记的参数 -->
+    <div class="param-block">
       <div class="param-title">常用参数</div>
       <div class="param-head">
         <span class="col-name">参数名</span>
-        <span class="col-val">默认值</span>
-        <span class="col-desc">参数说明</span>
         <span class="col-type">类型</span>
+        <span class="col-val">值</span>
+        <span class="col-desc">说明</span>
+        <span class="col-op"></span>
       </div>
-      <div v-for="p in props.commonParams" :key="p.name" class="param-row">
-        <span class="col-name" :title="p.name">{{ p.name }}</span>
+      <div v-for="(row, i) in paramRows" :key="i" class="param-row">
+        <span class="col-name">
+          <span v-if="row.locked" :title="row.name">{{ row.name }}</span>
+          <a-input
+            v-else
+            v-model:value="row.name"
+            size="small"
+            :maxlength="64"
+            placeholder="参数名"
+            :disabled="props.running"
+          />
+        </span>
+        <span class="col-type">
+          <a-tag v-if="row.locked">{{ row.type }}</a-tag>
+          <a-select
+            v-else
+            v-model:value="row.type"
+            size="small"
+            :options="PARAM_TYPE_OPTIONS"
+            :disabled="props.running"
+            style="width: 100%"
+            @change="onParamTypeChange(row)"
+          />
+        </span>
         <span class="col-val">
           <a-switch
-            v-if="p.type === 'boolean'"
-            v-model:checked="paramValues[p.name]"
+            v-if="row.type === 'boolean'"
+            v-model:checked="row.value"
             size="small"
             :disabled="props.running"
           />
           <a-input-number
-            v-else-if="p.type === 'integer' || p.type === 'number'"
-            v-model:value="paramValues[p.name]"
+            v-else-if="row.type === 'integer' || row.type === 'number'"
+            v-model:value="row.value"
             size="small"
-            :precision="p.type === 'integer' ? 0 : undefined"
+            :precision="row.type === 'integer' ? 0 : undefined"
             :disabled="props.running"
             style="width: 100%"
           />
           <a-textarea
-            v-else-if="p.type === 'object'"
-            v-model:value="paramValues[p.name]"
+            v-else-if="row.type === 'object'"
+            v-model:value="row.value"
             :auto-size="{ minRows: 1, maxRows: 3 }"
             :disabled="props.running"
             placeholder="JSON"
           />
           <a-input
             v-else
-            v-model:value="paramValues[p.name]"
+            v-model:value="row.value"
             size="small"
             :disabled="props.running"
           />
         </span>
-        <span class="col-desc" :title="p.desc">{{ p.desc || '-' }}</span>
-        <span class="col-type">
-          <a-tag>{{ p.type }}</a-tag>
+        <span class="col-desc">
+          <span v-if="row.locked" :title="row.desc">{{ row.desc || '-' }}</span>
+          <a-input
+            v-else
+            v-model:value="row.desc"
+            size="small"
+            :maxlength="255"
+            placeholder="说明"
+            :disabled="props.running"
+          />
         </span>
+        <span class="col-op">
+          <a-button
+            v-if="!row.locked"
+            type="text"
+            danger
+            size="small"
+            :disabled="props.running"
+            @click="removeParam(i)"
+          >
+            <template #icon>
+              <DeleteOutlined />
+            </template>
+          </a-button>
+        </span>
+      </div>
+      <div class="param-add">
+        <a-button
+          type="dashed"
+          size="small"
+          block
+          :disabled="props.running"
+          @click="addParam"
+        >
+          <template #icon>
+            <PlusOutlined />
+          </template>
+          添加参数
+        </a-button>
       </div>
     </div>
 
@@ -590,7 +699,7 @@ const resultUrls = computed<string[]>(() => props.result?.data?.urls || []);
 .param-head,
 .param-row {
   display: grid;
-  grid-template-columns: 1fr 1.2fr 1.6fr 0.8fr;
+  grid-template-columns: 1.2fr 0.9fr 1.4fr 1.2fr 32px;
   gap: 8px;
   align-items: center;
   padding: 6px 12px;
@@ -616,6 +725,14 @@ const resultUrls = computed<string[]>(() => props.result?.data?.urls || []);
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: monospace;
+}
+
+.col-op {
+  text-align: center;
+}
+
+.param-add {
+  padding: 8px 12px 10px;
 }
 
 .form-hint {

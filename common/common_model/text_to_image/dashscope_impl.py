@@ -3,8 +3,8 @@
 from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import MT_TEXT_TO_IMAGE, PROVIDER_DASHSCOPE
-from common.common_model.base import (ModelResult, http_client, poll_task,
-                                      register)
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      poll_task, register)
 from common.common_model.text_to_image import TextToImageBase
 
 _SUBMIT = "/api/v1/services/aigc/text2image/image-synthesis"
@@ -28,14 +28,16 @@ class DashscopeTextToImage(TextToImageBase):
         r = await http_client().post(origin + _SUBMIT, headers={**self._hdr(), "X-DashScope-Async": "enable"},
                                      json={"model": self.model, "input": {"prompt": prompt},
                                            "parameters": {"size": size, "n": n, **self.extra}})
-        r.raise_for_status()
+        ensure_ok(r, "文生图提交")
         task_id = r.json().get("output", {}).get("task_id")
+        from dashscope.aigc.image_generation import ImageGeneration
+
         if not wait:
             return ModelResult(task_id=task_id, raw=r.json())
 
         async def fetch():
             rr = await http_client().get(f"{origin}/api/v1/tasks/{task_id}", headers=self._hdr())
-            rr.raise_for_status()
+            ensure_ok(rr, "文生图轮询")
             return rr.json()
 
         snap = await poll_task(fetch, is_done=lambda d: d.get("output", {}).get("task_status") == "SUCCEEDED",

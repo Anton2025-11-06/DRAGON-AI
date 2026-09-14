@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """供应商 智谱 zhipu：glm-tts（voice=female），OpenAI 兼容 /audio/speech 直接返回字节流。"""
 from common.common_constants.model_constant import MT_TEXT_TO_AUDIO, PROVIDER_ZHIPU
-from common.common_model.base import ModelResult, http_client, register
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      register)
 from common.common_model.text_to_audio import TextToAudioBase
 
 
@@ -17,5 +18,5 @@ class ZhipuTextToAudio(TextToAudioBase):
             headers={"Authorization": f"Bearer {self.config.api_key}"},
             json={"model": self.model, "input": text, "voice": voice,
                   "response_format": response_format, **self.extra})
-        resp.raise_for_status()
+        ensure_ok(resp, "文生音频调用")
         return ModelResult(audio_bytes=resp.content, raw={"format": response_format, "size": len(resp.content)})

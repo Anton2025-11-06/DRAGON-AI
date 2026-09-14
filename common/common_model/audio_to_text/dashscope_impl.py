@@ -3,8 +3,8 @@
 from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import MT_AUDIO_TO_TEXT, PROVIDER_DASHSCOPE
-from common.common_model.base import (ModelResult, http_client, poll_task,
-                                      register)
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      poll_task, register)
 from common.common_model.audio_to_text import AudioToTextBase
 
 _SUBMIT = "/api/v1/services/audio/asr/transcription"
@@ -29,7 +29,7 @@ class DashscopeAudioToText(AudioToTextBase):
         r = await http_client().post(origin + _SUBMIT, headers={**self._hdr(), "X-DashScope-Async": "enable"},
                                      json={"model": self.model, "input": {"file_urls": urls},
                                            "parameters": {"channel_id": [0], **self.extra}})
-        r.raise_for_status()
+        ensure_ok(r, "音频转文字提交")
         task_id = r.json().get("output", {}).get("task_id")
 
         async def fetch():

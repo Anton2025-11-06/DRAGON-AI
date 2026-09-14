@@ -20,6 +20,10 @@ export interface ModelExperienceBody {
   text?: string;
   voice?: string;
   stream?: boolean;
+  /** 深度思考开关（对话族：网关透传给 common_model 的 _thinking_kwargs） */
+  thinking?: boolean;
+  /** 常用参数覆盖（网关合并进 model_params，经 self.extra 透传） */
+  params?: Record<string, any>;
 }
 
 /** 解析后的统一体验结果（供 ResultPanel 渲染） */

@@ -38,6 +38,8 @@ MODEL_REGISTRY: dict[str, dict[str, list[str]]] = {
         "text_embedding": ["text-embedding-v3", "text-embedding-v4", "text-embedding-v2"],
         "text_rerank": ["gte-rerank-v2"],
         "image_embedding": ["multimodal-embedding-v1"],
+        # 多模态向量：与 image_embedding 同源 multimodal-embedding 端点，支持 text/image/video 混合输入
+        "multimodal_embedding": ["multimodal-embedding-v1"],
         "image_understand": ["qwen-vl-plus", "qwen-vl-max"],
         "video_understand": ["qwen-vl-plus", "qwen-vl-max"],
         "ocr": ["qwen-vl-ocr"],

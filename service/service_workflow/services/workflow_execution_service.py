@@ -287,7 +287,7 @@ class WorkflowExecutionService:
                     await session.commit()
         end = time.monotonic()
         # loguru 只认 {} 占位符，%s 风格不会被替换（静默失效）
-        log.info("node persist done took={}ms", int((end - start) * 1000))
+        # log.info("node persist done took={}ms", int((end - start) * 1000))
 
     @staticmethod
     async def _persist_state(runtime: WorkflowRuntime, paused: bool = False) -> None:
@@ -349,6 +349,25 @@ class WorkflowExecutionService:
         wf = await session.get(Workflow, row.workflow_id)
         if wf:
             wf_name = wf.name
+        # 节点自定义名称/类型回填：新记录由引擎快照写入 node_states；
+        # 历史记录缺失时从工作流图定义补齐（id→label/type）
+        node_states = row.node_states or {}
+        if isinstance(node_states, dict):
+            label_map = {}
+            for n in ((wf.graph if wf else None) or {}).get("nodes") or []:
+                nid = str(n.get("id", ""))
+                if nid:
+                    label_map[nid] = (n.get("label") or n.get("name") or nid,
+                                      n.get("type"))
+            for nid, st in node_states.items():
+                if not isinstance(st, dict):
+                    continue
+                meta = label_map.get(str(nid))
+                if meta:
+                    if not st.get("label"):
+                        st["label"] = meta[0]
+                    if not st.get("nodeType"):
+                        st["nodeType"] = meta[1]
         duration = None
         if row.started_at and row.completed_at:
             duration = int((row.completed_at - row.started_at).total_seconds() * 1000)
@@ -360,7 +379,7 @@ class WorkflowExecutionService:
             "workflowVersion": row.workflow_version,
             "status": row.status,
             "inputs": row.inputs, "outputs": row.outputs,
-            "nodeStates": row.node_states,
+            "nodeStates": node_states,
             "errorMessage": row.error_message,
             "startTime": row.started_at.strftime("%Y-%m-%d %H:%M:%S") if row.started_at else None,
             "endTime": row.completed_at.strftime("%Y-%m-%d %H:%M:%S") if row.completed_at else None,
@@ -368,7 +387,7 @@ class WorkflowExecutionService:
             "inputTokens": row.input_tokens, "outputTokens": row.output_tokens,
             "totalTokens": row.input_tokens + row.output_tokens,
             "llmCallCount": row.llm_call_count,
-            "executedNodes": list((row.node_states or {}).keys()),
+            "executedNodes": list(node_states.keys()),
             "currentNodeId": row.current_node_id,
             "userId": str(row.user_id),
             "createdTime": row.create_time.strftime("%Y-%m-%d %H:%M:%S") if row.create_time else None,

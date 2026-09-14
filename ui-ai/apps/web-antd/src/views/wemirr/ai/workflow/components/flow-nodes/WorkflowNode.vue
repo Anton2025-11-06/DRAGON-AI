@@ -27,6 +27,7 @@ import {
 } from '@ant-design/icons-vue';
 import { Handle, Position } from '@vue-flow/core';
 
+import { MODEL_CATEGORY_LABELS } from '#/api/ai-workflow/const';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import { outputHandleForBranch } from '../../domain/ports';
@@ -158,9 +159,10 @@ const endOutputs = computed(() => {
   return config.value.outputs || [];
 });
 
-/** LLM 模型名称 */
-const llmModelName = computed(() => {
-  return config.value.modelId || '未配置';
+/** LLM 模型类型（能力类型 code → 中文名） */
+const llmCategoryLabel = computed(() => {
+  const type = config.value.modelType;
+  return MODEL_CATEGORY_LABELS[type] || type || '未配置';
 });
 
 /** 输入摘要 */
@@ -319,8 +321,8 @@ function getBranchHandleY(index: number): number {
       </template>
       <template v-else-if="nodeType === 'LLM'">
         <div class="config-row">
-          <span class="config-label">模型</span>
-          <span class="config-value">{{ llmModelName }}</span>
+          <span class="config-label">模型类型</span>
+          <span class="config-value">{{ llmCategoryLabel }}</span>
         </div>
         <div class="config-row">
           <span class="config-label">输出</span>

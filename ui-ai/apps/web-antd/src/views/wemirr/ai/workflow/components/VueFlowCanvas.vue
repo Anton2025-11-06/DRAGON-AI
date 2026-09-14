@@ -18,8 +18,9 @@ import type {
   WorkflowNode as WorkflowNodeType,
 } from '#/api/ai-workflow/types';
 
-import { markRaw, onMounted, ref } from 'vue';
+import { markRaw, onMounted, onUnmounted, ref } from 'vue';
 
+import { CopyOutlined, DeleteOutlined } from '@ant-design/icons-vue';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import {
@@ -96,6 +97,16 @@ const nodes = ref<Node[]>([]);
 /** 边列表 */
 const edges = ref<Edge[]>([]);
 
+/** 右键菜单状态（仅非开始/结束节点可复制/删除） */
+const contextMenu = ref<{ nodeId: string; visible: boolean; x: number; y: number }>(
+  {
+    nodeId: '',
+    visible: false,
+    x: 0,
+    y: 0,
+  },
+);
+
 /** 节点类型映射 - 使用 any 类型断言解决 Vue Flow 类型兼容问题 */
 const nodeTypes: Record<string, any> = {
   workflow: markRaw(WorkflowNode),
@@ -121,6 +132,7 @@ const defaultEdgeOptions = {
 function onNodeClick(event: NodeMouseEvent) {
   const { node } = event;
   if (!node) return;
+  closeContextMenu();
   workflowStore.selectNode(node.id);
   emit('node-click', node);
 }
@@ -134,10 +146,44 @@ function onNodeDoubleClick(event: NodeMouseEvent) {
   emit('node-dblclick', node);
 }
 
+/** 关闭右键菜单 */
+function closeContextMenu() {
+  if (contextMenu.value.visible) contextMenu.value.visible = false;
+}
+
+/** Esc 收起右键菜单 */
+function onDocKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeContextMenu();
+}
+
+/**
+ * 节点右键菜单：非开始/结束节点弹出「复制/删除」浮层
+ */
+function onNodeContextMenu(event: NodeMouseEvent) {
+  if (props.readonly) return;
+  const node = event.node;
+  if (!node) return;
+  const nodeType = node.data?.nodeType as NodeType;
+  // 开始/结束节点为工作流边界，不提供复制/删除
+  if (nodeType === 'START' || nodeType === 'END') return;
+  const native = event.event as MouseEvent;
+  native?.preventDefault?.();
+  const container = containerRef.value;
+  if (!container || !native) return;
+  const bounds = container.getBoundingClientRect();
+  contextMenu.value = {
+    visible: true,
+    nodeId: node.id,
+    x: native.clientX - bounds.left,
+    y: native.clientY - bounds.top,
+  };
+}
+
 /**
  * 面板点击事件（取消选择）
  */
 function onPaneClick() {
+  closeContextMenu();
   workflowStore.clearSelection();
   emit('pane-click');
 }
@@ -263,6 +309,49 @@ function createNode(
       executionDuration: null,
     },
   };
+}
+
+/** 深拷贝节点配置，避免副本与原节点共享引用 */
+function cloneConfig(config: any) {
+  return config ? JSON.parse(JSON.stringify(config)) : {};
+}
+
+/** 复制节点：在原节点右下偏移处生成一份同类型同配置的副本（减少重复配置） */
+function duplicateNode(nodeId: string) {
+  const src = nodes.value.find((n) => n.id === nodeId);
+  if (!src) return;
+  const newId = generateUUID();
+  const newNode: Node = {
+    id: newId,
+    type: 'workflow',
+    position: { x: src.position.x + 48, y: src.position.y + 48 },
+    data: {
+      nodeType: src.data.nodeType,
+      label: src.data.label,
+      config: cloneConfig(src.data.config),
+      executionStatus: null,
+      executionDuration: null,
+    },
+  };
+  addNodes([newNode]);
+  workflowStore.selectNode(newId);
+  workflowStore.setDirty(true);
+}
+
+/** 菜单：复制当前右键节点 */
+function handleContextCopy() {
+  const id = contextMenu.value.nodeId;
+  closeContextMenu();
+  if (id) duplicateNode(id);
+}
+
+/** 菜单：删除当前右键节点（连带其相邻边由 vue-flow 一并移除） */
+function handleContextDelete() {
+  const id = contextMenu.value.nodeId;
+  closeContextMenu();
+  if (!id) return;
+  removeNodes([id]);
+  workflowStore.setDirty(true);
 }
 
 /**
@@ -501,7 +590,17 @@ onMounted(() => {
       renderWorkflow,
     };
   }
+  // 点击画布外部 / 滚轮平移 / Esc 均收起右键菜单
+  window.addEventListener('click', closeContextMenu);
+  window.addEventListener('wheel', closeContextMenu, { passive: true });
+  window.addEventListener('keydown', onDocKeyDown);
   emit('graph-ready');
+});
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeContextMenu);
+  window.removeEventListener('wheel', closeContextMenu);
+  window.removeEventListener('keydown', onDocKeyDown);
 });
 
 // ==================== 暴露方法 ====================
@@ -552,6 +651,7 @@ defineExpose({
       fit-view-on-init
       @node-click="onNodeClick"
       @node-double-click="onNodeDoubleClick"
+      @node-context-menu="onNodeContextMenu"
       @pane-click="onPaneClick"
       @connect="onConnect"
       @nodes-change="onNodesChange"
@@ -573,6 +673,25 @@ defineExpose({
         <WorkflowNode v-bind="nodeProps" />
       </template>
     </VueFlow>
+
+    <!-- 节点右键菜单（仅非开始/结束节点弹出） -->
+    <div
+      v-if="contextMenu.visible && !readonly"
+      class="node-context-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @contextmenu.prevent
+    >
+      <button type="button" class="node-context-menu__item" @click="handleContextCopy">
+        <CopyOutlined /> 复制节点
+      </button>
+      <button
+        type="button"
+        class="node-context-menu__item node-context-menu__item--danger"
+        @click="handleContextDelete"
+      >
+        <DeleteOutlined /> 删除节点
+      </button>
+    </div>
   </div>
 </template>
 
@@ -636,6 +755,45 @@ defineExpose({
   :deep(.vue-flow__handle-connecting) {
     background-color: #1890ff;
     border-color: #1890ff;
+  }
+}
+
+/* 节点右键菜单 */
+.node-context-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 128px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+}
+
+.node-context-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: #262626;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+
+  &:hover {
+    background: #f0f5ff;
+  }
+
+  &--danger {
+    color: #ff4d4f;
+
+    &:hover {
+      background: #fff1f0;
+    }
   }
 }
 </style>

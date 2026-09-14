@@ -68,7 +68,8 @@ def create_app(service_name: str,
                enable_token_check: bool = False,
                enable_rate_limit: bool = False,
                enable_operate_log: bool = False,
-               enable_httpx_pool: bool = True
+               enable_httpx_pool: bool = True,
+               enable_storage: bool = False
                ) -> FastAPI:
     """
     统一的 FastAPI 服务引导工厂：
@@ -118,7 +119,8 @@ def create_app(service_name: str,
                 await _init_mysql(yml_config.get("mysql", {}))
             if enable_httpx_pool:
                 _init_httpx_pool()
-            await _init_storage(yml_config.get("storage", {}))
+            if enable_storage:
+                await _init_storage(yml_config.get("storage", {}))
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
             log.error(f"Service {service_name} init dependencies failed: {str(e)}")
@@ -139,16 +141,15 @@ def create_app(service_name: str,
         try:
             await nacos_service.deregister_service()
             await nacos_service.close_config_client()
+            if enable_redis:
+                await redis.client.close()
+            if enable_mysql:
+                await mysql_client.close()
+            if enable_storage:
+                await get_storage().close()
+                log.warning(f"storage backend close skipped: {e}")
         except Exception as e:
-            log.warning(f"Nacos deregister skipped: {e}")
-        if enable_redis:
-            await redis.client.close()
-        if enable_mysql:
-            await mysql_client.close()
-        try:
-            await get_storage().close()
-        except Exception as e:
-            log.warning(f"storage backend close skipped: {e}")
+            log.warning(f"Some deregister failed: {e}")
 
     app = FastAPI(title=service_name, lifespan=lifespan)
 

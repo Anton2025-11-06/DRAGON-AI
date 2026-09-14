@@ -85,6 +85,17 @@ function shortUrl(url: string, max = 60): string {
   return url.length > max ? `${url.slice(0, max)}…` : url;
 }
 
+/** 原始响应格式化（异常 / 未识别数据直出展示） */
+function formatRaw(raw: any): string {
+  if (raw == null) return '（无响应内容）';
+  if (typeof raw === 'string') return raw;
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return String(raw);
+  }
+}
+
 const usageText = computed(() => {
   const u = props.result?.usage;
   if (!u || typeof u !== 'object') return '';
@@ -98,23 +109,23 @@ const usageText = computed(() => {
 
 <template>
   <div class="result-panel">
-    <!-- 空态 -->
-    <div v-if="!loading && !error && !result" class="empty-state">
-      <RobotOutlined class="empty-icon" />
-      <p class="empty-title">选择左侧模型，填写参数开始体验</p>
-      <p class="empty-tip">结果将在这里展示（文本 / 图片 / 音频 / 视频 / 向量 / 重排）</p>
+    <!-- ① 异常 / 错误：置顶醒目（含网关返回的异常数据） -->
+    <div v-if="error" class="error-state">
+      <div class="error-title">调用失败</div>
+      <pre class="error-body">{{ error }}</pre>
     </div>
 
-    <!-- 加载态 -->
+    <!-- ② 加载态 -->
     <div v-else-if="loading && !result" class="loading-state">
       <a-spin size="large" />
       <p class="loading-tip">正在调用模型{{ streaming ? '（流式输出中）' : '…' }}</p>
     </div>
 
-    <!-- 错误态 -->
-    <div v-else-if="error && !result" class="error-state">
-      <div class="error-title">调用失败</div>
-      <pre class="error-body">{{ error }}</pre>
+    <!-- ③ 空态 -->
+    <div v-else-if="!result" class="empty-state">
+      <RobotOutlined class="empty-icon" />
+      <p class="empty-title">选择左侧模型，填写参数开始体验</p>
+      <p class="empty-tip">结果将在这里展示（文本 / 图片 / 音频 / 视频 / 向量 / 重排）</p>
     </div>
 
     <!-- 结果区 -->
@@ -281,6 +292,25 @@ const usageText = computed(() => {
         </a-button>
       </div>
     </div>
+
+    <!-- 异常数据 / 未识别结果格式：原始响应直出 -->
+    <div v-else-if="result && !hasContent" class="result-body">
+      <div class="block-head">
+        <span class="block-title">原始响应</span>
+        <a-tag color="orange">未识别为已知结果格式</a-tag>
+      </div>
+      <pre class="raw-body">{{ formatRaw(result.raw) }}</pre>
+      <div class="meta-bar">
+        <a-button
+          type="link"
+          size="small"
+          class="raw-btn"
+          @click="copyText(formatRaw(result.raw), '原始响应已复制')"
+        >
+          <CopyOutlined /> 复制原始响应
+        </a-button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -328,7 +358,13 @@ const usageText = computed(() => {
 }
 
 .error-state {
-  padding: 24px;
+  /* 覆盖共用的居中规则：异常数据置顶、靠左、满宽，醒目不碍眼 */
+  align-items: stretch;
+  justify-content: flex-start;
+  height: auto;
+  min-height: auto;
+  padding: 16px;
+  text-align: left;
 }
 
 .error-title {
@@ -346,6 +382,21 @@ const usageText = computed(() => {
   color: #a8071a;
   background: #fff1f0;
   border: 1px solid #ffa39e;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
+
+.raw-body {
+  max-width: 100%;
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #614700;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-all;

@@ -3,8 +3,8 @@
 from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import MT_TEXT_TO_VIDEO, PROVIDER_DASHSCOPE
-from common.common_model.base import (ModelResult, http_client, poll_task,
-                                      register)
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      poll_task, register)
 from common.common_model.text_to_video import TextToVideoBase
 
 _SUBMIT = "/api/v1/services/aigc/video-generation/video-synthesis"
@@ -27,7 +27,7 @@ class DashscopeTextToVideo(TextToVideoBase):
         r = await http_client().post(origin + _SUBMIT, headers={**self._hdr(), "X-DashScope-Async": "enable"},
                                      json={"model": self.model, "input": {"prompt": prompt},
                                            "parameters": {"size": size, **self.extra}})
-        r.raise_for_status()
+        ensure_ok(r, "文生视频提交")
         task_id = r.json().get("output", {}).get("task_id")
         if not wait:
             return ModelResult(task_id=task_id, raw=r.json())

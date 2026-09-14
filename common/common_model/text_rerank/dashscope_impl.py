@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import (MT_TEXT_RERANK,
                                                    PROVIDER_DASHSCOPE)
-from common.common_model.base import ModelResult, http_client, register
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      register)
 from common.common_model.text_rerank import TextRerankBase
 
 _RERANK_PATH = "/api/v1/services/rerank/text-rerank/text-rerank"
@@ -30,6 +31,6 @@ class DashscopeRerank(TextRerankBase):
         resp = await http_client().post(
             self._origin() + _RERANK_PATH,
             headers={"Authorization": f"Bearer {self.config.api_key}"}, json=body)
-        resp.raise_for_status()
+        ensure_ok(resp, "文本重排调用")
         data = resp.json()
         return ModelResult(scores=data.get("output", {}).get("results", []), raw=data)

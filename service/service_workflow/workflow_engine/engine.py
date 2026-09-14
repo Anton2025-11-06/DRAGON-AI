@@ -51,7 +51,8 @@ class WorkflowCancelled(Exception):
 class NodeState:
     """节点执行状态（对齐前端 NodeExecutionState）。"""
 
-    __slots__ = ("order", "status", "input", "output", "error", "duration", "started_at")
+    __slots__ = ("order", "status", "input", "output", "error", "duration",
+                 "started_at", "label", "nodeType")
 
     def __init__(self):
         self.order: int = 0
@@ -61,6 +62,9 @@ class NodeState:
         self.error: Optional[str] = None
         self.duration: int = 0
         self.started_at: float = 0.0
+        # 节点自定义名称与类型（快照，供执行详情展示，避免前端只能看到 nodeId）
+        self.label: Optional[str] = None
+        self.nodeType: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +74,8 @@ class NodeState:
             "output": self.output,
             "error": self.error,
             "duration": self.duration,
+            "label": self.label,
+            "nodeType": self.nodeType,
         }
 
 
@@ -284,6 +290,9 @@ class WorkflowRuntime:
         state.order = self._order_counter
         state.status = STATUS_RUNNING
         state.started_at = time.monotonic()
+        # 快照节点自定义名称/类型（执行时为准，不受后续画布改名影响）
+        state.label = node.label
+        state.nodeType = node.type
         self.node_states[node.id] = state
 
         input_view = self._node_input_view(node)
@@ -660,7 +669,7 @@ class WorkflowRuntime:
             except Exception:  # noqa: BLE001
                 pass
         end = time.perf_counter()
-        log.info("state persist hook took {} ms", (end - start) * 1000)
+        # log.info("state persist hook took {} ms", (end - start) * 1000)
 
     def _collect_outputs(self) -> dict:
         """收集 END 节点输出（多 END 合并；无 END 则空）；

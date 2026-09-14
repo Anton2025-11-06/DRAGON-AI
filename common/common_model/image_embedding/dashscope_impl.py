@@ -4,7 +4,8 @@ from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import (MT_IMAGE_EMBEDDING,
                                                    PROVIDER_DASHSCOPE)
-from common.common_model.base import ModelResult, http_client, register
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      register)
 from common.common_model.image_embedding import ImageEmbeddingBase
 
 _MM_EMB_PATH = "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
@@ -26,7 +27,7 @@ class DashscopeImageEmbedding(ImageEmbeddingBase):
         resp = await http_client().post(
             self._origin() + _MM_EMB_PATH,
             headers={"Authorization": f"Bearer {self.config.api_key}"}, json=body)
-        resp.raise_for_status()
+        ensure_ok(resp, "图片向量调用")
         data = resp.json()
         vectors = [e["embedding"] for e in data.get("output", {}).get("embeddings", [])]
         usage = data.get("usage", {})

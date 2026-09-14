@@ -91,11 +91,11 @@ const PARAM_TYPE_OPTIONS: { label: string; value: CommonParamType }[] = [
   { label: '字符串', value: 'string' },
 ];
 
-/** 限流 QPS：0 表示不限制，页面用开关切换（底层仍存 0） */
-const rateUnlimited = computed({
-  get: () => !base_form_data.rate_limit_qps,
+/** 限流 QPS：开关「限制」=有正数 QPS（蓝），「不限制」=0（灰）；底层存 rate_limit_qps */
+const rateLimited = computed({
+  get: () => !!base_form_data.rate_limit_qps,
   set: (v: boolean) => {
-    base_form_data.rate_limit_qps = v ? 0 : 1;
+    base_form_data.rate_limit_qps = v ? 1 : 0;
   },
 });
 
@@ -337,7 +337,7 @@ const openTest = () => {
   testPanelOpen.value = true;
 };
 
-/** ModelTryPanel 提交：携带 inputs/stream/thinking/params 调 /models/test */
+/** ModelTryPanel 提交：携带 inputs/stream/thinking/params 走 SSE 调 /models/test，逐块实时显示 */
 const onTryRun = async (payload: {
   inputs: Record<string, any>;
   params: Record<string, any>;
@@ -346,18 +346,36 @@ const onTryRun = async (payload: {
 }) => {
   testRunning.value = true;
   testError.value = null;
+  testResult.value = null;
+  let accContent = '';
+  let accReasoning = '';
   try {
-    const res = await api.TestModel({
-      category: base_form_data.model_type as api.ModelTestReq['category'],
-      provider: base_form_data.provider as api.ModelTestReq['provider'],
-      model_name: base_form_data.model_name,
-      base_url: credential.base_url,
-      api_key: credential.api_key,
-      inputs: payload.inputs,
-      stream: payload.stream,
-      thinking: payload.thinking,
-      params: payload.params,
-    });
+    const res = await api.TestModelStream(
+      {
+        category: base_form_data.model_type as api.ModelTestReq['category'],
+        provider: base_form_data.provider as api.ModelTestReq['provider'],
+        model_name: base_form_data.model_name,
+        base_url: credential.base_url,
+        api_key: credential.api_key,
+        inputs: payload.inputs,
+        stream: payload.stream,
+        thinking: payload.thinking,
+        params: payload.params,
+      },
+      (chunk) => {
+        // 流式增量：逐块累积并回填结果区（模型面板读 result.data.content/reasoning 渲染）
+        if (chunk.content) accContent += chunk.content;
+        if (chunk.reasoningContent) accReasoning += chunk.reasoningContent;
+        if (accContent || accReasoning) {
+          testResult.value = {
+            success: true,
+            message: '输出中…',
+            data: { content: accContent, reasoning: accReasoning || undefined },
+          };
+        }
+      },
+    );
+    // 汇总帧覆盖增量态（含 urls/vectors/scores/latency 等完整产出）
     testResult.value = res || null;
   } catch (e: any) {
     testResult.value = null;
@@ -444,20 +462,20 @@ const onTryRun = async (payload: {
         <a-form layout="vertical" :model="advanced">
           <a-row :gutter="16">
             <a-col :span="12">
-              <a-form-item label="支持流消息">
+              <a-form-item label="开启流式输出">
                 <a-switch
                   v-model:checked="advanced.supports_stream"
-                  checked-children="支持"
-                  un-checked-children="不支持"
+                  checked-children="开启"
+                  un-checked-children="关闭"
                 />
               </a-form-item>
             </a-col>
             <a-col :span="12">
-              <a-form-item label="支持思考模式">
+              <a-form-item label="开启深度思考">
                 <a-switch
                   v-model:checked="advanced.supports_thinking"
-                  checked-children="支持"
-                  un-checked-children="不支持"
+                  checked-children="开启"
+                  un-checked-children="关闭"
                 />
               </a-form-item>
             </a-col>
@@ -565,15 +583,18 @@ const onTryRun = async (payload: {
             </div>
           </a-form-item>
 
-          <!-- 限流 QPS：不限制开关（底层存 0） -->
+          <!-- 限流 QPS：开关切换限制/不限制（不限制=灰，限制=蓝），复用启用状态开关样式 -->
           <a-form-item label="限流 QPS">
             <a-space>
-              <a-switch v-model:checked="rateUnlimited" />
-              <span style="color: #8c8c8c; font-size: 12px">不限制</span>
+              <a-switch
+                v-model:checked="rateLimited"
+                checked-children="限制"
+                un-checked-children="不限制"
+              />
               <a-input-number
                 v-model:value="base_form_data.rate_limit_qps"
                 :min="1"
-                :disabled="rateUnlimited"
+                :disabled="!rateLimited"
                 style="width: 160px"
                 placeholder="每秒并发限制"
               />

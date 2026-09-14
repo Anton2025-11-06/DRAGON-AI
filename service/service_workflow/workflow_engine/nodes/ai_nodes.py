@@ -11,9 +11,9 @@ from typing import Optional
 
 from common.common_constants.model_constant import (
     MODEL_TYPES_STREAMABLE, MT_AUDIO_TO_TEXT, MT_IMAGE_EMBEDDING,
-    MT_IMAGE_TO_VIDEO, MT_IMAGE_UNDERSTAND, MT_OCR, MT_TEXT_EMBEDDING,
-    MT_TEXT_RERANK, MT_TEXT_TO_AUDIO, MT_TEXT_TO_IMAGE, MT_TEXT_TO_TEXT,
-    MT_TEXT_TO_VIDEO, MT_VIDEO_UNDERSTAND,
+    MT_IMAGE_TO_VIDEO, MT_IMAGE_UNDERSTAND, MT_MULTIMODAL_EMBEDDING, MT_OCR,
+    MT_TEXT_EMBEDDING, MT_TEXT_RERANK, MT_TEXT_TO_AUDIO, MT_TEXT_TO_IMAGE,
+    MT_TEXT_TO_TEXT, MT_TEXT_TO_VIDEO, MT_VIDEO_UNDERSTAND,
 )
 from common.common_model import entry as cm_entry
 from common.common_model.base import ModelResult
@@ -52,6 +52,8 @@ class LLMNodeExecutor(BaseNodeExecutor):
         if not cm_entry.supports(category, provider):
             raise NodeExecutionError(
                 f"模型能力类型/供应商暂不支持调用：{category}/{provider}")
+        # 节点级常用参数覆盖：合并进 model_params（经 self.extra 透传给全部 12 类实现）
+        self._merge_node_params(client, cfg.get("params"))
         _, inst = client.acall(category)
 
         # 文生文走对话族（保留 system/记忆/上下文/结构化输出等完整能力）
@@ -82,6 +84,29 @@ class LLMNodeExecutor(BaseNodeExecutor):
         stream_text = r.content if category in (
             MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_AUDIO_TO_TEXT) else None
         return NodeResult(output=output, stream_text=stream_text)
+
+    @staticmethod
+    def _merge_node_params(client, params) -> None:
+        """节点级常用参数合并到 client.config.model_params（值已由前端按类型转换，后端不二次转型）。
+
+        兼容两种入参形态：`[{name,type,value}]`（前端表格）或 `{name:value}`（字典）。
+        """
+        if not params:
+            return
+        node_params: dict = {}
+        if isinstance(params, dict):
+            node_params = {k: v for k, v in params.items() if k}
+        elif isinstance(params, (list, tuple)):
+            for row in params:
+                if not isinstance(row, dict):
+                    continue
+                name = (row.get("name") or "").strip() if isinstance(row.get("name"), str) else row.get("name")
+                if not name:
+                    continue
+                node_params[name] = row.get("value")
+        if not node_params:
+            return
+        client.config.model_params = {**(client.config.model_params or {}), **node_params}
 
     # ---------- 文生文（对话族，功能最全） ----------
 
@@ -187,6 +212,16 @@ class LLMNodeExecutor(BaseNodeExecutor):
             kw["input"] = self._ref(ctx, cfg.get("inputVariable")) or self._text(ctx, "promptTemplate")
         elif category == MT_IMAGE_EMBEDDING:
             kw["image_urls"] = self._ref_list(ctx, cfg.get("imageVariable"))
+        elif category == MT_MULTIMODAL_EMBEDDING:
+            txt = self._ref(ctx, cfg.get("inputVariable")) or self._text(ctx, "promptTemplate")
+            if txt:
+                kw["text"] = txt
+            imgs = self._ref_list(ctx, cfg.get("imageVariable"))
+            if imgs:
+                kw["image_urls"] = imgs
+            vid = self._ref_one(ctx, cfg.get("videoVariable"))
+            if vid:
+                kw["video_url"] = vid
         elif category == MT_TEXT_RERANK:
             kw["query"] = self._ref(ctx, cfg.get("queryVariable"))
             kw["documents"] = self._ref_list(ctx, cfg.get("documentsVariable"))
@@ -238,7 +273,7 @@ class LLMNodeExecutor(BaseNodeExecutor):
             out["text"] = r.content
             if r.reasoning_content:
                 out["reasoning"] = r.reasoning_content
-        elif category in (MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING):
+        elif category in (MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING, MT_MULTIMODAL_EMBEDDING):
             vectors = r.vectors or []
             out[output_var] = vectors
             out["vectors"] = vectors

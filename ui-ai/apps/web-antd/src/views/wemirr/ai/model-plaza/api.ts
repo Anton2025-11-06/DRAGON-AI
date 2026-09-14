@@ -1,7 +1,9 @@
 import { dict } from '@fast-crud/fast-crud';
 
+import { useAccessStore } from '@vben/stores';
+
 import { resolveApiUrl } from '#/api/helper';
-import { defHttp } from '#/api/request';
+import { defHttp, getTraceId, saveTraceId } from '#/api/request';
 
 import type {
   ModelCategory,
@@ -130,6 +132,12 @@ export interface ModelTestRep {
   data?: any;
 }
 
+/** 连通性测试流式增量块（SSE chunk 帧） */
+export interface ModelTestChunk {
+  content: string;
+  reasoningContent: string;
+}
+
 /** 我的 API Key */
 export interface MyKeyRep {
   apply_id: number;
@@ -202,9 +210,100 @@ export const ToggleStatus = (id: number, status: boolean) =>
     method: 'PATCH',
   });
 
-export const TestModel = (data: ModelTestReq) =>
-  // 模型连通性测试会真实调用上游（含生成类异步任务轮询），默认 10s 易超时，单独延长到 60s
-  defHttp.post<ModelTestRep>(`${BASE_URL}/test`, data, { timeout: 60_000 });
+/**
+ * 模型连通性测试（SSE 流式）：POST /models/test，逐帧解析 `data: {json}`。
+ * - {"type":"chunk",...}：仅流式类型会产生，回调 onChunk 逐块累积 content/reasoning_content
+ * - {"type":"result",...}：最终汇总帧（含 success/message/latency_ms/data），作为返回值
+ * 鉴权：Authorization Bearer（登录 token，网关 TokenCheckMiddleware 校验）。
+ * 后端 test 为异步生成器，非流式也统一走 SSE（只产出一条 result 帧）。
+ */
+export async function TestModelStream(
+  data: ModelTestReq,
+  onChunk?: (chunk: ModelTestChunk) => void,
+  signal?: AbortSignal,
+): Promise<ModelTestRep> {
+  const accessStore = useAccessStore();
+  const baseUrl = import.meta.env.VITE_GLOB_API_URL || '';
+  const url = resolveApiUrl(`${BASE_URL}/test`, baseUrl);
+  const traceId = getTraceId();
+
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessStore.accessToken || ''}`,
+        'Content-Type': 'application/json',
+        // 网关 forward_downstream 仅对 accept=text/event-stream 或 /subscribe 做流式转发，
+        // 否则会把整个 SSE 响应缓冲到结束才下发（逐块实时失效），故显式声明 SSE
+        Accept: 'text/event-stream',
+        ...(traceId ? { 'X-Trace-Id': traceId } : {}),
+      },
+      body: JSON.stringify(data),
+      signal,
+    });
+  } catch (error) {
+    if ((error as Error)?.name === 'AbortError') throw error;
+    throw new Error('无法连接模型，请检查网络后重试');
+  }
+  saveTraceId(resp.headers.get('x-trace-id') || '');
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(
+      `测试请求失败（${resp.status}）${text ? `：${text.slice(0, 200)}` : ''}`,
+    );
+  }
+  if (!resp.body) {
+    throw new Error('当前浏览器不支持流式读取');
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let final: ModelTestRep | null = null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const raw = line.trim();
+        if (!raw.startsWith('data:')) continue;
+        const payload = raw.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let frame: any;
+        try {
+          frame = JSON.parse(payload);
+        } catch {
+          // 忽略无法解析的分行
+          continue;
+        }
+        if (frame?.type === 'chunk') {
+          onChunk?.({
+            content: frame.content || '',
+            reasoningContent: frame.reasoning_content || '',
+          });
+        } else if (frame?.type === 'result' || frame?.success !== undefined) {
+          final = {
+            success: !!frame.success,
+            message: frame.message || '',
+            latency_ms: frame.latency_ms,
+            data: frame.data,
+          };
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  if (!final) {
+    throw new Error('测试响应异常：未收到结果');
+  }
+  return final;
+}
 
 export const ApplyModel = (id: number, reason?: string) =>
   defHttp.post(`${BASE_URL}/${id}/apply`, { reason });

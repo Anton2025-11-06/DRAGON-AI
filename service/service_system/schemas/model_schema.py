@@ -15,7 +15,7 @@ class CommonParam(BaseModel):
 
 class ModelSaveRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="模型名称")
-    category: str = Field(..., description="能力类型（12 类 code：text_to_text/text_embedding/text_rerank/image_embedding/text_to_image/audio_to_text/image_understand/video_understand/ocr/image_to_video/text_to_video/text_to_audio）")
+    category: str = Field(..., description="能力类型（13 类 code：text_to_text/text_embedding/text_rerank/image_embedding/multimodal_embedding/text_to_image/audio_to_text/image_understand/video_understand/ocr/image_to_video/text_to_video/text_to_audio）")
     provider: str = Field(..., description="供应商（openai/dashscope/zhipu）")
     model_name: str = Field(..., min_length=1, max_length=128, description="模型标识(API 调用时使用)")
     # 模型真实地址与密钥为必填（需求 1）
@@ -35,7 +35,7 @@ class ModelSaveRequest(BaseModel):
 
 class ModelTestRequest(BaseModel):
     """模型测试请求：走 common_model 按 (类型, 供应商) 真实调用，支持输入内容/流式/思考/常用参数。"""
-    category: str = Field(..., description="能力类型（12 类 code：text_to_text/text_embedding/...）")
+    category: str = Field(..., description="能力类型（13 类 code：text_to_text/text_embedding/...）")
     provider: str = Field(..., description="供应商（openai/dashscope/zhipu）")
     model_name: str = Field(..., min_length=1, max_length=128, description="模型标识")
     base_url: Optional[str] = Field(None, max_length=500, description="接口基础地址（OpenAI 兼容基址）")

@@ -3,7 +3,8 @@
 from urllib.parse import urlsplit
 
 from common.common_constants.model_constant import MT_TEXT_TO_AUDIO, PROVIDER_DASHSCOPE
-from common.common_model.base import ModelResult, http_client, register
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      register)
 from common.common_model.text_to_audio import TextToAudioBase
 
 _GEN = "/api/v1/services/aigc/multimodal-generation/generation"
@@ -22,7 +23,7 @@ class DashscopeTextToAudio(TextToAudioBase):
                                         json={"model": self.model,
                                               "input": {"text": text, "voice": voice},
                                               "parameters": {**self.extra}})
-        resp.raise_for_status()
+        ensure_ok(resp, "文生音频调用")
         data = resp.json()
         url = data.get("output", {}).get("audio", {}).get("url")
         return ModelResult(url=url, raw=data)

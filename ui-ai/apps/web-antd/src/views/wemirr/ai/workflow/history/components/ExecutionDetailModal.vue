@@ -204,7 +204,15 @@ function getNodeStatusText(status?: string): string {
             >
               <div class="timeline-node">
                 <div class="timeline-header">
-                  <span class="node-id">{{ node.nodeId }}</span>
+                  <span class="node-name" :title="node.nodeId">
+                    {{ node.label || node.nodeId }}
+                  </span>
+                  <span v-if="node.label" class="node-id">
+                    {{ node.nodeId }}
+                  </span>
+                  <span v-if="node.nodeType" class="node-type">{{
+                    node.nodeType
+                  }}</span>
                   <Tag :color="getNodeStatusColor(node.status)" size="small">
                     {{ getNodeStatusText(node.status) }}
                   </Tag>
@@ -315,9 +323,22 @@ function getNodeStatusText(status?: string): string {
         flex-wrap: wrap;
         margin-bottom: 8px;
 
-        .node-id {
+        .node-name {
           font-weight: 500;
           color: #333;
+        }
+
+        .node-id {
+          font-size: 12px;
+          color: #bbb;
+        }
+
+        .node-type {
+          padding: 0 6px;
+          font-size: 12px;
+          color: #8c8c8c;
+          background-color: #f0f0f0;
+          border-radius: 4px;
         }
 
         .node-duration {

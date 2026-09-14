@@ -7,8 +7,8 @@
 注意：查询端点是 async-result/{id}，**不是** videos/generations/{id}（早期误用导致一直轮询不到终态）。
 """
 from common.common_constants.model_constant import MT_TEXT_TO_VIDEO, PROVIDER_ZHIPU
-from common.common_model.base import (ModelResult, http_client, poll_task,
-                                      register)
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      poll_task, register)
 from common.common_model.text_to_video import TextToVideoBase
 
 _SUBMIT = "/videos/generations"
@@ -29,7 +29,7 @@ class ZhipuTextToVideo(TextToVideoBase):
         payload = {"model": self.model, "prompt": prompt, "size": size, "fps": fps,
                    **self.extra, **kwargs}
         r = await http_client().post(base + _SUBMIT, headers=self._hdr(), json=payload)
-        r.raise_for_status()
+        ensure_ok(r, "文生视频提交")
         j = r.json()
         # 提交响应里任务 ID 字段是 id（AsyncResponse）
         task_id = str(j.get("id") or j.get("task_id") or "")

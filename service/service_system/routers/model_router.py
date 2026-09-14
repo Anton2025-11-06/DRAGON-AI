@@ -2,6 +2,7 @@
 """模型广场路由：模型 CRUD（RBAC 权限）+ 申请审批（service_system 模块）"""
 
 from fastapi import APIRouter, Request
+from starlette.responses import StreamingResponse
 
 from common.common_entity.response_schema import ApiResponse
 from common.common_permission.permission import get_login_user, has_permission, is_admin
@@ -64,13 +65,10 @@ async def my_keys(request: Request):
     return ApiResponse.success(data=data)
 
 
-@router.post("/test", summary="连通性测试（登录即可，走 OpenAI 兼容探测端点）")
+@router.post("/test", summary="连通性测试（SSE 流式）")
 async def test_model(request: Request, body: ModelTestRequest):
-    try:
-        data = await ModelService.test(body)
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-    return ApiResponse.success(data=data, message="测试完成")
+    # ModelService.test 为异步生成器，直接交给 StreamingResponse 逐帧下发（勿 await）
+    return StreamingResponse(ModelService.test(body), media_type="text/event-stream")
 
 
 @router.get("/{model_id}/detail", summary="模型详情（登录即可，密钥仅管理员可见）")
@@ -159,7 +157,7 @@ async def apply_model(request: Request, model_id: int, body: ModelApplyRequest):
     try:
         apply_id = await ModelService.apply(
             model_id, login_user.get("user_id") or 0,
-            login_user.get("username") or "", login_user.get("dept_id") or 0, body)
+                      login_user.get("username") or "", login_user.get("dept_id") or 0, body)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
     return ApiResponse.success(data={"apply_id": apply_id}, message="申请已提交，等待管理员审批")

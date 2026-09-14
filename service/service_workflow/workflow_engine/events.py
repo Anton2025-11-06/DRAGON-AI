@@ -2,9 +2,16 @@
 """执行事件定义与发射：节点事件 → Redis Pub/Sub（无本地缓存）。
 
 事件协议对齐前端 types.ts WORKFLOW_RUNTIME_EVENT_TYPES：
-    workflow.started / workflow.resumed / node.started / node.delta /
-    node.completed / node.failed / workflow.paused / workflow.completed /
-    workflow.failed / workflow.cancelled
+    workflow.started
+    node.started
+    node.delta
+    node.completed
+    node.failed
+    workflow.completed
+    workflow.failed
+    workflow.cancelled
+    workflow.paused
+    workflow.resumed
 
 SSE 帧格式：event: {type}\ndata: {json}\n\n（前端 runtime-events.ts 按行解析）。
 

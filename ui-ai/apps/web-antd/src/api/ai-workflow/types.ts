@@ -335,6 +335,10 @@ export interface NodeExecutionState {
   error?: string;
   /** 执行耗时(毫秒) */
   duration?: number;
+  /** 节点自定义名称（画布 label，执行时快照，供详情展示） */
+  label?: string;
+  /** 节点类型（START/LLM/...） */
+  nodeType?: string;
 }
 
 /**
@@ -469,7 +473,10 @@ export interface AiModelOption {
   provider: string;
   /** 能力类型（12 类 code：text_to_text/... 即 tb_model.category） */
   type: string;
+  /** 模型名称（展示名，tb_model.name） */
   name: string;
+  /** 模型标识（API 调用名，tb_model.model_name，如画布节点展示） */
+  modelName?: string;
   baseUrl?: string;
 }
 
@@ -805,6 +812,8 @@ export interface ContextVariable {
 export interface LLMNodeConfig {
   /** 模型 ID */
   modelId?: number;
+  /** 模型标识（API 调用名，选择时快照，供画布节点展示，不参与运行逻辑） */
+  modelName?: string;
   /** 能力类型（12 类 code，决定模型下拉数据源与节点分发调用） */
   modelType?: string;
   /** 系统提示词 */
@@ -853,6 +862,20 @@ export interface LLMNodeConfig {
   structuredOutput?: StructuredOutput;
   /** 上下文变量列表 */
   contextVariables?: ContextVariable[];
+  /**
+   * 节点级常用参数（按所选模型登记的 common_params 预置，可改值/新增/删除）。
+   * 运行时会合并进 model_params 透传给 common_model 实现（覆盖或补充模型默认参数）。
+   */
+  params?: Array<{
+    /** 参数说明 */
+    desc?: string;
+    /** 参数名 */
+    name: string;
+    /** 参数类型 */
+    type: 'boolean' | 'integer' | 'number' | 'object' | 'string';
+    /** 参数值（前端已按类型转换） */
+    value: any;
+  }>;
 }
 
 // ==================== KNOWLEDGE_RETRIEVAL 节点配置 ====================

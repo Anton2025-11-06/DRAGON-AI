@@ -81,7 +81,7 @@ class ModelService:
 
     @staticmethod
     def _config_dict(m) -> dict:
-        """模型 ORM → 网关路由配置 JSON（不含管理端密钥，转发时回查 MySQL）"""
+        """模型 ORM → 网关路由配置 JSON"""
         return {
             "model_id": m.id,
             "name": m.name,
@@ -101,7 +101,7 @@ class ModelService:
 
     @staticmethod
     def _dict(m: Model, with_secret: bool = False) -> dict:
-        """ORM 实体 → 响应字典（默认隐藏 api_key/tutorial_md）"""
+        """ORM 实体 → 响应字典"""
         data = {
             "id": m.id,
             "name": m.name,
@@ -216,7 +216,7 @@ class ModelService:
             # MySQL 为主数据源：同步写入网关缓存（失败不阻塞，由对账兑底）
             await ModelGatewayCache.write_config(ModelService._config_dict(m))
             return m.id
-    
+
     @staticmethod
     async def update(model_id: int, req: ModelSaveRequest) -> bool:
         """修改模型：None 字段（base_url/api_key/tutorial_md）保持原值，空串表示清空"""
@@ -306,31 +306,40 @@ class ModelService:
         return items
 
     @staticmethod
-    async def test(req: ModelTestRequest) -> dict:
-        """模型测试：走 common_model 按 (类型, 供应商) 真实调用。
+    async def test(req: ModelTestRequest):
+        """模型测试（SSE 流式）：走 common_model 按 (类型, 供应商) 真实调用，逐帧 yield `data: {json}\\n\\n`。
 
         - 无 inputs 时用 PROBE_PAYLOADS 默认探测入参；有 inputs 时按类型翻译为真实入参。
         - params 合并进 model_params 注入调用；thinking 仅对话类生效（走 kwargs）。
-        - stream 且类型支持流式时聚合 astream 逐块输出。
+        - 流式：先逐块产出 {"type":"chunk","content","reasoning_content"} 增量帧，
+          末尾再产出一条 {"type":"result",...} 汇总帧；非流式直接产出汇总帧。
+        - 校验/调用异常均转为 success=false 的 result 帧（异步生成器内 raise 无法被路由捕获）。
         """
         import time as _t
+
+        def _sse(payload: dict) -> str:
+            return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+        def _fail(message: str, latency_ms: int = 0) -> str:
+            return _sse({"type": "result", "success": False,
+                         "message": message, "latency_ms": latency_ms})
+
         base_url = (req.base_url or "").rstrip("/")
         if not base_url:
-            raise ValueError("请填写接口地址")
+            yield _fail("请填写接口地址"); return
         if not base_url.startswith(("http://", "https://")):
-            raise ValueError("接口地址需以 http(s):// 开头")
+            yield _fail("接口地址需以 http(s):// 开头"); return
         if req.category not in MODEL_TYPES_ALL:
-            raise ValueError(f"不支持的分类: {req.category}")
+            yield _fail(f"不支持的分类: {req.category}"); return
         if req.provider not in PROVIDERS_ALL:
-            raise ValueError(f"不支持的提供商: {req.provider}")
+            yield _fail(f"不支持的提供商: {req.provider}"); return
         config = cm_entry.config_from_row({
             "model_id": 0, "category": req.category, "provider": req.provider,
             "model_name": req.model_name, "base_url": base_url, "api_key": req.api_key or "",
             "model_params": req.params or {}, "status": 1,
         })
         if not cm_entry.supports(req.category, req.provider):
-            return {"success": False,
-                    "message": f"{req.category} 类型下供应商 {req.provider} 无可用实现"}
+            yield _fail(f"{req.category} 类型暂未支持供应商 {req.provider}，请提需求 "); return
         t0 = _t.monotonic()
         try:
             inst = cm_entry.instantiate(req.category, config)
@@ -343,16 +352,23 @@ class ModelService:
                     MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR):
                 kwargs["thinking"] = True
             stream_on = bool(req.stream) and req.category in MODEL_TYPES_STREAMABLE
+            content_acc = ""
+            reasoning_acc = ""
+            usage_acc: dict = {}
             if stream_on:
-                content, reasoning, usage = "", "", {}
-                n = 0
                 async for c in inst.astream(**kwargs):
-                    n += 1
-                    content += c.content or ""
-                    reasoning += c.reasoning_content or ""
+                    piece = c.content or ""
+                    reason = c.reasoning_content or ""
+                    content_acc += piece
+                    reasoning_acc += reason
                     if c.usage:
-                        usage = c.usage
-                r = cm_entry.ModelResult(content=content, reasoning_content=reasoning, usage=usage)
+                        usage_acc = c.usage
+                    if piece or reason:
+                        yield _sse({"type": "chunk", "content": piece,
+                                    "reasoning_content": reason})
+                r = cm_entry.ModelResult(content=content_acc,
+                                         reasoning_content=reasoning_acc,
+                                         usage=usage_acc)
             else:
                 r = await inst.ainvoke(**kwargs)
             ms = int((_t.monotonic() - t0) * 1000)
@@ -367,16 +383,17 @@ class ModelService:
                 dim = len(r.vectors[0]) if r.vectors else 0
                 vectors = {"dim": dim, "count": len(r.vectors or []),
                            "sample": [round(v, 4) for v in (r.vectors[0][:8] if r.vectors else [])]}
-            return {"success": True, "message": f"调用成功（{ms}ms）", "latency_ms": ms,
-                    "data": {"category": req.category, "provider": req.provider,
-                             "model": inst.model, "streamed": stream_on,
-                             "content": r.content or None,
-                             "reasoning": r.reasoning_content or None,
-                             "urls": urls, "vectors": vectors, "scores": r.scores,
-                             "usage": r.usage}}
+            yield _sse({"type": "result", "success": True, "message": f"调用成功（{ms}ms）",
+                        "latency_ms": ms,
+                        "data": {"category": req.category, "provider": req.provider,
+                                 "model": inst.model, "streamed": stream_on,
+                                 "content": r.content or None,
+                                 "reasoning": r.reasoning_content or None,
+                                 "urls": urls, "vectors": vectors, "scores": r.scores,
+                                 "usage": r.usage}})
         except Exception as e:  # noqa: BLE001
-            return {"success": False, "latency_ms": int((_t.monotonic() - t0) * 1000),
-                    "message": f"测试异常：{type(e).__name__}: {str(e)[:200]}"}
+            yield _fail(f"测试异常：{type(e).__name__}: {str(e)[:200]}",
+                        int((_t.monotonic() - t0) * 1000))
 
     # ==================== 申请审批 ====================
 

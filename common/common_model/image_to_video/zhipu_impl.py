@@ -5,8 +5,8 @@
 轮询 task_status=SUCCESS，结果取 video_result[0].url。图生视频用 image_url 参数（非 first_frame）。
 """
 from common.common_constants.model_constant import MT_IMAGE_TO_VIDEO, PROVIDER_ZHIPU
-from common.common_model.base import (ModelResult, http_client, poll_task,
-                                      register)
+from common.common_model.base import (ModelResult, ensure_ok, http_client,
+                                      poll_task, register)
 from common.common_model.image_to_video import ImageToVideoBase
 
 _SUBMIT = "/videos/generations"
@@ -28,7 +28,7 @@ class ZhipuImageToVideo(ImageToVideoBase):
                    "prompt": prompt or "让画面自然动起来", "size": size, "fps": fps,
                    **self.extra, **kwargs}
         r = await http_client().post(base + _SUBMIT, headers=self._hdr(), json=payload)
-        r.raise_for_status()
+        ensure_ok(r, "图生视频提交")
         j = r.json()
         task_id = str(j.get("id") or j.get("task_id") or "")
         if not wait:

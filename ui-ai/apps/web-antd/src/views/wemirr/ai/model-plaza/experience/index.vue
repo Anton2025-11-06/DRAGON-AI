@@ -32,6 +32,38 @@ const selectedModel = computed(
   () => models.value.find((m) => m.apply_id === selectedApplyId.value) || null,
 );
 
+// ==================== 筛选（类型 / 提供商，候选项仅来自已授权模型）====================
+const filterCategory = ref<string | undefined>();
+const filterProvider = ref<string | undefined>();
+
+/** 去重生成下拉选项（按首次出现顺序，保留后端字典顺序） */
+function distinctOptions(
+  key: 'category' | 'provider',
+  labelKey: 'category_label' | 'provider_label',
+) {
+  const seen = new Map<string, string>();
+  for (const m of models.value) {
+    const val = m[key];
+    if (val && !seen.has(val)) seen.set(val, m[labelKey] || val);
+  }
+  return [...seen.entries()].map(([value, label]) => ({ value, label }));
+}
+
+const categoryOptions = computed(() =>
+  distinctOptions('category', 'category_label'),
+);
+const providerOptions = computed(() =>
+  distinctOptions('provider', 'provider_label'),
+);
+
+const filteredModels = computed(() =>
+  models.value.filter(
+    (m) =>
+      (!filterCategory.value || m.category === filterCategory.value) &&
+      (!filterProvider.value || m.provider === filterProvider.value),
+  ),
+);
+
 const result = ref<ModelExperienceResult | null>(null);
 const error = ref<string | null>(null);
 const running = ref(false);
@@ -54,15 +86,15 @@ async function loadKeys() {
   }
 }
 
-/** 从网关错误体中提取可读文案（422 校验 / OpenAI error / detail） */
+/** 从网关错误体中提取可读文案（422 校验 / OpenAI error / detail），异常数据全量展示不截断 */
 function extractErrorMessage(e: any): string {
   const data = e?.responseData;
   if (data && typeof data === 'object') {
-    const detail = data.detail ?? data.error?.message;
-    if (typeof detail === 'string') return detail;
-    if (detail !== undefined) return JSON.stringify(detail);
+    const detail = data.error?.message ?? data.detail ?? data.message;
+    if (typeof detail === 'string' && detail) return detail;
+    return JSON.stringify(data, null, 2);
   }
-  if (typeof data === 'string' && data.trim()) return data.slice(0, 500);
+  if (typeof data === 'string' && data.trim()) return data;
   return e?.message || '调用失败，请稍后重试';
 }
 
@@ -80,11 +112,11 @@ async function onTryRun(payload: {
   running.value = true;
   streaming.value = payload.stream;
   const t0 = performance.now();
-  // 输入体 + 常用参数 + 思考开关合并为网关 body；流式开关按面板（而非硬编码类型）
+  // 输入体按结构字段扁平；常用参数走嵌套 params（网关合并进 model_params）；思考/流式独立开关
   const body = {
     ...payload.inputs,
-    ...payload.params,
-    ...(payload.thinking ? { thinking: true } : {}),
+    params: payload.params,
+    thinking: payload.thinking || undefined,
     stream: payload.stream || undefined,
   } as ModelExperienceBody;
   const isStream = payload.stream;
@@ -103,6 +135,19 @@ async function onTryRun(payload: {
         if (chunk.done) {
           streaming.value = false;
           elapsedMs.value = Math.round(performance.now() - t0);
+          return;
+        }
+        // 实时回显：每块更新响应式 result，ResultPanel 随流增量渲染（点 3）
+        if (streamText || streamReasoning) {
+          result.value = {
+            text: streamText,
+            reasoning: streamReasoning || undefined,
+            urls: [],
+            vectors: null,
+            scores: null,
+            usage: null,
+            raw: null,
+          };
         }
       },
     );
@@ -149,11 +194,29 @@ onMounted(loadKeys);
       <aside class="model-side">
         <div class="side-title">
           <span>已授权模型</span>
-          <span class="side-count">{{ models.length }}</span>
+          <span class="side-count">{{ filteredModels.length }}</span>
+        </div>
+        <div class="side-filter">
+          <a-select
+            v-model:value="filterCategory"
+            :options="categoryOptions"
+            placeholder="模型类型"
+            size="small"
+            allow-clear
+            style="width: 100%"
+          />
+          <a-select
+            v-model:value="filterProvider"
+            :options="providerOptions"
+            placeholder="提供商"
+            size="small"
+            allow-clear
+            style="width: 100%"
+          />
         </div>
         <ModelPicker
           v-model:selected-apply-id="selectedApplyId"
-          :models="models"
+          :models="filteredModels"
           :loading="loadingKeys"
         />
       </aside>
@@ -219,7 +282,9 @@ onMounted(loadKeys);
 .experience-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* 锚定视口可用内容高（vben 通过 ResizeObserver 注入 --vben-content-height），
+     使整个菜单页面固定大小、不随内容增长而整页滚动；局部滚动交给内部面板 */
+  height: var(--vben-content-height, 100vh);
   overflow: hidden;
 }
 
@@ -267,8 +332,16 @@ onMounted(loadKeys);
   flex-direction: column;
   width: 300px;
   flex-shrink: 0;
+  min-height: 0;
   border-right: 1px solid #f0f0f0;
   background: #fafafa;
+}
+
+.side-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
 }
 
 .side-title {
@@ -295,6 +368,8 @@ onMounted(loadKeys);
   flex-direction: column;
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: #f5f7fa;
 }
 
@@ -355,6 +430,7 @@ onMounted(loadKeys);
 .stage-grid {
   display: grid;
   grid-template-columns: minmax(360px, 2fr) minmax(0, 3fr);
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   gap: 14px;

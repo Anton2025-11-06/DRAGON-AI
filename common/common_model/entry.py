@@ -18,9 +18,9 @@ from typing import Any, AsyncIterator, Optional
 
 from common.common_constants.model_constant import (
     MODEL_TYPES_STREAMABLE, MT_AUDIO_TO_TEXT, MT_IMAGE_EMBEDDING,
-    MT_IMAGE_TO_VIDEO, MT_IMAGE_UNDERSTAND, MT_OCR, MT_TEXT_EMBEDDING,
-    MT_TEXT_RERANK, MT_TEXT_TO_AUDIO, MT_TEXT_TO_IMAGE, MT_TEXT_TO_TEXT,
-    MT_TEXT_TO_VIDEO, MT_VIDEO_UNDERSTAND, PROVIDERS_ALL,
+    MT_IMAGE_TO_VIDEO, MT_IMAGE_UNDERSTAND, MT_MULTIMODAL_EMBEDDING, MT_OCR,
+    MT_TEXT_EMBEDDING, MT_TEXT_RERANK, MT_TEXT_TO_AUDIO, MT_TEXT_TO_IMAGE,
+    MT_TEXT_TO_TEXT, MT_TEXT_TO_VIDEO, MT_VIDEO_UNDERSTAND, PROVIDERS_ALL,
 )
 from common.common_model import instantiate, providers_for
 from common.common_model.base import ModelResult
@@ -96,6 +96,11 @@ def body_to_kwargs(category: str, body: dict) -> dict:
         kw = {"input": body.get("input")}
     elif category == MT_IMAGE_EMBEDDING:
         kw = {"image_urls": body.get("image_urls"), "image_url": body.get("image_url")}
+    elif category == MT_MULTIMODAL_EMBEDDING:
+        kw = {"text": body.get("text") or body.get("input"),
+              "texts": body.get("texts"),
+              "image_urls": body.get("image_urls"), "image_url": body.get("image_url"),
+              "video_urls": body.get("video_urls"), "video_url": body.get("video_url")}
     elif category == MT_TEXT_RERANK:
         kw = {"query": body.get("query"), "documents": body.get("documents") or [],
               "top_n": body.get("top_n")}
@@ -133,6 +138,10 @@ def result_to_openai(category: str, model: str, r: ModelResult) -> dict:
         data = [{"object": "embedding", "index": i, "embedding": v}
                 for i, v in enumerate(r.vectors or [])]
         return {"object": "list", "data": data, "model": model}
+    if category == MT_MULTIMODAL_EMBEDDING:
+        data = [{"object": "embedding", "index": i, "embedding": v}
+                for i, v in enumerate(r.vectors or [])]
+        return {"object": "list", "data": data, "model": model, "usage": r.usage or {}}
     if category == MT_TEXT_RERANK:
         return {"model": model, "results": r.scores or []}
     if category == MT_TEXT_TO_IMAGE:
@@ -195,6 +204,7 @@ PROBE_PAYLOADS: dict[str, dict] = {
     MT_TEXT_EMBEDDING: {"input": "你好"},
     MT_TEXT_RERANK: {"query": "苹果", "documents": ["苹果手机", "香蕉"]},
     MT_IMAGE_EMBEDDING: {"image_url": _PROBE_IMG},
+    MT_MULTIMODAL_EMBEDDING: {"text": "一只戴帽子的猫", "image_url": _PROBE_IMG},
     MT_TEXT_TO_IMAGE: {"prompt": "一只戴帽子的猫"},
     MT_AUDIO_TO_TEXT: {"audio_url": _PROBE_AUDIO},
     MT_IMAGE_UNDERSTAND: {"prompt": "图里有啥", "image_url": _PROBE_IMG},

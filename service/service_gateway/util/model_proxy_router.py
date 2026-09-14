@@ -14,7 +14,7 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from common.common_entity.response_schema import ApiResponse
 from common.common_log.log_init import log
@@ -22,6 +22,13 @@ from service.service_gateway.util.model_gateway_cache import ModelGatewayCache
 from common.common_utils.rate_limiter import RateLimiter
 from common.common_model import entry as cm_entry
 from common.common_model.model_types import ModelInvokeError
+
+# 对话族（OpenAI /chat/completions）：深度思考开关仅对这些类型有意义
+from common.common_constants.model_constant import (
+    MT_IMAGE_UNDERSTAND, MT_OCR, MT_TEXT_TO_TEXT, MT_VIDEO_UNDERSTAND,
+)
+
+_CHAT_CATEGORIES = {MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR}
 
 
 async def model_proxy(request: Request):
@@ -79,10 +86,17 @@ async def model_proxy(request: Request):
     if not cm_entry.supports(category, provider):
         return ApiResponse.error(404, f"模型能力类型/供应商暂不支持调用：{category}/{provider}")
     model_config = cm_entry.config_from_row(config)
+    # 运行期常用参数覆盖：body.params 合并进 model_params（经 self.extra 透传给全部 13 类实现）
+    run_params = body.get("params")
+    if isinstance(run_params, dict) and run_params:
+        model_config.model_params = {**(model_config.model_params or {}), **run_params}
     try:
         kwargs = cm_entry.body_to_kwargs(category, body)
     except ModelInvokeError as e:
         return ApiResponse.error(400, str(e))
+    # 深度思考开关：透传给对话族（_build_params 会 pop thinking 并调各家 _thinking_kwargs）
+    if body.get("thinking") and category in _CHAT_CATEGORIES:
+        kwargs["thinking"] = True
 
     stream = bool(body.get("stream"))
     try:
@@ -99,12 +113,5 @@ async def model_proxy(request: Request):
         log.info(f"Model proxy(common_model): model_id={model_id} category={category} "
                  f"provider={provider} model={req_model}")
         return JSONResponse(content=data)
-    except ModelInvokeError as e:
-        code = e.status_code or 502
-        log.warning(f"model proxy common_model error: {category}/{provider} {e}")
-        return Response(content=str(e.message),
-                        status_code=code if 400 <= code < 500 else 502,
-                        media_type="application/json")
-    except Exception as e:  # noqa: BLE001
-        log.error(f"model proxy unexpected error: {e}")
-        return ApiResponse.error(500, "内部错误，请联系管理员")
+    except Exception as e:
+        return JSONResponse(status_code=500, content=str(e))

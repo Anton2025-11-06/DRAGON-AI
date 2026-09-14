@@ -20,6 +20,7 @@ MT_TEXT_TO_TEXT = "text_to_text"          # 文生文（支持 stream）
 MT_TEXT_EMBEDDING = "text_embedding"      # 文本向量
 MT_TEXT_RERANK = "text_rerank"            # 文本重排
 MT_IMAGE_EMBEDDING = "image_embedding"    # 图片向量
+MT_MULTIMODAL_EMBEDDING = "multimodal_embedding"  # 多模态向量（文本+图片+视频，仅通义）
 MT_TEXT_TO_IMAGE = "text_to_image"        # 文生图
 MT_AUDIO_TO_TEXT = "audio_to_text"        # 音频转文字
 MT_IMAGE_UNDERSTAND = "image_understand"  # 图片理解（支持 stream）
@@ -29,11 +30,12 @@ MT_IMAGE_TO_VIDEO = "image_to_video"      # 图生视频
 MT_TEXT_TO_VIDEO = "text_to_video"        # 文生视频
 MT_TEXT_TO_AUDIO = "text_to_audio"        # 文生音频
 
-# 12 类型全集合（顺序即业务定义顺序，一个都不能少）
+# 13 类型全集合（顺序即业务定义顺序，一个都不能少）
 MODEL_TYPES_ALL = [
     MT_TEXT_TO_TEXT, MT_TEXT_EMBEDDING, MT_TEXT_RERANK, MT_IMAGE_EMBEDDING,
-    MT_TEXT_TO_IMAGE, MT_AUDIO_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND,
-    MT_OCR, MT_IMAGE_TO_VIDEO, MT_TEXT_TO_VIDEO, MT_TEXT_TO_AUDIO,
+    MT_MULTIMODAL_EMBEDDING, MT_TEXT_TO_IMAGE, MT_AUDIO_TO_TEXT,
+    MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_IMAGE_TO_VIDEO,
+    MT_TEXT_TO_VIDEO, MT_TEXT_TO_AUDIO,
 ]
 
 # 支持流式（astream）的类型集合：仅这三类实现 astream 抽象方法
@@ -45,6 +47,7 @@ MODEL_TYPE_LABELS = {
     MT_TEXT_EMBEDDING: "文本向量",
     MT_TEXT_RERANK: "文本重排",
     MT_IMAGE_EMBEDDING: "图片向量",
+    MT_MULTIMODAL_EMBEDDING: "多模态向量",
     MT_TEXT_TO_IMAGE: "文生图",
     MT_AUDIO_TO_TEXT: "音频转文字",
     MT_IMAGE_UNDERSTAND: "图片理解",
@@ -91,7 +94,7 @@ MODEL_TYPE_CATEGORY_MAP = {
     MODEL_TYPE_TEXT: [MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR],
     MODEL_TYPE_TEXT_GEN: [MT_TEXT_TO_TEXT],
     MODEL_TYPE_MULTIMODAL: [MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR],
-    MODEL_TYPE_EMBEDDING: [MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING],
+    MODEL_TYPE_EMBEDDING: [MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING, MT_MULTIMODAL_EMBEDDING],
     MODEL_TYPE_RERANK: [MT_TEXT_RERANK],
     MODEL_TYPE_IMAGE: [MT_TEXT_TO_IMAGE],
     MODEL_TYPE_VIDEO: [MT_TEXT_TO_VIDEO, MT_IMAGE_TO_VIDEO],
