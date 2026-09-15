@@ -107,6 +107,8 @@ export interface NodeErrorEventData {
 export interface StreamTokenEventData {
   nodeId: string;
   token: string;
+  /** true 表示该增量属于思维链(reasoning)，false/缺省为正文 */
+  reasoning?: boolean;
 }
 
 /**
@@ -421,6 +423,7 @@ export function useSSE(
           type: 'node.delta',
           nodeId: data.nodeId,
           token: data.token,
+          reasoning: data.reasoning,
         });
         callbacks?.onStreamToken?.(data);
       }

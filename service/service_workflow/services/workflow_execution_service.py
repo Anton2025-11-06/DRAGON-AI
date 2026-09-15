@@ -30,7 +30,6 @@ from service.service_workflow.models.workflow_entity import (
 from service.service_workflow.services.event_pubsub import (
     publish_event_hook, subscribe_event_channel,
 )
-from service.service_workflow.services.workflow_file_service import WorkflowFileService
 from service.service_workflow.workflow_engine.engine import (
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_PAUSED,
     STATUS_RUNNING, WorkflowRuntime,
@@ -223,8 +222,6 @@ class WorkflowExecutionService:
             # 事件总线:节点事件(含 node.delta)经 pub hook 实时 PUBLISH 到 Redis 频道,
             # 供其他进程的 SSE 订阅者跨进程实时消费
             event_bus=EventBus(execution_id, publish_hook=publish_event_hook),
-            # DOC_EXTRACTOR 文件加载：fileId/本地路径 → (text, metadata)
-            file_loader=WorkflowFileService.load_and_extract,
             trigger_type=trigger_type,
             user_id=user_id,
             workflow_id=workflow_id,

@@ -48,6 +48,34 @@ service_login:
 
 
 service_workflow:
+  # 统一文件存储（common.common_storage）：workflow-files 上传/下载与 arq worker 都读本段，
+  # 两处配置必须一致，否则会出现「上传到 OSS、worker 去本地目录找文件」的错配。
+  # 取值优先级：本段显式值 > 环境变量（OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET /
+  # OSS_REGION / OSS_BUCKET，STS 再加 OSS_SESSION_TOKEN）> 代码默认值；留空串视为未配置。
+  # 业务侧只调 common_storage.upload/download/delete/exists 四个方法，换后端不改代码。
+  storage:
+    type: oss                       # local | oss（oss 走官方异步客户端 aio.AsyncClient；s3/minio 已下线）
+    url_expires: 3600               # 匿名 URL 有效期（秒）：oss 为预签名有效期（上限 7 天），
+                                    # local 为文件可读期（到期自动清理）
+    region: cn-hangzhou             # 必须与 bucket 实际所在地域一致，否则 V4 签名校验不通过
+    bucket: dragon-ai2
+    access_key: ''                  # ★ 到 Nacos 控制台里填真值：本文件在公开仓库里，AK 不要提交
+    secret_key: ''                  # ★ 同上；留空则回退环境变量 OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET
+    path_prefix: dragon-ai/         # 对象键前缀，与桶里其它用途隔离
+    # ---------- 以下均可选（bucket 名全局唯一，须与控制台一致）----------
+    # endpoint: ''                  # 缺省按 region 构造 oss-<region>.aliyuncs.com
+    # security_token: ''            # STS 临时凭证才填（对应环境变量 OSS_SESSION_TOKEN）
+    # use_internal_endpoint: false  # 同地域 ECS 部署可开内网域名（免公网流量费）
+    # use_accelerate_endpoint: false # 传输加速域名
+    # use_cname: false              # 自定义域名访问
+    # connect_timeout: 10           # 建连超时（秒）
+    # readwrite_timeout: 30         # 读写超时（秒）
+    # retry_max_attempts: 3         # 可重试错误的最大尝试次数
+    # ---------- 仅 type: local 时生效 ----------
+    # local_dir: data/storage_files # 落盘目录（环境变量 STORAGE_LOCAL_DIR）
+    # public_base: ''               # 匿名下载基址（环境变量 STORAGE_PUBLIC_BASE）；
+                                    # 留空则按上传请求的对外地址推导，跨域名/公网转发场景必填：
+                                    # 例 https://ai.example.com/api/workflow/workflow-files/download
   redis:
     host: 127.0.0.1
     port: 26379
@@ -62,8 +90,3 @@ service_workflow:
     pool_size: 10
     max_overflow: 10
     echo: False
-
-# 文件微服务：暂不做鉴权，仅复用统一存储（type 缺省 local，落盘 WORKFLOW_FILE_DIR）
-service_file:
-  storage:
-    type: local

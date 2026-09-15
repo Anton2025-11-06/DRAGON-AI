@@ -310,30 +310,41 @@ export const ApplyModel = (id: number, reason?: string) =>
 
 export const GetMyKeys = () => defHttp.get<MyKeyRep[]>(`${BASE_URL}/my-keys`);
 
-// ==================== 文件上传（service_file，无鉴权） ====================
+// ==================== 文件上传（存储能力在 common_storage，入口为工作流文件接口） ====================
 
-/** 上传返回：内网可访问的可下载 URL（公网转发由运维处理） */
+/** 上传返回：匿名可访问 URL（OSS 预签名 / 本地存储为下载接口地址）+ 有效期 */
 export interface FileUploadRep {
-  fileId: string;
+  /** 存储文件名：{uuid}_{原始名}，下载/删除/判存在按它寻址 */
+  fileName: string;
+  /** 文件原始名称（带格式后缀） */
   name: string;
   size: number;
+  /** 可直接传给大模型拉取的文件 URL */
   url: string;
+  /** URL 有效期（秒） */
+  expiresIn: number;
+  /** URL 过期时间 */
+  expiresAt: string;
 }
 
-/** 上传文件，返回 { fileId, url }；url 可直接传给大模型拉取 */
-export const UploadFile = (file: File): Promise<FileUploadRep> => {
+/** 上传文件，返回 { fileName, url }；url 可直接传给大模型拉取 */
+export const UploadFile = async (file: File): Promise<FileUploadRep> => {
   const fd = new FormData();
   fd.append('file', file);
-  // defHttp 默认 JSON，此处需 multipart：走原生 fetch 到网关 /api/file/file/upload
-  // 用 resolveApiUrl 去重前缀（VITE_GLOB_API_URL=/api 时避免拼成 /api/api/...）
+  // defHttp 默认 JSON，此处需 multipart：走原生 fetch（不手设 Content-Type，交给浏览器带 boundary）。
+  // 上传不在网关白名单内，必须显式带 Authorization；resolveApiUrl 用于去重前缀（VITE_GLOB_API_URL=/api
+  // 时避免拼成 /api/api/...）
+  const accessStore = useAccessStore();
   const base = import.meta.env.VITE_GLOB_API_URL || '';
-  const url = resolveApiUrl('/api/file/file/upload', base);
-  return fetch(url, { method: 'POST', body: fd })
-    .then(async (r) => {
-      const j = await r.json();
-      if (j?.code !== 200) throw new Error(j?.message || '上传失败');
-      return j.data as FileUploadRep;
-    });
+  const url = resolveApiUrl('/api/workflow/workflow-files/upload', base);
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessStore.accessToken || ''}` },
+    body: fd,
+  });
+  const j = await resp.json();
+  if (j?.code !== 200) throw new Error(j?.message || '上传失败');
+  return j.data as FileUploadRep;
 };
 
 // ==================== 审批 ====================

@@ -34,6 +34,8 @@ export interface NodeDeltaEvent extends WorkflowRuntimeEventBase {
   type: 'node.delta';
   nodeId: string;
   token: string;
+  /** true 表示该增量属于思维链(reasoning)，false/缺省为正文 */
+  reasoning?: boolean;
 }
 
 export interface NodeCompletedEvent extends WorkflowRuntimeEventBase {

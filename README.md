@@ -43,8 +43,8 @@
                  │ arq worker（分片队列）│
                  └──────────────────────┘
 ┌──────────────────────────────────────────────────────────────┐
-│ 基础设施：Nacos（注册/配置中心）· MySQL · Redis · 可选 MinIO/    │
-│           对象存储（storage 配置切换）· 内网 OpenAI 兼容推理服务  │
+│ 基础设施：Nacos（注册/配置中心）· MySQL · Redis · 可选阿里云 OSS │
+│           存储后端（storage 配置切换）· 内网 OpenAI 兼容推理服务  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,9 +74,11 @@
 - 同服务共存 MCP / 工具 / 沙箱 / 模型对话路由
 
 ### 统一存储抽象（common/common_storage）
-- `StorageBackend` 抽象：**本地目录** 与 **S3 兼容对象存储**（MinIO / Ceph / OSS）两个实现
-- 通过 Nacos `storage:` 配置段或环境变量（`STORAGE_BACKEND`、`MINIO_*`）切换，业务无感
-- 默认本地存储（`data/workflow_files`），配置 s3 后自动使用对象存储，未配置永不失败
+- `StorageBackend` 抽象：**本地目录** 与 **阿里云 OSS**（官方 Python SDK V2 异步客户端 `aio.AsyncClient`）两个实现
+- 通过 Nacos `storage:` 配置段或环境变量（`STORAGE_BACKEND`、`OSS_*`）切换，业务无感
+- 默认本地存储（`data/workflow_files`）；配了 OSS 但凭证/连接失败会阻断启动，不静默降级
+- **无盘化**：后端只搬字节（`save_bytes` / `read_bytes` / `presigned_url`），不提供「取本地文件路径」的能力，
+  文档解析也在内存里做（`service_workflow/utils/file_utils`，仅 LibreOffice 转换临时落盘、用完即删）
 
 ## 重构中（当前以旧实现运行）
 
@@ -98,7 +100,7 @@
 | 注册/配置 | Nacos（nacos-sdk-python，注册发现 + 配置中心） |
 | 数据 | MySQL 8.x + Redis 7.x（登录态 / 限流计数 / 配置缓存） |
 | 异步任务 | arq 0.28（Redis 队列，分片队列支持多 worker 横向扩展） |
-| 对象存储 | minio SDK（S3 兼容：MinIO / Ceph / OSS，可选接入） |
+| 对象存储 | 阿里云 OSS（alibabacloud-oss-v2 官方 SDK V2 + aiohttp 异步客户端） |
 | 向量检索 | Milvus 客户端层已备（common_milvus），知识库服务规划中 |
 | HTTP | httpx 全局连接池 |
 | 日志 | loguru + 自研 trace-id 链路 |
@@ -110,8 +112,7 @@
 ```
 ├── common/                     # 公共层（所有服务共享）
 │   ├── common_app/             #   FastAPI 统一引导工厂（lifespan / 中间件装配）
-│   ├── common_storage/         #   统一存储抽象（StorageBackend：本地 / S3）
-│   ├── common_file/            #   文档文本解析（11 种格式）+ DTO（FileUtils）
+│   ├── common_storage/         #   统一存储抽象（StorageBackend：本地 / 阿里云 OSS，只搬字节）
 │   ├── common_middleware/      #   RequestLog / TokenCheck / RateLimit / OperateLog
 │   ├── common_nacos/           #   Nacos 注册发现与配置拉取
 │   ├── common_redis/           #   异步 Redis 客户端
@@ -125,7 +126,7 @@
 │   ├── service_system/         #   系统管理 + 模型广场 :9001（已完成）
 │   ├── service_login/          #   登录注册 :9004（已完成）
 │   ├── service_gateway/        #   网关 :18000（框架已完成，AI 转发重构中）
-│   ├── service_workflow/       #   工作流编排 :9003（已完成）
+│   ├── service_workflow/       #   工作流编排 :9003（已完成）+ utils/file_utils 文档解析
 │   ├── service_rag/            #   知识库 :9002（骨架，规划中）
 │   ├── service_datasets|train|inference|eval_model|notebook/  # 骨架，规划中
 ├── arq_tasks/                  # arq worker：配置 + 工作流执行/恢复任务 + 多进程启动脚本
@@ -144,7 +145,7 @@
 | Python 3.11+ / Node.js 20+ / pnpm 9+ | 后端 / 前端 |
 | MySQL 8.x / Redis 7.x | 业务数据 / 会话与限流 |
 | Nacos 2.x | 注册中心 + 配置中心（各服务配置按 data_id = 服务名拉取） |
-| MinIO 等对象存储 | 可选（配置 `storage.type=s3` 后启用） |
+| 阿里云 OSS | 可选（配置 `storage.type=oss` 后启用，至少需 region + bucket + AK） |
 | OpenAI 兼容推理端点 | 模型调用目标（vLLM / DeepSeek / Qwen 等） |
 
 ### 启动
@@ -174,7 +175,7 @@ cd ui-ai && pnpm install && pnpm dev:antd      # :5666
 |---|---|
 | `redis:` | 连接地址（登录态 / 限流 / 配置缓存） |
 | `mysql:` | 数据源（各服务独立连接池） |
-| `storage:` | 存储后端：`type: local|s3` + endpoint/access_key/secret_key/bucket/secure（环境变量 `STORAGE_BACKEND` / `MINIO_*` 兜底） |
+| `storage:` | 存储后端：`type: local|oss` + region/bucket/access_key/secret_key/path_prefix/presign_expires（环境变量 `STORAGE_BACKEND` / `OSS_*` 兜底） |
 
 ## 测试现状
 

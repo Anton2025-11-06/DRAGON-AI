@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+# 文件变量 → URL 的归一逻辑住在上下文模块（模板渲染也要用），这里直接复用避免两份实现
+from service.service_workflow.workflow_engine.context import file_url
+
 if TYPE_CHECKING:
     from service.service_workflow.workflow_engine.context import ExecutionContext
     from service.service_workflow.workflow_engine.engine import WorkflowRuntime
@@ -22,11 +25,9 @@ class NodeResult:
 
     - output: 写入上下文的输出变量 {var: value}（下游通过 {{nodeId.var}} 引用）
     - branch_id: 分支路由端口 ID（IF_ELSE/QUESTION_CLASSIFIER/LOOP），None=默认 output 端口
-    - stream_text: 流式聚合后的完整文本（LLM 节点填，供 nodeStates 快速展示）
     """
     output: dict = field(default_factory=dict)
     branch_id: Optional[str] = None
-    stream_text: Optional[str] = None
 
 
 class NodeExecutionError(Exception):
@@ -81,11 +82,11 @@ class BaseNodeExecutor:
         """
         return self.node.data.get(EMIT_OUTPUT_KEY, True) is not False
 
-    async def emit_delta(self, token: str) -> None:
+    async def emit_delta(self, token: str, reasoning: bool) -> None:
         """流式节点推送增量内容(LLM 等);返回内容开关关闭时跳过广播。"""
         if not token or not self.emit_output_enabled():
             return
-        await self.runtime.emit("node.delta", nodeId=self.node.id, token=token)
+        await self.runtime.emit("node.delta", nodeId=self.node.id, token=token, reasoning=reasoning)
 
     def require_model_id(self) -> int:
         model_id = self.cfg("modelId")

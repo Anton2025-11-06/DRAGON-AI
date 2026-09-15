@@ -63,8 +63,10 @@ psutil>=5.9.8
 aiofiles>=23.2.1
 # excel工具
 openpyxl>=3.1.5
-# oss存储
-minio>=7.2.20
+# 阿里云 OSS 存储（官方 Python SDK V2，唯一对象存储后端）
+alibabacloud-oss-v2
+# 阿里云 OSS 异步客户端（oss.aio.AsyncClient）依赖，SDK 未声明需显式安装
+aiohttp>=3.9.0
 # 大模型
 modelscope>=1.35.0
 dashscope>=1.27.4

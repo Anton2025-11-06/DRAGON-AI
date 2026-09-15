@@ -27,6 +27,9 @@ app = create_app(
     service_name=SERVICE_WORKFLOW,
     default_port=SERVICE_WORKFLOW_PORT,
     routers=[mcp_router, tool_router, sandbox_router, skill_router],
+    # workflow-files 上传经统一存储后端（local / oss），storage 段缺省即 local
+    enable_storage=True,
+    enbale_arq_workflow_redis=True
 )
 
 # 工作流相关路由：统一追加「懒加载初始化」依赖（DB 就绪前调用自愈，不阻断其他路由）

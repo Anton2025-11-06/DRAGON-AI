@@ -69,6 +69,8 @@ export interface NodeTrace {
   };
   /** 流式输出内容 */
   streamingContent?: string;
+  /** 流式思维链内容（reasoning 增量，与正文分开累加） */
+  streamingReasoning?: string;
 }
 
 /**
@@ -181,6 +183,8 @@ export interface DebugSSEEvent {
   error?: string;
   stackTrace?: string;
   token?: string;
+  /** node.delta 增量是否属于思维链 */
+  reasoning?: boolean;
   duration?: number;
   variables?: Record<string, any>;
   outputs?: Record<string, any>;
@@ -348,6 +352,27 @@ export const useDebugStore = defineStore('debug', () => {
             updatedAt: trace.endTime || undefined,
           }),
         );
+
+        // 流式节点的 node.completed 不广播 output（内容由 node.delta 送达）：
+        // 用 delta 累积值补齐，键名与后端 output 的 text/reasoning 对齐
+        if (variableItems.length === 0) {
+          if (trace.streamingContent) {
+            variableItems.push({
+              name: 'text',
+              value: trace.streamingContent,
+              type: 'string',
+              updatedAt: trace.endTime || undefined,
+            });
+          }
+          if (trace.streamingReasoning) {
+            variableItems.push({
+              name: 'reasoning',
+              value: trace.streamingReasoning,
+              type: 'string',
+              updatedAt: trace.endTime || undefined,
+            });
+          }
+        }
 
         if (variableItems.length > 0) {
           groups.set(trace.nodeId, {
@@ -606,13 +631,14 @@ export const useDebugStore = defineStore('debug', () => {
     if (trace) {
       trace.status = 'completed';
       trace.endTime = new Date();
-      trace.duration = duration || null;
+      // 0ms（轻量节点）也是有效耗时，不能当作“无数据”清掉
+      trace.duration = duration ?? null;
       trace.outputs = output || {};
       trace.tokenUsage = tokenUsage;
       trace.httpDetails = httpDetails;
 
       // 更新时间线
-      updateTimelineItem(nodeId, 'completed', duration || 0);
+      updateTimelineItem(nodeId, 'completed', duration ?? 0);
     }
   }
 
@@ -645,12 +671,16 @@ export const useDebugStore = defineStore('debug', () => {
    * 处理流式 Token 事件
    */
   function handleStreamingToken(event: DebugSSEEvent) {
-    const { nodeId, token } = event;
+    const { nodeId, token, reasoning } = event;
     if (!nodeId || !token) return;
 
     const trace = nodeTraces.value.get(nodeId);
     if (trace) {
-      trace.streamingContent = (trace.streamingContent || '') + token;
+      if (reasoning) {
+        trace.streamingReasoning = (trace.streamingReasoning || '') + token;
+      } else {
+        trace.streamingContent = (trace.streamingContent || '') + token;
+      }
     }
   }
 

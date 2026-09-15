@@ -11,6 +11,8 @@ from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 
+from common.common_arq.queue import CustomRedisSettings, get_arq_redis
+from common.common_constants.constant import ARQ_WORKFLOW
 from common.common_log.log_init import log
 from common.common_middleware.exception_handler import register_exception_handlers
 from common.common_middleware.request_log_middleware import RequestLogMiddleware
@@ -22,7 +24,7 @@ from common.common_nacos.config import Config
 from common.common_nacos.nacos_client import NacosClient
 from common.common_redis import redis
 from common.common_httpx.httpx import httpx_pool
-from common.common_storage import get_storage, init_storage
+from common.common_storage import close_storage, init_storage
 
 
 async def _init_redis(redis_cfg: dict):
@@ -54,12 +56,6 @@ def _init_httpx_pool():
     httpx_pool.init()
 
 
-async def _init_storage(storage_cfg: dict):
-    # 统一存储后端（本地 / MinIO 等 S3）：未配置时默认本地，无外部依赖；
-    # 配置了 s3 但连接失败会抛错并阻断启动（避免静默降级造成数据写错位置）。
-    await init_storage(storage_cfg)
-
-
 def create_app(service_name: str,
                default_port: int,
                routers: list[APIRouter],
@@ -69,7 +65,8 @@ def create_app(service_name: str,
                enable_rate_limit: bool = False,
                enable_operate_log: bool = False,
                enable_httpx_pool: bool = True,
-               enable_storage: bool = False
+               enable_storage: bool = False,
+               enbale_arq_workflow_redis: bool = False
                ) -> FastAPI:
     """
     统一的 FastAPI 服务引导工厂：
@@ -97,7 +94,7 @@ def create_app(service_name: str,
             server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
             service_name=service_name,
             # TODO 自动获取 实例IP
-            ip=os.environ.get("service_ip"),
+            ip=socket.gethostname(),
             port=port,
             namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
             log_level=Config.nacos_log_level,
@@ -115,12 +112,23 @@ def create_app(service_name: str,
         try:
             if enable_redis:
                 await _init_redis(yml_config.get("redis", {}))
+                log.info("Redis initialized")
             if enable_mysql:
                 await _init_mysql(yml_config.get("mysql", {}))
+                log.info("MySQL initialized")
             if enable_httpx_pool:
                 _init_httpx_pool()
+                log.info("HTTPX pool initialized")
             if enable_storage:
-                await _init_storage(yml_config.get("storage", {}))
+                # 统一存储入口（common_storage.upload/download/delete/exists）；
+                # 未配置 storage 段时默认本地后端，配了 OSS 但凭证错误这里直接阻断启动
+                log.info("Storage initialized")
+                await init_storage(yml_config.get("storage", {}))
+            if enbale_arq_workflow_redis:
+                CustomRedisSettings.yml = await nacos_service.get_config_content(ARQ_WORKFLOW)
+                await get_arq_redis()
+                log.info("Arq workflow Redis initialized")
+
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
             log.error(f"Service {service_name} init dependencies failed: {str(e)}")
@@ -146,8 +154,9 @@ def create_app(service_name: str,
             if enable_mysql:
                 await mysql_client.close()
             if enable_storage:
-                await get_storage().close()
-                log.warning(f"storage backend close skipped: {e}")
+                # 异步存储后端（阿里云 OSS 的 aiohttp 会话）必须显式关闭，否则退出时刷
+                # "Unclosed client session"；本地后端的 close() 是空实现
+                await close_storage()
         except Exception as e:
             log.warning(f"Some deregister failed: {e}")
 

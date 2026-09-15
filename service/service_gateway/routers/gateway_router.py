@@ -70,8 +70,6 @@ async def proxy(service_name: str, path: str, request: Request):
         target = ("127.0.0.1", 9004)
     if service_name == "service_system":
         target = ("127.0.0.1", 9001)
-    if service_name == "service_file":
-        target = ("127.0.0.1", 9007)
 
 
     ip, port = target

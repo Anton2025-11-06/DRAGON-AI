@@ -137,16 +137,3 @@ class WorkflowApiKey(Base):
     last_used_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     total_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-
-
-class WorkflowFile(Base):
-    """工作流临时文件表"""
-    __tablename__ = "tb_workflow_file"
-
-    file_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    name: Mapped[str] = mapped_column(String(256), nullable=False)
-    size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    content_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

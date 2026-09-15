@@ -17,15 +17,33 @@ import os
 import sys
 from urllib.parse import quote_plus
 
-from common.common_arq.queue import worker_health_key
-from common.common_constants.constant import SERVICE_WORKFLOW
+from common.common_arq.queue import worker_health_key, CustomRedisSettings
+from common.common_constants.constant import SERVICE_WORKFLOW, ARQ_WORKFLOW
 from common.common_httpx.httpx import httpx_pool
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from common.common_nacos.config import Config
 from common.common_nacos.nacos_client import NacosClient
 from common.common_redis import redis
+from common.common_storage import close_storage, init_storage
 from service.service_workflow.services.workflow_execution_service import WorkflowExecutionService
+
+
+async def prepare_config():
+    nacos_service = NacosClient(
+        user_name=os.environ.get("nacos_name", Config.nacos_name),
+        password=os.environ.get("nacos_password", Config.nacos_password),
+        server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
+        service_name=SERVICE_WORKFLOW,
+        ip=None,
+        port=0,
+        namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
+        log_level=logging.NOTSET,
+    )
+    await nacos_service.init()
+    CustomRedisSettings.yml = await nacos_service.get_config_content(ARQ_WORKFLOW)
+    await nacos_service.close_config_client()
+
 
 # bootstrap 幂等标记(同一进程内只初始化一次,防止异常重启路径重复初始化)
 _BOOTSTRAPPED = False
@@ -92,6 +110,10 @@ async def bootstrap(ctx: dict) -> None:
     )
     httpx_pool.init()
 
+    # 3. 统一存储后端(与 service_workflow 同一 `storage:` 段):worker 里的节点如需
+    # 读写存储(而非走 HTTP URL),未初始化会退到本地后端,OSS 环境下将读写错位置。
+    await init_storage(yml_config.get("storage", {}))
+
     log.info("arq worker bootstrap done, queue={}", WorkerSettings.queue_name)
     _BOOTSTRAPPED = True
 
@@ -103,6 +125,10 @@ async def shutdown(ctx: dict) -> None:
     """
     await mysql_client.close()
     await redis.client.close()
+    try:
+        await close_storage()
+    except Exception as e:  # noqa: BLE001
+        log.warning("storage backend close failed: {}", e)
     log.info("arq worker shutdown done")
 
 

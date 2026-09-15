@@ -27,10 +27,11 @@ SERVICE_AGENT_PORT = 9005
 SERVICE_SKILL = "service_skill"
 SERVICE_SKILL_PORT = 9006
 
-# 文件微服务（上传/下载，供大模型按可访问 URL 拉取，暂不鉴权）
-SERVICE_FILE = "service_file"
-SERVICE_FILE_PORT = 9007
+ARQ_WORKFLOW = 'arq_workflow'
 
+ARQ_RAG = 'arq_rag'
+
+ARQ_HARNESS = 'arq_harness'
 
 PREFIX_LOGIN = "login:"
 
@@ -70,7 +71,6 @@ MODULES = [
     {"bucket": "inference", "name": "模型推理", "default": {"limit": 300, "window": 60}},
     {"bucket": "notebook", "name": "Notebook", "default": {"limit": 300, "window": 60}},
     {"bucket": "eval_model", "name": "模型评测", "default": {"limit": 300, "window": 60}},
-    {"bucket": "file", "name": "文件服务", "default": {"limit": 300, "window": 60}},
     # AI 模型网关 /api/model 入口：默认按 IP 60 次/分钟防爆破
     {"bucket": "model", "name": "AI模型网关", "default": {"limit": 60, "window": 60}},
 ]
@@ -86,7 +86,6 @@ SERVICE_ALIASES = {
     "inference": "service_inference",
     "notebook": "service_notebook",
     "eval_model": "service_eval_model",
-    "file": "service_file",
 }
 
 

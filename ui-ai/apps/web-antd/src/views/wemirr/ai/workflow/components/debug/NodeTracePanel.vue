@@ -29,7 +29,6 @@ import {
   MinusOutlined,
   PlayCircleOutlined,
   PlusOutlined,
-  RightOutlined,
   RobotOutlined,
   SearchOutlined,
   ThunderboltOutlined,
@@ -84,6 +83,9 @@ const hasError = computed(() => props.trace?.error !== undefined);
 
 /** 是否有流式输出 */
 const hasStreamingContent = computed(() => !!props.trace?.streamingContent);
+
+/** 是否有思维链流式输出 */
+const hasStreamingReasoning = computed(() => !!props.trace?.streamingReasoning);
 
 /** 默认展开的面板 */
 const defaultActiveKey = computed(() => {
@@ -401,10 +403,7 @@ function decreaseDepth() {
         <CollapsePanel v-if="hasInputs" key="inputs">
           <template #header>
             <div class="panel-header">
-              <span class="panel-title">
-                <RightOutlined class="panel-icon" />
-                输入数据
-              </span>
+              <span class="panel-title">输入数据</span>
               <Tag size="small" color="blue">
                 {{ filteredInputs.length }} 项
               </Tag>
@@ -476,10 +475,7 @@ function decreaseDepth() {
         <CollapsePanel v-if="hasOutputs" key="outputs">
           <template #header>
             <div class="panel-header">
-              <span class="panel-title">
-                <RightOutlined class="panel-icon" />
-                输出数据
-              </span>
+              <span class="panel-title">输出数据</span>
               <Tag size="small" color="green">
                 {{ filteredOutputs.length }} 项
               </Tag>
@@ -545,6 +541,25 @@ function decreaseDepth() {
               :image="Empty.PRESENTED_IMAGE_SIMPLE"
             />
           </div>
+        </CollapsePanel>
+
+        <!-- 思维链 (LLM 深度思考流式) -->
+        <CollapsePanel
+          v-if="hasStreamingReasoning"
+          key="reasoning"
+          header="思维链"
+        >
+          <div class="streaming-content reasoning-content">
+            {{ trace!.streamingReasoning }}
+          </div>
+          <Tooltip title="复制">
+            <a
+              class="copy-btn"
+              @click="copyToClipboard(trace!.streamingReasoning)"
+            >
+              <CopyOutlined />
+            </a>
+          </Tooltip>
         </CollapsePanel>
 
         <!-- 流式输出 (LLM 节点) -->
@@ -751,11 +766,6 @@ function decreaseDepth() {
         gap: 4px;
         font-weight: 500;
       }
-
-      .panel-icon {
-        font-size: 10px;
-        transition: transform 0.2s;
-      }
     }
 
     // 面板操作按钮
@@ -863,6 +873,11 @@ function decreaseDepth() {
       word-break: break-word;
       background-color: var(--ant-color-bg-layout);
       border-radius: 4px;
+    }
+
+    .reasoning-content {
+      color: var(--ant-color-text-secondary);
+      font-style: italic;
     }
 
     .error-content {

@@ -50,7 +50,15 @@ class ModelConfigProvider:
                     data = json.loads(raw) if isinstance(raw, str) else raw
                     cfg = self._from_cache(data)
                     if cfg is not None:
-                        cfg.api_key = await self._load_api_key_from_mysql(model_id) or ""
+                        secrets = await self._load_secrets_from_mysql(model_id)
+                        cfg.api_key = secrets.get("api_key") or ""
+                        # 缓存条目可能由旧版本写入（不含 model_params / 能力位）：回源补齐，
+                        # 否则模型管理登记的常用参数与流式/思考开关会在命中缓存时被静默丢弃
+                        if not cfg.model_params and secrets.get("model_params"):
+                            cfg.model_params = secrets["model_params"]
+                        for flag in ("supports_stream", "supports_thinking"):
+                            if data.get(flag) is None:
+                                setattr(cfg, flag, bool(secrets.get(flag)))
                         if cfg.status == 1:
                             return cfg
             except Exception as e:  # noqa: BLE001
@@ -68,21 +76,35 @@ class ModelConfigProvider:
             provider=data.get("provider", ""),
             model_name=data.get("model_name", ""),
             base_url=data.get("base_url", "") or "",
+            model_params=data.get("model_params") or {},
+            supports_stream=bool(data.get("supports_stream")),
+            supports_thinking=bool(data.get("supports_thinking")),
             status=int(data.get("status", 1)),
         )
 
-    async def _load_api_key_from_mysql(self, model_id: int) -> Optional[str]:
+    async def _load_secrets_from_mysql(self, model_id: int) -> dict:
+        """回源 MySQL 取凭据与不随缓存走的字段（api_key、常用参数、能力位）。"""
         if self._mysql is None:
-            return None
+            return {}
         from sqlalchemy import select
         from service.service_system.models.model import Model
         try:
             async with self._mysql.get_session() as session:
-                return (await session.execute(
-                    select(Model.api_key).where(Model.id == model_id))).scalar()
+                row = (await session.execute(
+                    select(Model.api_key, Model.model_params,
+                           Model.supports_stream, Model.supports_thinking)
+                    .where(Model.id == model_id))).first()
+                if row is None:
+                    return {}
+                return {
+                    "api_key": row[0],
+                    "model_params": row[1] or {},
+                    "supports_stream": bool(row[2]),
+                    "supports_thinking": bool(row[3]),
+                }
         except Exception as e:  # noqa: BLE001
-            log.error("[WorkflowModel] 回源 api_key 失败 model_id={}: {}", model_id, e)
-            return None
+            log.error("[WorkflowModel] 回源 api_key/model_params/能力位 失败 model_id={}: {}", model_id, e)
+            return {}
 
     async def _load_from_mysql(self, model_id: int) -> Optional[ModelConfig]:
         """回源 MySQL（SQLAlchemy ORM，model_params JSON 列自动反序列化）。"""
@@ -101,6 +123,8 @@ class ModelConfigProvider:
                     provider=row.provider, model_name=row.model_name,
                     base_url=row.base_url or "", api_key=row.api_key or "",
                     model_params=row.model_params or {}, status=row.status,
+                    supports_stream=bool(row.supports_stream),
+                    supports_thinking=bool(row.supports_thinking),
                 )
         except Exception as e:  # noqa: BLE001
             log.error("[WorkflowModel] MySQL 读模型失败 model_id={}: {}", model_id, e)

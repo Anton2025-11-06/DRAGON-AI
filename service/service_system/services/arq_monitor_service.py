@@ -20,7 +20,7 @@ from typing import Optional
 from arq.constants import in_progress_key_prefix
 
 from common.common_arq.queue import (
-    ARQ_REDIS_URL, DEFAULT_WORKER_NAME, MAX_SPLIT_NUMBER, MIN_SPLIT_NUMBER,
+    DEFAULT_WORKER_NAME, MAX_SPLIT_NUMBER, MIN_SPLIT_NUMBER,
     QUEUE_NAME, get_arq_redis, get_split_number, set_split_number,
 )
 from common.common_log.log_init import log
@@ -79,54 +79,54 @@ class ArqMonitorService:
             raise ValueError(f"切片数必须在 {MIN_SPLIT_NUMBER}~{MAX_SPLIT_NUMBER} 之间, 实际 {n}")
         return {"splitNumber": await set_split_number(n)}
 
-    # ==================== 队列指标(单队列,兼容旧接口) ====================
-
-    @staticmethod
-    async def queue_metrics(queue_name: str) -> dict:
-        """队列指标:深度 / 已到点 / 延迟 / 执行中(近似)/ 是否存活。"""
-        arq = await get_arq_redis()
-        try:
-            depth = await arq.zcard(queue_name)
-            now_ms = int(datetime.now().timestamp() * 1000)
-            # score <= now:到点可执行;score > now:延迟任务(defer_until)
-            due = await arq.zcount(queue_name, "-inf", now_ms)
-            delayed = max(0, depth - due)
-            # 正在执行的任务数(worker 执行时登记 in-progress key,结束即删)
-            in_progress = 0
-            async for _ in arq.scan_iter(match=f"{in_progress_key_prefix}*", count=500):
-                in_progress += 1
-            # 节点级健康 key 枚举:存在未过期 key 即代表有 worker 在线
-            worker_nodes = await ArqMonitorService._scan_worker_nodes(queue_name)
-            alive_nodes = [n for n in worker_nodes if n["alive"]]
-            alive = bool(alive_nodes)
-            # 在线节点中最近一次心跳的节点
-            latest = min(alive_nodes, key=lambda n: n["secondsSinceHeartbeat"] or 0) if alive_nodes else None
-        except Exception as e:  # noqa: BLE001  Redis 不可达等
-            log.error("arq queue metrics failed: {}", e)
-            return {
-                "queueName": queue_name,
-                "redis": ARQ_REDIS_URL,
-                "depth": -1, "due": -1, "delayed": -1, "inProgress": -1,
-                "healthy": False, "error": str(e),
-            }
-        return {
-            "queueName": queue_name,
-            "redis": ARQ_REDIS_URL,
-            # 队列深度:全部待执行任务(到点 + 延迟)
-            "depth": depth,
-            # 已到点待执行(worker 空闲即可消费)
-            "due": due,
-            # 延迟任务(还不到执行时间)
-            "delayed": delayed,
-            # 正在执行的任务数(近似值,来自 in-progress key 扫描)
-            "inProgress": in_progress,
-            # 是否有健康的 worker 在线(至少一个节点 key 新鲜)
-            "healthy": alive,
-            # 最近一次心跳时间(无 worker 时为 None)
-            "heartbeat": latest["heartbeat"] if latest else None,
-            # 在线 worker 节点数(分布式扩展后 >1)
-            "workerCount": len(alive_nodes),
-        }
+    # # ==================== 队列指标(单队列,兼容旧接口) ====================
+    #
+    # @staticmethod
+    # async def queue_metrics(queue_name: str) -> dict:
+    #     """队列指标:深度 / 已到点 / 延迟 / 执行中(近似)/ 是否存活。"""
+    #     arq = await get_arq_redis()
+    #     try:
+    #         depth = await arq.zcard(queue_name)
+    #         now_ms = int(datetime.now().timestamp() * 1000)
+    #         # score <= now:到点可执行;score > now:延迟任务(defer_until)
+    #         due = await arq.zcount(queue_name, "-inf", now_ms)
+    #         delayed = max(0, depth - due)
+    #         # 正在执行的任务数(worker 执行时登记 in-progress key,结束即删)
+    #         in_progress = 0
+    #         async for _ in arq.scan_iter(match=f"{in_progress_key_prefix}*", count=500):
+    #             in_progress += 1
+    #         # 节点级健康 key 枚举:存在未过期 key 即代表有 worker 在线
+    #         worker_nodes = await ArqMonitorService._scan_worker_nodes(queue_name)
+    #         alive_nodes = [n for n in worker_nodes if n["alive"]]
+    #         alive = bool(alive_nodes)
+    #         # 在线节点中最近一次心跳的节点
+    #         latest = min(alive_nodes, key=lambda n: n["secondsSinceHeartbeat"] or 0) if alive_nodes else None
+    #     except Exception as e:  # noqa: BLE001  Redis 不可达等
+    #         log.error("arq queue metrics failed: {}", e)
+    #         return {
+    #             "queueName": queue_name,
+    #             "redis": ARQ_REDIS_URL,
+    #             "depth": -1, "due": -1, "delayed": -1, "inProgress": -1,
+    #             "healthy": False, "error": str(e),
+    #         }
+    #     return {
+    #         "queueName": queue_name,
+    #         "redis": ARQ_REDIS_URL,
+    #         # 队列深度:全部待执行任务(到点 + 延迟)
+    #         "depth": depth,
+    #         # 已到点待执行(worker 空闲即可消费)
+    #         "due": due,
+    #         # 延迟任务(还不到执行时间)
+    #         "delayed": delayed,
+    #         # 正在执行的任务数(近似值,来自 in-progress key 扫描)
+    #         "inProgress": in_progress,
+    #         # 是否有健康的 worker 在线(至少一个节点 key 新鲜)
+    #         "healthy": alive,
+    #         # 最近一次心跳时间(无 worker 时为 None)
+    #         "heartbeat": latest["heartbeat"] if latest else None,
+    #         # 在线 worker 节点数(分布式扩展后 >1)
+    #         "workerCount": len(alive_nodes),
+    #     }
 
     # ==================== worker 节点健康(按队列) ====================
 

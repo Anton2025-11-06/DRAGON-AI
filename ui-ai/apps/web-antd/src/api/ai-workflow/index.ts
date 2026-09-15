@@ -409,23 +409,36 @@ export function importTemplate(json: string) {
 // ==================== 工作流文件 API ====================
 
 /**
- * 文件上传响应
+ * 文件上传结果（common_storage 口径：文件名即唯一标识，不再单独维护 fileId）
  */
-export interface WorkflowFileInfo {
-  fileId: string;
+export interface WorkflowFileUpload {
+  /** 是否上传成功（批量上传时逐项判定） */
+  ok: boolean;
+  /** 存储文件名：{uuid}_{原始名}，下载/删除/判存在都用它 */
+  fileName: string;
+  /** 文件原始名称（带格式后缀） */
   name: string;
+  /** 文件大小（字节） */
   size: number;
-  contentType: string;
-  uploadTime: string;
+  /** 匿名可访问 URL（OSS 为预签名地址，本地存储为下载接口地址） */
+  url: string;
+  /** URL 有效期（秒） */
+  expiresIn: number;
+  /** URL 过期时间 */
+  expiresAt: string;
+  /** 失败原因（ok 为 false 时） */
+  error?: string;
 }
 
 /**
- * 上传工作流文件
+ * 上传单个文件（开始节点文件类型参数、文档提取器入参均先由此拿到 url）
  */
-export function uploadWorkflowFile(file: File): Promise<WorkflowFileInfo> {
+export function uploadWorkflowFile(
+  file: File,
+): Promise<WorkflowFileUpload> {
   const formData = new FormData();
   formData.append('file', file);
-  return requestClient.post<WorkflowFileInfo>(
+  return requestClient.post<WorkflowFileUpload>(
     `${BASE_URL}/workflow-files/upload`,
     formData,
     {
@@ -435,14 +448,14 @@ export function uploadWorkflowFile(file: File): Promise<WorkflowFileInfo> {
 }
 
 /**
- * 批量上传工作流文件
+ * 批量上传文件（逐项返回成败，不会因为一个失败丢掉整批）
  */
 export function uploadWorkflowFiles(
   files: File[],
-): Promise<WorkflowFileInfo[]> {
+): Promise<WorkflowFileUpload[]> {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
-  return requestClient.post<WorkflowFileInfo[]>(
+  return requestClient.post<WorkflowFileUpload[]>(
     `${BASE_URL}/workflow-files/upload-batch`,
     formData,
     {
@@ -452,19 +465,30 @@ export function uploadWorkflowFiles(
 }
 
 /**
- * 获取文件信息
+ * 匿名下载地址（已在网关白名单内，可直接用于 a[href] / window.open）
  */
-export function getWorkflowFileInfo(fileId: string) {
-  return requestClient.get<WorkflowFileInfo>(
-    `${BASE_URL}/workflow-files/${fileId}`,
+export function getWorkflowFileDownloadUrl(fileName: string): string {
+  return resolveApiUrl(
+    `${BASE_URL}/workflow-files/download/${encodeURIComponent(fileName)}`,
+  );
+}
+
+/**
+ * 判断文件是否存在（过期视为不存在）
+ */
+export function existsWorkflowFile(fileName: string) {
+  return requestClient.get<boolean>(
+    `${BASE_URL}/workflow-files/exists/${encodeURIComponent(fileName)}`,
   );
 }
 
 /**
  * 删除工作流文件
  */
-export function deleteWorkflowFile(fileId: string) {
-  return requestClient.delete<void>(`${BASE_URL}/workflow-files/${fileId}`);
+export function deleteWorkflowFile(fileName: string) {
+  return requestClient.delete<void>(
+    `${BASE_URL}/workflow-files/${encodeURIComponent(fileName)}`,
+  );
 }
 
 // ==================== 工作流 API Key 管理 ====================

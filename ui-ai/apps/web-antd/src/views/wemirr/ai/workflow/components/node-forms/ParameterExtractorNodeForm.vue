@@ -25,26 +25,8 @@
         placeholder="描述要提取的参数和提取规则，帮助模型更准确地提取"
         @change="handleChange"
       />
-    </a-form-item>
-
-    <a-form-item label="推理模式">
-      <a-radio-group
-        v-model:value="formData.inferenceMode"
-        @change="handleChange"
-      >
-        <a-radio-button value="FUNCTION_CALL">
-          <ApiOutlined /> Function Call
-        </a-radio-button>
-        <a-radio-button value="PROMPT_BASED">
-          <FileTextOutlined /> Prompt 模式
-        </a-radio-button>
-      </a-radio-group>
       <div class="form-hint">
-        {{
-          formData.inferenceMode === 'FUNCTION_CALL'
-            ? 'Function Call 模式使用模型的函数调用能力，提取更精确'
-            : 'Prompt 模式通过提示词引导模型提取，适用范围更广'
-        }}
+        固定以 Prompt 方式提取：提示词里带上参数 schema，并约束模型输出 JSON
       </div>
     </a-form-item>
 
@@ -138,45 +120,13 @@
       每个参数将作为独立的输出变量，可在下游节点中引用
     </div>
 
-    <!-- Memory 配置 -->
-    <a-divider orientation="left" style=" margin: 16px 0 12px;font-size: 12px">
-      高级设置
-    </a-divider>
-
-    <a-form-item>
-      <template #label>
-        <span>
-          启用记忆
-          <a-tooltip title="启用后保持对话历史，适用于多轮提取场景">
-            <QuestionCircleOutlined style="margin-left: 4px; color: #8c8c8c" />
-          </a-tooltip>
-        </span>
-      </template>
-      <a-switch
-        v-model:checked="formData.memoryEnabled"
-        @change="handleChange"
-      />
-    </a-form-item>
-
-    <template v-if="formData.memoryEnabled">
-      <a-form-item label="记忆窗口大小">
-        <a-input-number
-          v-model:value="formData.memoryWindowSize"
-          :min="1"
-          :max="50"
-          placeholder="默认: 10"
-          style="width: 100%"
-          @change="handleChange"
-        />
-        <div class="form-hint">保留最近的对话轮数</div>
-      </a-form-item>
-    </template>
-
+    <!-- 说明：平台无会话级存储，不提供“对话记忆”配置（后端也不读该字段） -->
     <a-alert type="info" show-icon style="margin-top: 16px">
       <template #message>
         <span style="font-size: 12px">
           提取结果将包含内置状态变量：<code>__is_success</code>（是否成功）和
-          <code>__reason</code>（失败原因）
+          <code>__reason</code>（失败原因）；提取未成功时节点不报错，可在下游用
+          <code>__is_success</code> 做条件分支
         </span>
       </template>
     </a-alert>
@@ -192,18 +142,14 @@
 import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
 import type {
   ExtractParameter,
-  InferenceMode,
   ParameterExtractorConfig,
   ParameterType,
 } from '#/api/ai-workflow/types';
 
 import {
-  ApiOutlined,
   DeleteOutlined,
-  FileTextOutlined,
   HolderOutlined,
   PlusOutlined,
-  QuestionCircleOutlined,
 } from '@ant-design/icons-vue';
 import { reactive, watch } from 'vue';
 import draggable from 'vuedraggable';
@@ -241,9 +187,6 @@ const formData = reactive<ParameterExtractorConfig>({
   inputVariable: '',
   instructions: '',
   parameters: [...defaultParameters],
-  inferenceMode: 'FUNCTION_CALL' as InferenceMode,
-  memoryEnabled: false,
-  memoryWindowSize: 10,
 });
 
 // 监听配置变化
@@ -259,9 +202,6 @@ watch(
         config.parameters && config.parameters.length > 0
           ? config.parameters.map((p) => ({ ...p }))
           : [...defaultParameters],
-      inferenceMode: config.inferenceMode || 'FUNCTION_CALL',
-      memoryEnabled: config.memoryEnabled ?? false,
-      memoryWindowSize: config.memoryWindowSize ?? 10,
     });
   },
   { immediate: true, deep: true },
@@ -296,11 +236,6 @@ function handleChange() {
     parameters: formData.parameters?.filter(
       (p: ExtractParameter) => p.name && p.type,
     ),
-    inferenceMode: formData.inferenceMode,
-    memoryEnabled: formData.memoryEnabled,
-    memoryWindowSize: formData.memoryEnabled
-      ? formData.memoryWindowSize
-      : undefined,
   };
   emit('update:config', config);
 }
@@ -329,10 +264,6 @@ function handleChange() {
 
   :deep(.ant-divider-inner-text) {
     color: #8c8c8c;
-  }
-
-  :deep(.ant-radio-button-wrapper) {
-    font-size: 12px;
   }
 
   .parameters-section {

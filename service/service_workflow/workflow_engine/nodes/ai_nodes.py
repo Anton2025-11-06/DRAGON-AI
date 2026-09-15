@@ -17,12 +17,13 @@ from common.common_constants.model_constant import (
 )
 from common.common_model import entry as cm_entry
 from common.common_model.base import ModelResult
+from common.common_log.log_init import log
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.model_client import (
     ChatMessage, WorkflowModelClient,
 )
 from service.service_workflow.workflow_engine.nodes.base import (
-    BaseNodeExecutor, NodeExecutionError, NodeResult, issue,
+    BaseNodeExecutor, NodeExecutionError, NodeResult, file_url, issue,
 )
 
 
@@ -32,8 +33,13 @@ class LLMNodeExecutor(BaseNodeExecutor):
     - 依据所选模型登记的 category（12 类之一）+ provider，交给对应 common_model 实现；
     - 上游输入：文本(prompt/消息)、图片(imageVariable)、音频(audioVariable)、视频(videoVariable)、
       向量输入(inputVariable)、重排(queryVariable/documentsVariable) —— 均支持 {{节点.变量}} 引用；
+    - 对话类可选 Vision（visionEnabled + imageVariables → user 消息拼多模态 content，
+      每项按 _ref_list 解析：变量引用/文件数组/直接 URL）；
+      平台无会话级存储，因此不提供“对话记忆”能力（节点不配 memoryEnabled）；
     - 下游输出：文本类产出 text、向量类产出 vectors/dimension、重排产出 scores、
       生成类产出 url/urls，供下游节点参数引用。
+    - 模型调用参数（温度/max_tokens 等）在 12 类上都不占节点字段：全部来自模型管理
+      「常用参数」（tb_model.model_params）+ 节点 params 覆盖，合并后由 common_model 注入；
     - 支持 stream 的三类（文生文/图片理解/视频理解）流式逐 token 发 node.delta。
     """
 
@@ -47,6 +53,21 @@ class LLMNodeExecutor(BaseNodeExecutor):
         category = client.config.category
         provider = client.config.provider
         output_var = cfg.get("outputVariable") or "output"
+        # 模型能力位归一（模型管理登记的 supports_stream / supports_thinking）：
+        # 能力未开启时，即使历史图数据里还残留这两个字段也不向厂商下发，
+        # 与前端「未展示即未写入」保持同一口径。直接改写运行时 config 是因为
+        # 引擎据此决定 node.completed 是否携带完整输出，若仅在执行器内降级，
+        # 节点会「未 emit 过 delta 却被当作已流式」而丢输出。
+        stream_capable_model = bool(getattr(client.config, "supports_stream", False))
+        thinking_capable_model = bool(getattr(client.config, "supports_thinking", False))
+        if cfg.get("streaming") and not stream_capable_model:
+            log.info("[LLM] 节点「{}」配了流式但模型 {} 未开启 supports_stream，按非流式执行",
+                     self.node.label, client.config.model_name)
+            cfg["streaming"] = False
+        if cfg.get("thinking") and not thinking_capable_model:
+            log.info("[LLM] 节点「{}」配了思考但模型 {} 未开启 supports_thinking，不下发思考入参",
+                     self.node.label, client.config.model_name)
+            cfg["thinking"] = False
 
         # 动态发现校验：该 (类型, 供应商) 是否有 common_model 实现（不硬编码）
         if not cm_entry.supports(category, provider):
@@ -56,21 +77,23 @@ class LLMNodeExecutor(BaseNodeExecutor):
         self._merge_node_params(client, cfg.get("params"))
         _, inst = client.acall(category)
 
-        # 文生文走对话族（保留 system/记忆/上下文/结构化输出等完整能力）
+        # 文生文走对话族（保留 system/上下文/结构化输出等完整能力）
         if category == MT_TEXT_TO_TEXT:
             return await self._run_text_to_text(ctx, inst, output_var)
 
         # 其余 11 类：按类型翻译入参 → 类型化调用 → 映射产出
         kwargs = self._build_kwargs(ctx, category)
-        streaming = bool(cfg.get("streaming", True)) and category in MODEL_TYPES_STREAMABLE
+        streaming = (bool(cfg.get("streaming", False))
+                     and category in MODEL_TYPES_STREAMABLE)
         if streaming:
             full, reasoning, usage = "", "", {}
             async for c in inst.astream(**kwargs):
                 if c.content:
                     full += c.content
-                    await self.emit_delta(c.content)
+                    await self.emit_delta(c.content, reasoning=False)
                 if c.reasoning_content:
                     reasoning += c.reasoning_content
+                    await self.emit_delta(c.reasoning_content, reasoning=True)
                 if c.usage:
                     usage = c.usage
             r = ModelResult(content=full, reasoning_content=reasoning, usage=usage)
@@ -81,9 +104,7 @@ class LLMNodeExecutor(BaseNodeExecutor):
             self.runtime.bump_usage(r.usage.get("prompt_tokens", 0),
                                     r.usage.get("completion_tokens", 0))
         output = self._map_output(category, r, output_var)
-        stream_text = r.content if category in (
-            MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_AUDIO_TO_TEXT) else None
-        return NodeResult(output=output, stream_text=stream_text)
+        return NodeResult(output=output)
 
     @staticmethod
     def _merge_node_params(client, params) -> None:
@@ -95,7 +116,8 @@ class LLMNodeExecutor(BaseNodeExecutor):
             return
         node_params: dict = {}
         if isinstance(params, dict):
-            node_params = {k: v for k, v in params.items() if k}
+            node_params = {k: v for k, v in params.items()
+                           if k and v is not None and v != ""}
         elif isinstance(params, (list, tuple)):
             for row in params:
                 if not isinstance(row, dict):
@@ -103,7 +125,11 @@ class LLMNodeExecutor(BaseNodeExecutor):
                 name = (row.get("name") or "").strip() if isinstance(row.get("name"), str) else row.get("name")
                 if not name:
                     continue
-                node_params[name] = row.get("value")
+                value = row.get("value")
+                # 行未填值：视为「不覆盖」，不能拿空值把模型登记的常用参数打成 null
+                if value is None or value == "":
+                    continue
+                node_params[name] = value
         if not node_params:
             return
         client.config.model_params = {**(client.config.model_params or {}), **node_params}
@@ -111,13 +137,10 @@ class LLMNodeExecutor(BaseNodeExecutor):
     # ---------- 文生文（对话族，功能最全） ----------
 
     async def _run_text_to_text(self, ctx, inst, output_var) -> NodeResult:
+        """对话族执行；流式/思考入参已经过能力位归一（见 execute）。"""
         cfg = self.config
         messages = [m.to_openai() for m in self._build_messages(ctx)]
         kwargs: dict = {"messages": messages}
-        if cfg.get("temperature") is not None:
-            kwargs["temperature"] = float(cfg["temperature"])
-        if cfg.get("maxTokens"):
-            kwargs["max_tokens"] = int(cfg["maxTokens"])
         if cfg.get("thinking"):
             kwargs["thinking"] = True
         so = cfg.get("structuredOutput") or {}
@@ -129,15 +152,16 @@ class LLMNodeExecutor(BaseNodeExecutor):
                     "json_schema": {"name": "output", "schema": schema,
                                     "strict": bool(so.get("strictMode", False))},
                 }
-        streaming = bool(cfg.get("streaming", True))
+        streaming = bool(cfg.get("streaming", False))
         full_text, reasoning, usage = "", "", {}
         if streaming:
             async for chunk in inst.astream(**kwargs):
                 if chunk.content:
                     full_text += chunk.content
-                    await self.emit_delta(chunk.content)
+                    await self.emit_delta(chunk.content, reasoning=False)
                 if chunk.reasoning_content:
                     reasoning += chunk.reasoning_content
+                    await self.emit_delta(chunk.reasoning_content, reasoning=True)
                 if chunk.usage:
                     usage = chunk.usage
         else:
@@ -157,7 +181,7 @@ class LLMNodeExecutor(BaseNodeExecutor):
                 output["structured"] = json.loads(full_text)
             except (json.JSONDecodeError, TypeError):
                 output["structured"] = None
-        return NodeResult(output=output, stream_text=full_text)
+        return NodeResult(output=output)
 
     # ---------- 按类型翻译入参（解析上游变量引用，兼容直接贴 URL/文本） ----------
 
@@ -174,20 +198,19 @@ class LLMNodeExecutor(BaseNodeExecutor):
         return val if val is not None else s
 
     def _ref_list(self, ctx, ref) -> list:
-        """列表解析：引用/字面量归一为字符串数组（图片 URL 列表用）。"""
+        """列表解析：引用/字面量归一为字符串数组（图片 URL 列表用）。
+
+        元素为开始节点文件参数（上传返回对象）时取其 url，与文档提取器口径一致。
+        """
         v = self._ref(ctx, ref)
         if v is None:
             return []
-        if isinstance(v, (list, tuple)):
-            return [str(x) for x in v if x]
-        return [str(v)]
+        items = v if isinstance(v, (list, tuple)) else [v]
+        return [u for u in (file_url(x) for x in items) if u]
 
     def _ref_one(self, ctx, ref):
-        """单值媒体引用：若解析为列表（如上游 urls）取首个，归一为字符串 URL。"""
-        v = self._ref(ctx, ref)
-        if isinstance(v, (list, tuple)):
-            v = v[0] if v else None
-        return str(v) if v is not None else None
+        """单值媒体引用：若解析为列表（如上游 urls）取首个，文件对象取其 url。"""
+        return file_url(self._ref(ctx, ref))
 
     def _text(self, ctx, key) -> str:
         """取渲染后的提示词模板（promptTemplate）。"""
@@ -246,20 +269,16 @@ class LLMNodeExecutor(BaseNodeExecutor):
                 kw["size"] = cfg.get("size")
         elif category == MT_TEXT_TO_AUDIO:
             kw["text"] = self._text(ctx, "promptTemplate") or \
-                ("" if self._ref(ctx, cfg.get("inputVariable")) is None
-                 else str(self._ref(ctx, cfg.get("inputVariable"))))
+                         ("" if self._ref(ctx, cfg.get("inputVariable")) is None
+                          else str(self._ref(ctx, cfg.get("inputVariable"))))
             if cfg.get("voice"):
                 kw["voice"] = cfg.get("voice")
         elif category == MT_AUDIO_TO_TEXT:
             kw["audio_url"] = self._ref_one(ctx, cfg.get("audioVariable"))
         if category in MODEL_TYPES_STREAMABLE and cfg.get("thinking"):
             kw["thinking"] = True
-        # 生成/理解类透传采样参数（仅对话族有意义）
-        if category in (MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR):
-            if cfg.get("temperature") is not None:
-                kw["temperature"] = float(cfg["temperature"])
-            if cfg.get("maxTokens"):
-                kw["max_tokens"] = int(cfg["maxTokens"])
+        # 不再从节点 config 透传 temperature/maxTokens（含理解族）：
+        # 调用参数统一走 model_params（模型管理常用参数 + 节点 params）
         # 剔除 None/空列表，避免覆盖 common_model 内部默认
         return {k: v for k, v in kw.items()
                 if v is not None and not (isinstance(v, (list, str)) and len(v) == 0)}
@@ -328,22 +347,19 @@ class LLMNodeExecutor(BaseNodeExecutor):
                                           content=messages[0].content + "\n\n" + ctx_block)
             else:
                 messages.insert(0, ChatMessage(role="system", content=ctx_block))
-        # 记忆（一期：inputs 携带 conversation 数组）
-        if self.cfg("memoryEnabled"):
-            history = ctx.inputs.get("conversation") or []
-            for h in history[-int(self.cfg("memoryWindowSize") or 10):]:
-                if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
-                    messages.append(ChatMessage(role=h["role"], content=str(h.get("content", ""))))
         # 用户提示词
         prompt = self.cfg("promptTemplate") or ""
         content = ctx.render(prompt) if prompt else ""
         # Vision：多模态 content
         if self.cfg("visionEnabled") and self.cfg("imageVariables"):
             parts = [{"type": "text", "text": content or ""}]
-            for ref in self.cfg("imageVariables"):
-                url = ctx.resolve(str(ref or ""))
-                if url:
-                    parts.append({"type": "image_url", "image_url": {"url": str(url)}})
+            refs = self.cfg("imageVariables")
+            if isinstance(refs, str):
+                refs = [refs]
+            for ref in refs:
+                # 每张图可来自：文件变量（含 FILE_LIST 数组）、上游 urls 数组、直接贴的 URL
+                for url in self._ref_list(ctx, ref):
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
             messages.append(ChatMessage(role="user", content=parts))
         else:
             messages.append(ChatMessage(role="user", content=content))
@@ -404,7 +420,7 @@ class QuestionClassifierNodeExecutor(BaseNodeExecutor):
 
         result = await client.chat(prompt=prompt, temperature=0.0)
         self.runtime.bump_usage(result.usage.get("prompt_tokens", 0),
-                                 result.usage.get("completion_tokens", 0))
+                                result.usage.get("completion_tokens", 0))
         matched_id = self._match_category(result.content, categories)
         matched = next((c for c in categories if str(c.get("id")) == matched_id), None)
         if matched is None:
@@ -472,7 +488,12 @@ class QuestionClassifierNodeExecutor(BaseNodeExecutor):
 
 class ParameterExtractorNodeExecutor(BaseNodeExecutor):
     """PARAMETER_EXTRACTOR（对照 MaxKB parameter-extraction-node）：
-    LLM + JSON schema 约束 → 从文本提取结构化参数。"""
+    LLM + JSON schema 约束 → 从文本提取结构化参数。
+
+    除各提取参数外，输出固定附带两个内置状态变量（与前端表单说明、变量选择器口径一致）：
+    __is_success（是否提取成功）、__reason（失败原因，成功时为空串）。
+    提取失败不抛异常中断流程，交给下游用这两个变量分支处理；
+    固定走 prompt 方式（response_format=json_object），不提供 function-call 通道。"""
 
     node_type = "PARAMETER_EXTRACTOR"
 
@@ -504,31 +525,44 @@ class ParameterExtractorNodeExecutor(BaseNodeExecutor):
 
         instructions = cfg.get("instructions") or "从文本中提取结构化参数。"
         prompt = (
-            f"{instructions}\n\n待提取文本：\n{input_text}\n\n"
-            f"严格输出 JSON 对象，字段：{json.dumps(properties, ensure_ascii=False)}"
-            + (f"，必填字段：{required}" if required else ""))
+                f"{instructions}\n\n待提取文本：\n{input_text}\n\n"
+                f"严格输出 JSON 对象，字段：{json.dumps(properties, ensure_ascii=False)}"
+                + (f"，必填字段：{required}" if required else ""))
 
         result = await client.chat(
             prompt=prompt, temperature=0.0,
             response_format={"type": "json_object"},
         )
         self.runtime.bump_usage(result.usage.get("prompt_tokens", 0),
-                                 result.usage.get("completion_tokens", 0))
+                                result.usage.get("completion_tokens", 0))
+        # 解析/校验失败只置失败原因，不让节点报错（契约：__is_success + __reason）
         try:
-            parsed = json.loads(result.content)
+            parsed = json.loads(result.content or "")
             if not isinstance(parsed, dict):
                 raise ValueError("输出不是 JSON 对象")
         except (json.JSONDecodeError, ValueError) as e:
-            raise ValueError(f"参数提取输出解析失败: {e}; 原文: {result.content[:200]}") from e
+            parsed = {}
+            reason = f"输出解析失败: {e}; 原文: {(result.content or '')[:200]}"
+        else:
+            reason = ""
 
-        # 类型修正 + 必填校验
+        # 类型修正 + 必填校验（缺必填同样只记原因）
         output = {}
+        missing = []
         for p in parameters:
             name = p["name"]
             value = parsed.get(name)
             output[name] = self._fix_type(value, p.get("type", "string"))
             if p.get("required") and output[name] is None:
-                raise ValueError(f"必填参数缺失: {name}")
+                missing.append(name)
+        if missing:
+            reason = ((reason + "; ") if reason else "") + \
+                     "必填参数缺失: " + ", ".join(missing)
+        output["__is_success"] = not reason
+        output["__reason"] = reason
+        if reason:
+            log.info("[PARAMETER_EXTRACTOR] 节点「{}」提取未成功: {}",
+                     self.node.label, reason)
         return NodeResult(output=output)
 
     @staticmethod

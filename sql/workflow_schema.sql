@@ -131,15 +131,6 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
   KEY `idx_wfak_wf` (`workflow_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='工作流API Key表';
 
--- 7. 工作流临时文件表（DOC_EXTRACTOR / Vision 输入用）
-CREATE TABLE IF NOT EXISTS `tb_workflow_file` (
-  `file_id`      VARCHAR(64)  NOT NULL COMMENT '文件ID',
-  `name`         VARCHAR(256) NOT NULL COMMENT '原始文件名',
-  `size`         BIGINT       NOT NULL DEFAULT 0 COMMENT '文件大小(字节)',
-  `content_type` VARCHAR(128)          DEFAULT NULL COMMENT 'MIME 类型',
-  -- 本地存储路径 / 对象存储 key
-  `storage_path` VARCHAR(500) NOT NULL COMMENT '存储路径',
-  `user_id`      INT          NOT NULL DEFAULT 0 COMMENT '上传人',
-  `create_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
-  PRIMARY KEY (`file_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='工作流临时文件表';
+-- 7. 工作流临时文件表已下线：文件由 common.common_storage 统一管理，
+--    文件名（{uuid}_{原始名}）即唯一标识，不再做 DB 映射。
+--    存量库可手动清理：DROP TABLE IF EXISTS `tb_workflow_file`;

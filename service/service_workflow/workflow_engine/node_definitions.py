@@ -106,28 +106,29 @@ def build_node_definitions() -> list[dict]:
             _field("inputVariable", "输入变量", "VariableSelect", "string", False,
                    "", "文本向量/图生文等单值输入（可引用上游文本/数组）"),
             _field("imageVariable", "图片输入", "VariableSelect", "string", False,
-                   "", "图片理解/OCR/图片向量/图生视频的图片来源（引用上游 url 或贴 URL）"),
+                   "", "图片理解/OCR/图片向量/图生视频的图片来源（引用上游 url、开始节点文件参数或直接贴 URL）"),
             _field("audioVariable", "音频输入", "VariableSelect", "string", False,
-                   "", "音频转文字的音频来源"),
+                   "", "音频转文字的音频来源（开始节点文件参数取其上传 url）"),
             _field("videoVariable", "视频输入", "VariableSelect", "string", False,
-                   "", "视频理解的视频来源"),
+                   "", "视频理解的视频来源（开始节点文件参数取其上传 url）"),
             _field("queryVariable", "重排查询", "VariableSelect", "string", False,
                    "", "文本重排的 query"),
             _field("documentsVariable", "重排文档", "VariableSelect", "string", False,
                    "", "文本重排的候选文档数组"),
-            _field("temperature", "温度", "Slider", "number", False, 0.7,
-                   rules=[{"type": "min", "value": 0, "message": "最小 0"},
-                          {"type": "max", "value": 2, "message": "最大 2"}]),
-            _field("maxTokens", "最大Token", "InputNumber", "number", False, 2048),
-            _field("streaming", "流式输出", "Switch", "boolean", False, True,
-                   "", "仅文生文/图片理解/视频理解生效"),
+            # 温度/maxTokens 等模型调用参数不列为节点字段（12 类能力一致）：
+            # 统一走「常用参数」config.params（默认取模型管理登记值），
+            # 运行时由 LLMNodeExecutor._merge_node_params 合并进 model_params 透传厂商。
+            # 流式/思考由模型能力位裁定（supports_stream/supports_thinking），能力未开启时表单不展示也不写入
+            _field("streaming", "流式输出", "Switch", "boolean", False, None,
+                   "", "仅文生文/图片理解/视频理解且模型管理开启 supports_stream 时生效"),
+            _field("thinking", "深度思考", "Switch", "boolean", False, None,
+                   "", "仅文生文/图片理解/视频理解且模型管理开启 supports_thinking 时生效"),
             _field("visionEnabled", "图像理解(对话)", "Switch", "boolean", False, False),
-            _field("memoryEnabled", "对话记忆", "Switch", "boolean", False, False),
             _field("structuredOutput", "结构化输出", "StructuredOutputForm", "object", False,
                    {"enabled": False}),
         ],
-        default_config={"temperature": 0.7, "maxTokens": 2048, "streaming": True,
-                        "outputVariable": "output"},
+        # 默认只给输出变量名：调用参数与流式都不预置，避免把模型未开启的参数存进图
+        default_config={"outputVariable": "output"},
     ))
     defs.append(_def(
         "QUESTION_CLASSIFIER", "问题分类器", "LLM 智能分类并路由到不同分支", "ai", "BranchesOutlined", "#722ed1",
@@ -151,7 +152,8 @@ def build_node_definitions() -> list[dict]:
         "PARAMETER_EXTRACTOR", "参数提取器", "LLM 从文本中提取结构化参数", "ai", "FilterOutlined", "#13c2c2",
         form_component="ParameterExtractorForm",
         required_fields=["modelId", "parameters"],
-        output_variables=["每个提取参数"],
+        # 另附带内置状态变量 __is_success / __reason（执行器始终写入，提取失败也不报错）
+        output_variables=["每个提取参数", "__is_success", "__reason"],
         fields=[
             _field("modelId", "提取模型", "ModelSelect", "number", True),
             _field("inputVariable", "输入变量", "VariableSelect", "string", True),
@@ -159,7 +161,9 @@ def build_node_definitions() -> list[dict]:
                    "从文本中提取结构化参数。"),
             _field("parameters", "参数列表", "ExtractParameterList", "array", True, []),
         ],
-        default_config={"parameters": [], "inferenceMode": "PROMPT_BASED"},
+        # 提取固定走 prompt 方式（后端拼 JSON schema 提示 + response_format=json_object），
+        # 不再提供 inferenceMode 选项：模型未登记的 function-call 通道无法保证可用
+        default_config={"parameters": []},
     ))
     defs.append(_def(
         "AGENT", "智能体", "调用平台已配置的智能体完成复杂任务", "ai", "UserSwitchOutlined", "#eb2f96",
@@ -309,7 +313,8 @@ def build_node_definitions() -> list[dict]:
         required_fields=["fileVariable"],
         output_variables=["content", "metadata"],
         fields=[
-            _field("fileVariable", "文件变量", "VariableSelect", "string", True),
+            _field("fileVariable", "文件变量", "VariableSelect", "string", True,
+                   None, "", "引用开始节点的文件参数（按上传接口返回的 url 拉取后内存解析，不再支持本地路径）"),
             _field("extractMetadata", "提取元数据", "Switch", "boolean", False, False),
         ],
     ))

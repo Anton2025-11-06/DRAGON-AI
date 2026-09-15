@@ -25,6 +25,11 @@ class ModelConfig:
     api_key: str = ""
     model_params: dict = field(default_factory=dict)
     status: int = 1
+    # 模型管理登记的模型能力位（tb_model.supports_stream / supports_thinking）：
+    # 与 BaseModel.supports_stream（该能力类型是否可流式）不同，这里表示该模型是否
+    # 真开启流式/思考；上层引擎据此决定是否向厂商下发流式/思考入参，未登记不外发。
+    supports_stream: bool = False
+    supports_thinking: bool = False
 
 
 @dataclass

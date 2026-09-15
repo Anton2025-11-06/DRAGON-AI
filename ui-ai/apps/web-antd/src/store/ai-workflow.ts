@@ -76,6 +76,8 @@ export interface NodeExecutionState {
   duration?: number;
   /** 流式内容（模型节点） */
   streamingContent?: string;
+  /** 流式思维链内容（reasoning 增量，与正文分开累加） */
+  streamingReasoning?: string;
 }
 
 /**
@@ -206,8 +208,13 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       if (!executionState.value) return;
       const nodeState = executionState.value.nodeStates.get(data.nodeId);
       if (nodeState) {
-        nodeState.streamingContent =
-          (nodeState.streamingContent || '') + data.token;
+        if (data.reasoning) {
+          nodeState.streamingReasoning =
+            (nodeState.streamingReasoning || '') + data.token;
+        } else {
+          nodeState.streamingContent =
+            (nodeState.streamingContent || '') + data.token;
+        }
       }
     },
     onBreakpointHit: (data) => {

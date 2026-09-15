@@ -101,10 +101,12 @@ function handleChange() {
       <VariableInput
         v-model="formData.fileVariable"
         :current-node-id="nodeId"
-        placeholder="选择或输入文件变量"
+        placeholder="选择开始节点的文件参数"
         @change="handleChange"
       />
-      <div class="form-hint">输入包含文件的变量引用</div>
+      <div class="form-hint">
+        引用开始节点的文件类型参数（后端按其上传后返回的 url 下载并解析）
+      </div>
     </a-form-item>
 
     <!-- 支持的文档类型 -->

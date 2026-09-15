@@ -46,7 +46,7 @@ ready to be enabled as the roadmap proceeds.
                  │ arq workers (shards) │
                  └──────────────────────┘
 ┌──────────────────────────────────────────────────────────────┐
-│ Infra: Nacos · MySQL · Redis · optional MinIO/object storage │
+│ Infra: Nacos · MySQL · Redis · optional Aliyun OSS storage   │
 │        · in-network OpenAI-compatible inference endpoints     │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -90,11 +90,15 @@ ready to be enabled as the roadmap proceeds.
 
 ### Unified Storage Abstraction (`common/common_storage`)
 - `StorageBackend` abstraction with two implementations: **local directory** and
-  **S3-compatible object storage** (MinIO / Ceph / OSS)
-- Switched via Nacos `storage:` config or env vars (`STORAGE_BACKEND`, `MINIO_*`),
+  **Aliyun OSS** (official Python SDK V2 async client `aio.AsyncClient`)
+- Switched via Nacos `storage:` config or env vars (`STORAGE_BACKEND`, `OSS_*`),
   transparent to business code
-- Local by default (`data/workflow_files`); S3 never fails silently — a bad S3 config aborts
-  startup instead of writing to the wrong place
+- Local by default (`data/workflow_files`); a bad OSS config aborts startup instead of
+  silently writing to the wrong place
+- **Diskless**: backends only move bytes (`save_bytes` / `read_bytes` / `presigned_url`) —
+  there is no "give me a local file path" call, and document parsing happens in memory
+  (`service_workflow/utils/file_utils`; only the LibreOffice conversion path touches a
+  temp file, removed in `finally`)
 
 ## Refactoring (legacy implementation still running)
 
@@ -118,7 +122,7 @@ ready to be enabled as the roadmap proceeds.
 | Registry/Config | Nacos (nacos-sdk-python) |
 | Data | MySQL 8.x + Redis 7.x (sessions / rate-limit counters / config cache) |
 | Async tasks | arq 0.28 (Redis queues, sharded queues for horizontal worker scaling) |
-| Object storage | minio SDK (S3-compatible: MinIO / Ceph / OSS, optional) |
+| Object storage | Aliyun OSS (`alibabacloud-oss-v2` official SDK V2 + aiohttp async client) |
 | Vector search | Milvus client layer ready (`common_milvus`); KB service planned |
 | HTTP | httpx global connection pool |
 | Logging | loguru + custom trace-id correlation |
@@ -130,8 +134,7 @@ ready to be enabled as the roadmap proceeds.
 ```
 ├── common/                     # shared layer (all services)
 │   ├── common_app/             #   FastAPI bootstrap factory (lifespan / middleware assembly)
-│   ├── common_storage/         #   unified storage abstraction (StorageBackend: local / S3)
-│   ├── common_file/            #   document text extraction (11 formats) + DTO (FileUtils)
+│   ├── common_storage/         #   unified storage abstraction (StorageBackend: local / OSS)
 │   ├── common_middleware/      #   RequestLog / TokenCheck / RateLimit / OperateLog
 │   ├── common_nacos/           #   Nacos discovery & config pull
 │   ├── common_redis/           #   async Redis client
@@ -145,7 +148,7 @@ ready to be enabled as the roadmap proceeds.
 │   ├── service_system/         #   system mgmt + model square :9001 (done)
 │   ├── service_login/          #   login/registration :9004 (done)
 │   ├── service_gateway/        #   gateway :18000 (framework done; AI forwarding refactoring)
-│   ├── service_workflow/       #   workflow orchestration :9003 (done)
+│   ├── service_workflow/       #   workflow orchestration :9003 (done; utils/file_utils parses docs)
 │   ├── service_rag/            #   knowledge base :9002 (skeleton, planned)
 │   ├── service_datasets|train|inference|eval_model|notebook/  # skeletons, planned
 ├── arq_tasks/                  # arq workers: settings + workflow tasks + multi-process launcher
@@ -164,7 +167,7 @@ ready to be enabled as the roadmap proceeds.
 | Python 3.11+ / Node.js 20+ / pnpm 9+ | backend / frontend |
 | MySQL 8.x / Redis 7.x | business data / sessions & rate limiting |
 | Nacos 2.x | registry + config center (per-service config by data_id = service name) |
-| MinIO etc. | optional (enabled by `storage.type=s3`) |
+| Aliyun OSS | optional (enabled by `storage.type=oss`; needs region + bucket + AK) |
 | OpenAI-compatible endpoint | model-call target (vLLM / DeepSeek / Qwen ...) |
 
 ### Run
@@ -194,7 +197,7 @@ Default account `admin / Admin@123` (please change after first login).
 |---|---|
 | `redis:` | connection (sessions / rate-limit counters / config cache) |
 | `mysql:` | data source (per-service connection pools) |
-| `storage:` | backend: `type: local|s3` + endpoint/access_key/secret_key/bucket/secure (env fallback `STORAGE_BACKEND` / `MINIO_*`) |
+| `storage:` | backend: `type: local|oss` + region/bucket/access_key/secret_key/path_prefix/presign_expires (env fallback `STORAGE_BACKEND` / `OSS_*`) |
 
 ## Testing Status
 

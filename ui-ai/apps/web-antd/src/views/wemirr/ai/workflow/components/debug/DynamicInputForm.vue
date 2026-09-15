@@ -8,6 +8,7 @@ import type { UploadFile } from 'ant-design-vue';
  */
 import type { FormInstance, Rule } from 'ant-design-vue/es/form';
 
+import type { WorkflowFileUpload } from '#/api/ai-workflow';
 import type { InputField } from '#/api/ai-workflow/types';
 
 import { computed, reactive, ref, watch } from 'vue';
@@ -198,6 +199,17 @@ function initDefaultValues(fields: InputField[]) {
   });
 }
 
+/** 上传结果 → 工作流文件变量（下游节点/文档提取器按 url 读取，fileName 用于下载与删除） */
+function toFileVar(info: WorkflowFileUpload) {
+  return {
+    url: info.url,
+    fileName: info.fileName,
+    name: info.name,
+    size: info.size,
+    expiresAt: info.expiresAt,
+  };
+}
+
 /**
  * 获取文件上传接受的类型
  */
@@ -225,12 +237,12 @@ async function handleFileUpload(
   uploadingFields.value[fieldName] = true;
 
   try {
-    // 调用上传 API
+    // 调用上传 API（返回匿名可访问 url + 有效期，文件名即唯一标识）
     const fileInfo = await uploadWorkflowFile(file);
 
     // 更新文件列表缓存
     const uploadFile: UploadFile = {
-      uid: fileInfo.fileId,
+      uid: fileInfo.fileName,
       name: fileInfo.name,
       status: 'done',
       response: fileInfo,
@@ -246,20 +258,14 @@ async function handleFileUpload(
       fileListCache[fieldName] = [uploadFile];
     }
 
-    // 更新表单值（存储 fileId）
+    // 更新表单值：下游节点引用的就是这份数据，url 即文件可访问地址
     if (isMultiple) {
       if (!formValues.value[fieldName]) {
         formValues.value[fieldName] = [];
       }
-      formValues.value[fieldName].push({
-        fileId: fileInfo.fileId,
-        name: fileInfo.name,
-      });
+      formValues.value[fieldName].push(toFileVar(fileInfo));
     } else {
-      formValues.value[fieldName] = {
-        fileId: fileInfo.fileId,
-        name: fileInfo.name,
-      };
+      formValues.value[fieldName] = toFileVar(fileInfo);
     }
 
     onSuccess(fileInfo);
@@ -291,7 +297,7 @@ function handleFileRemove(
   formValues.value[fieldName] =
     isMultiple && Array.isArray(formValues.value[fieldName])
       ? formValues.value[fieldName].filter(
-          (f: { fileId: string }) => f.fileId !== file.uid,
+          (f: { fileName: string }) => f.fileName !== file.uid,
         )
       : undefined;
 
@@ -449,7 +455,7 @@ defineExpose({
           >
             <FileOutlined />
             <span class="file-name">{{ file.name }}</span>
-            <a-tag v-if="file.response?.fileId" color="success" size="small">
+            <a-tag v-if="file.response?.fileName" color="success" size="small">
               已上传
             </a-tag>
             <a-button type="link" size="small" danger @click="actions.remove">
@@ -484,7 +490,7 @@ defineExpose({
           >
             <FileOutlined />
             <span class="file-name">{{ file.name }}</span>
-            <a-tag v-if="file.response?.fileId" color="success" size="small">
+            <a-tag v-if="file.response?.fileName" color="success" size="small">
               已上传
             </a-tag>
             <a-button type="link" size="small" danger @click="actions.remove">

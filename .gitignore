@@ -92,3 +92,6 @@ test/
 
 # ===== Workflow sandbox runtime directory =====
 service/service_workflow/sandbox_root/
+
+# ===== Local scratch: 调研文档/临时自测脚本（仅本机复习用，不入库） =====
+site/

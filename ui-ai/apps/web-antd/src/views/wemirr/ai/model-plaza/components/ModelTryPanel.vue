@@ -8,7 +8,7 @@
  * 设计对齐需求 2.5.1.1~2.5.1.4.2：
  *  - 顶部：支持流消息 / 支持思考模式 开关（仅当模型声明 supports_* 时显示）
  *  - 常用参数：每行 参数名 / 默认值(按 type 控件可改) / 参数说明 / 参数类型
- *  - 输入区：按 category 复用 12 类型字段配置；url 字段旁提供「上传」按钮（调 service_file 回填可下载 URL）
+ *  - 输入区：按 category 复用 12 类型字段配置；url 字段旁提供「上传」按钮（调 workflow-files/upload，回填匿名可访问 URL）
  *  - 产出：{ inputs, stream, thinking, params }
  */
 import type { CommonParam, CommonParamType } from '../api';

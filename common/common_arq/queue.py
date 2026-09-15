@@ -20,8 +20,31 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 
 from common.common_log.log_init import log
 
-# arq 专属 Redis 地址(db=1 为需求约定,与业务 Redis 隔离)
-ARQ_REDIS_URL = "redis://10.88.128.15:26379/0"
+
+class CustomRedisSettings:
+    yml: dict
+
+    @classmethod
+    def get_redis_setting(cls):
+        yml = cls.yml.get("redis", {})
+        settings = RedisSettings.from_dsn(yml.get("url"))
+        if yml.__contains__("password"):
+            settings.password = yml.get("password")
+        settings.max_connections = 100
+        return settings
+
+
+# 全局唯一的生产端实例(懒创建,进程内复用连接池)
+_arq_redis: Optional[ArqRedis] = None
+
+
+async def get_arq_redis() -> ArqRedis:
+    """获取 ArqRedis 生产端(首次调用时建立连接池)。"""
+    global _arq_redis
+    if _arq_redis is None:
+        _arq_redis = await create_pool(CustomRedisSettings.get_redis_setting())
+    return _arq_redis
+
 
 # 切片数配置 key(值 = 切片数,存在即生效;不存在按默认 1):
 #   - system 监控页修改切片数量时 SET 写该 key
@@ -30,7 +53,7 @@ SPLIT_NUMBER_KEY = "workflow_queue:split_number"
 
 # 切片数合法范围(监控页 InputNumber 约束 + 后端校验双保险)
 MIN_SPLIT_NUMBER = 1
-MAX_SPLIT_NUMBER = 32
+MAX_SPLIT_NUMBER = 100
 
 # 队列名常量(分片队列:workflow_queue:split_{N},生产端 enqueue 与消费端 WorkerSettings 共用字符串拼法)
 QUEUE_NAME = "workflow_queue"
@@ -53,23 +76,6 @@ def worker_health_key(queue_name: str) -> str:
     f"{DEFAULT_WORKER_NAME}:{queue_name}:" 即可枚举该队列全部 worker 节点。
     """
     return f"{DEFAULT_WORKER_NAME}:{queue_name}:{WORKER_ID}"
-
-
-# 全局唯一的生产端实例(懒创建,进程内复用连接池)
-_arq_redis: Optional[ArqRedis] = None
-
-
-async def get_arq_redis() -> ArqRedis:
-    """获取 ArqRedis 生产端(首次调用时建立连接池)。"""
-    global _arq_redis
-    if _arq_redis is None:
-        # arq 0.28 的 create_pool 直接返回 ArqRedis 实例(按 RedisSettings 建好连接池),
-        # 不要再包一层 ArqRedis:否则 ArqRedis 对象被当作 connection_pool 透传给 redis-py
-        # 的 Redis.__init__(后者访问 connection_kwargs 时抛 AttributeError)
-        settings = RedisSettings.from_dsn(ARQ_REDIS_URL)
-        # settings.password = "123456"
-        _arq_redis = await create_pool(settings)
-    return _arq_redis
 
 
 async def enqueue_job(function: str,

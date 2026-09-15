@@ -32,8 +32,10 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
     WHITE_LIST_PREFIX = [
         "/internal/",
         "/api/model",
-        # 文件上传/下载（暂不做鉴权，供模型拉取可访问 URL）
-        "/api/file",
+        # 存储后端的匿名下载入口：上传接口返回给大模型的 URL 指向这里（无登录态，
+        # 文件名含 uuid 且受存储层有效期约束；上传/删除仍需登录态，不在此列）
+        "/api/workflow/workflow-files/download",
+        "/api/workflow/workflow-files/upload",
     ]
 
     async def dispatch(self, request: Request, call_next):

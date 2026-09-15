@@ -123,6 +123,9 @@ const currentNodeId = computed(() => debugStore.currentNodeId);
 /** 布局是否为水平 (底部抽屉) */
 const isHorizontalLayout = computed(() => props.layoutMode === 'bottom');
 
+/** 节点详情子面板仅在「节点追踪」Tab 显示，其他 Tab 占满整栏 */
+const showNodeDetail = computed(() => activeTab.value === 'trace');
+
 // ==================== Lifecycle ====================
 
 onMounted(() => {
@@ -497,8 +500,8 @@ defineExpose({
         class="panel-section panel-primary"
         :style="
           isHorizontalLayout
-            ? { width: `${splitSize}%` }
-            : { height: `${splitSize}%` }
+            ? { width: showNodeDetail ? `${splitSize}%` : '100%' }
+            : { height: showNodeDetail ? `${splitSize}%` : '100%' }
         "
       >
         <!-- 标签页导航 -->
@@ -566,7 +569,8 @@ defineExpose({
                       {{ trace.status }}
                     </a-tag>
                   </div>
-                  <div v-if="trace.duration" class="trace-item-meta">
+                  <!-- 0ms 也是有效耗时（轻量节点常 sub-ms），只排除尚未执行的 null -->
+                  <div v-if="trace.duration !== null" class="trace-item-meta">
                     <ClockCircleOutlined />
                     {{ trace.duration }}ms
                   </div>
@@ -695,6 +699,7 @@ defineExpose({
 
       <!-- 分隔条 -->
       <div
+        v-if="showNodeDetail"
         class="panel-splitter"
         :class="{ horizontal: isHorizontalLayout }"
         @mousedown="handleSplitDragStart"
@@ -702,8 +707,9 @@ defineExpose({
         <div class="splitter-handle"></div>
       </div>
 
-      <!-- 右侧/下方区域: 节点详情 -->
+      <!-- 右侧/下方区域: 节点详情（仅节点追踪 Tab 显示） -->
       <div
+        v-if="showNodeDetail"
         class="panel-section panel-secondary"
         :style="
           isHorizontalLayout

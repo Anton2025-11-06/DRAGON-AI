@@ -47,7 +47,8 @@ const visible = computed({
 });
 
 function formatDuration(ms?: number): string {
-  if (!ms) return '-';
+  // 0 是真实耗时（轻量节点常 sub-ms），不能当作缺数据返回 '-'
+  if (ms === null || ms === undefined) return '-';
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${(ms / 60000).toFixed(1)}min`;
@@ -216,7 +217,10 @@ function getNodeStatusText(status?: string): string {
                   <Tag :color="getNodeStatusColor(node.status)" size="small">
                     {{ getNodeStatusText(node.status) }}
                   </Tag>
-                  <span v-if="node.duration" class="node-duration">
+                  <span
+                    v-if="node.duration !== null && node.duration !== undefined"
+                    class="node-duration"
+                  >
                     {{ formatDuration(node.duration) }}
                   </span>
                 </div>

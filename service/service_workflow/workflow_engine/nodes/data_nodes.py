@@ -11,9 +11,10 @@ import re
 from functools import reduce
 from typing import Any, Callable, Optional
 
+from service.service_workflow.utils.file_utils import FileUtils
 from service.service_workflow.workflow_engine.context import ExecutionContext, _dig
 from service.service_workflow.workflow_engine.nodes.base import (
-    BaseNodeExecutor, NodeResult, issue,
+    BaseNodeExecutor, NodeResult, file_url, issue,
 )
 
 
@@ -405,10 +406,11 @@ class ListOperatorNodeExecutor(BaseNodeExecutor):
 class DocExtractorNodeExecutor(BaseNodeExecutor):
     """DOC_EXTRACTOR：文档文本提取（PDF/Word/Excel/PPT/Markdown/HTML 等 11 种格式）。
 
-    按扩展名用 Python 生态库解析：pypdf / python-docx / openpyxl / xlrd /
+    入参是文件 URL（不再支持本地路径）：引用开始节点的 FILE/FILE_LIST 参数或直接贴 URL，
+    值形式统一由 file_url() 归一（上传结果对象/对象数组/字符串都能取到 url）。
+    按扩展名用 Python 生态库内存解析：pypdf / python-docx / openpyxl / xlrd /
     python-pptx / 内置文本读取；老格式 .doc/.ppt 走 LibreOffice headless 转换
-    （未安装时报清晰错误）。不做 OCR 与分页。fileVariable 支持引用
-    （fileId / 本地路径），兼容前端 {{inputs.xx}} 或裸 n_start.xx 写法。
+    （未安装时报清晰错误）。不做 OCR 与分页。
     """
 
     node_type = "DOC_EXTRACTOR"
@@ -416,23 +418,13 @@ class DocExtractorNodeExecutor(BaseNodeExecutor):
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         ref = str(self.cfg("fileVariable") or "")
         # 引用优先：前端 {{inputs.doc}} / 裸 n_start.doc 都兼容（resolve 入口统一剥壳）；
-        # 解析不到时回退字面量原样使用（用户可直接填 fileId / 本地路径）
-        file_ref = ctx.resolve(ref)
-        if file_ref is None:
-            file_ref = ref
-        # 容错：START 文件字段可能存上传返回对象 {fileId,...} 或数组（FILE_LIST），提取 fileId
-        if isinstance(file_ref, dict):
-            file_ref = file_ref.get("fileId") or file_ref.get("id") or file_ref.get("url")
-        elif isinstance(file_ref, list):
-            file_ref = file_ref[0] if file_ref else None
-            if isinstance(file_ref, dict):
-                file_ref = file_ref.get("fileId") or file_ref.get("id") or file_ref.get("url")
-        if not file_ref:
-            raise ValueError(f"文档提取节点未指定文件变量: {ref or '(空)'}")
-        loader = getattr(self.runtime, "file_loader", None)
-        if not callable(loader):
-            raise ValueError("文件服务未接入（file_loader 未注册）")
-        content, metadata = await loader(str(file_ref), self.cfg("supportedTypes"))
+        # 解析不到时回退字面量（用户直接填了上传返回的 URL）
+        url = file_url(ctx.resolve(ref)) or file_url(ref)
+        if not url:
+            raise ValueError(f"文档提取节点未取到文件 URL（变量需为上传接口返回的文件）: {ref or '(空)'}")
+        content, metadata = await FileUtils.extract_from_url(
+            url, supported_types=self.cfg("supportedTypes"),
+            http_client=self.runtime.http_client)
         output_var = self.cfg("outputVariable") or "content"
         # 只输出 outputVariable 一个键（与 REPLY/TEMPLATE 对齐，去掉冗余的 text 别名键）
         output = {output_var: content}

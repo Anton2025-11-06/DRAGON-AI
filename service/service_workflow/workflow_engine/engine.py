@@ -95,7 +95,6 @@ class WorkflowRuntime:
                  breakpoint_conditions: Optional[dict] = None,
                  model_provider=None,
                  http_client=None,
-                 file_loader=None,
                  event_bus: EventBus = None,
                  node_persist_hook=None,
                  state_persist_hook=None,
@@ -118,8 +117,6 @@ class WorkflowRuntime:
         self.bus = event_bus
         self.model_provider = model_provider
         self.http_client = http_client
-        # DOC_EXTRACTOR 文件加载钩子（service 层注入：fileId/本地路径 → (text, metadata)）
-        self.file_loader = file_loader
         self.node_timeout = node_timeout
 
         # 控制状态(需求 5):取消/暂停不通过进程内信号,全部由 DB 状态驱动。
@@ -349,8 +346,6 @@ class WorkflowRuntime:
 
         state.output = result.output
         self.ctx.set_node_output(node.id, result.output)
-        if result.stream_text is not None:
-            state.output = {**result.output, "_streamText": result.stream_text}
         self.ctx.executed.append(node.id)
         self._completed_with_branch[node.id] = result.branch_id  # None → output 端口
 
@@ -361,12 +356,15 @@ class WorkflowRuntime:
                 pass
 
         state.duration = int((time.monotonic() - started) * 1000)
-        # 返回内容开关(画布 data.emitOutput,默认开):开才把节点输出广播给客户端;
-        # 关则跳过 emit(节点数据不推送给客户端),但数据持久化不受影响(下方照常落库)
-        if node.data.get(EMIT_OUTPUT_KEY, True) is not False:
-            await self.emit("node.completed", nodeId=node.id, output=state.output, duration=state.duration)
+        # 输出开关打开: 广播输出
+        if node.data.get(EMIT_OUTPUT_KEY, True) is True:
+            if node.get_config("streaming", False) is False:
+                await self.emit("node.completed", nodeId=node.id, output=state.output, duration=state.duration)
+            else:
+                # 如果开启流式输出，则已经emit了node.delta。 此处无需再次发送流式的完整输出
+                await self.emit("node.completed", nodeId=node.id, duration=state.duration)
         else:
-            # 输出开关关闭:只广播节点完成事件,不广播输出
+            # 输出开关关闭: 只广播节点完成事件,不广播输出
             await self.emit("node.completed", nodeId=node.id, duration=state.duration)
 
         return result

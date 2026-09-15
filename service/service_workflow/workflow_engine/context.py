@@ -25,6 +25,42 @@ class VariableNotFound(Exception):
     """strict 模式下变量引用无法解析"""
 
 
+def file_url(value: Any) -> Optional[str]:
+    """文件变量值 → 可访问 URL。
+
+    开始节点的文件参数存的是上传接口返回的结果（{url,fileName,name,size,expiresAt...}），
+    FILE_LIST 则是该对象的数组；也兼容用户直接填 URL 字符串或上游产出 url 的节点输出。
+    取不到地址返回 None（由调用方决定报错还是跳过）。
+    """
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        value = value.get("url")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def file_urls(value: Any) -> Optional[list[str]]:
+    """文件变量值 → URL 列表（非文件结构返回 None，交由调用方保持原渲染）。
+
+    只对「对象 / 全为带 url 的对象数组」生效：普通文本数组等仍按原样渲染，不静默拼接。
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    if not items:
+        return None
+    urls = []
+    for item in items:
+        if not (isinstance(item, dict) and item.get("url")):
+            return None
+        url = file_url(item)
+        if not url:
+            return None
+        urls.append(url)
+    return urls
+
+
 class ExecutionContext:
     """单次执行的上下文容器（非线程安全；引擎在单 asyncio 任务内串行访问，
     并行分支通过引擎拷贝快照传递只读视图）。"""
@@ -171,6 +207,10 @@ class ExecutionContext:
                     raise VariableNotFound(f"变量引用无法解析: {ref}")
                 return m.group(0) if keep_unresolved else ""  # 保留原占位或渲染为空串
             if isinstance(value, (dict, list)):
+                # 文件变量（上传接口返回对象/对象数组）渲染成 URL，不渲染整个对象
+                urls = file_urls(value)
+                if urls:
+                    return "\n".join(urls)
                 import json
                 return json.dumps(value, ensure_ascii=False)
             return "" if value is None else str(value)

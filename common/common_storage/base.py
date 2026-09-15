@@ -1,13 +1,22 @@
 # -*- coding: utf-8 -*-
-"""统一存储后端抽象基类。
+"""存储后端抽象：只做「按文件名存字节 / 读字节 / 删除 / 判存在 / 给匿名 URL」五件事。
 
-后端实现：
-- LocalStorageBackend：本地目录（common/common_storage/local.py）
-- S3StorageBackend：MinIO / Ceph RGW / 阿里云 OSS 等 S3 兼容对象存储（common/common_storage/s3.py）
+业务侧不要直接用本类，统一用 common.common_storage 的四个入口方法
+（upload / download / delete / exists），本文件只被两个后端和入口实现。
 
-新增存储后端时继承 StorageBackend 并实现全部抽象方法即可（如未来对接
-非 S3 协议的天翼云/腾讯云 COS 等，各自写子类，业务侧无感切换）。
-所有方法均为 async（同步 SDK 调用由子类用 asyncio.to_thread 包装，不阻塞事件循环）。
+契约（新增后端必须遵守）：
+1. **name 是唯一的文件标识**：形如 {32位hex uuid}_{原始文件名}，由 new_file_name() 生成。
+   后端把它落在自己的位置（本地=local_dir 下，OSS=path_prefix 下），业务侧只透传 name，
+   不解析、不拼路径 —— 需要原始展示名时用 original_name(name) 反推。
+2. **全异步**：方法一律 async；SDK 只有同步实现时在后端内部用 asyncio.to_thread 包，
+   不把同步接口泄漏给业务侧。后端**不提供**「取本地路径」的能力（对象存储要为此把对象
+   下到本地缓存，换来缓存失效/磁盘占用/多副本三类新问题）；确实需要文件形态的场景
+   （如 LibreOffice 子进程转换）由调用方自己写临时文件并在 finally 删除。
+3. **错误语义**：load 的「不存在/已过期」→ ValueError；delete / exists 的「不存在」
+   不是错误（返回 False）；未初始化就调用 → RuntimeError（ensure_ready）。
+4. **URL 有效期**：public_url 返回 (url, expires_in 秒)。OSS 是预签名 URL（签名自带有效期），
+   本地后端是业务模块的下载接口地址（由后端按「写入时间 + 有效期」判定，过期即清理）。
+5. close() 进程停机时统一 await，且必须可重复调用；close 后实例视为不可用。
 """
 from __future__ import annotations
 
@@ -16,76 +25,94 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Optional
 
-# 单文件大小上限（各后端统一的业务约束）
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+# 单文件大小上限（上传入口据此校验，先查 UploadFile.size 再校验实际字节数）
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+
+# 后端未配置 url_expires 时的兜底有效期（秒）
+DEFAULT_URL_EXPIRES = 3600
+
+# uuid 前缀长度（new_file_name 用 hex，无连字符）
+_ID_LEN = 32
 
 
 class StorageBackend(ABC):
-    """文件存储后端抽象：上传 / 读取 / 本地路径 / 元信息 / 删除 / 临时访问 URL。"""
+    """文件存储后端抽象。"""
 
-    # 后端标识：local / s3（配置识别与日志用）
+    # 后端标识：local / oss（配置识别与日志用）
     backend_name: str = "base"
 
-    def __init__(self) -> None:
+    def __init__(self, url_expires: int = DEFAULT_URL_EXPIRES) -> None:
         self._enabled = False
-
-    @property
-    def enabled(self) -> bool:
-        """后端是否完成初始化可用（未配置/连接失败时业务侧据此降级或报错）。"""
-        return self._enabled
+        self.url_expires = int(url_expires or DEFAULT_URL_EXPIRES)
 
     # ---------- 子类必须实现 ----------
 
     @abstractmethod
-    async def save_bytes(self, data: bytes, filename: str,
-                         content_type: Optional[str] = None) -> dict:
-        """保存文件字节，返回 {ref, fileId, name, size}。
+    async def save(self, name: str, data: bytes,
+                   content_type: Optional[str] = None) -> None:
+        """按文件名写入字节（同名直接覆盖，正常情况下 name 唯一不会撞）。"""
 
-        fileId：本次保存生成的唯一业务主键（uuid hex，业务侧落库，节点参数引用它）；
-        ref：该后端内的文件引用（本地为绝对路径，对象存储为 object_name），
-        业务侧同时落库，后续读取/删除凭 ref 操作。
+    @abstractmethod
+    async def load(self, name: str) -> bytes:
+        """读文件全部字节（内存直返）；不存在/已过期抛 ValueError。"""
+
+    @abstractmethod
+    async def exists(self, name: str) -> bool:
+        """文件是否存在（已过期视为不存在，不抛异常）。"""
+
+    @abstractmethod
+    async def delete(self, name: str) -> bool:
+        """删除文件；不存在返回 False，成功返回 True（幂等）。"""
+
+    @abstractmethod
+    async def public_url(self, name: str,
+                         base_url: Optional[str] = None) -> tuple[str, int]:
+        """匿名可访问 URL + 有效期（秒）。
+
+        base_url 由调用方按当前请求推导（内网/公网域名运行时才知道），
+        后端自身配置优先；OSS 忽略该参数，直接给预签名地址。
         """
 
-    @abstractmethod
-    async def read_bytes(self, ref: str) -> bytes:
-        """读取文件内容；ref 无效时抛 ValueError。"""
+    # ---------- 基类通用能力 ----------
 
-    @abstractmethod
-    async def get_local_path(self, ref: str) -> Optional[str]:
-        """取本地可读路径（对象存储需下载到本地缓存）；文件不可达返回 None。
-
-        供文本解析等本地 IO 场景（如 FileUtils.load_and_extract）使用。
-        """
-
-    @abstractmethod
-    async def exists(self, ref: str) -> bool:
-        """引用是否存在。"""
-
-    @abstractmethod
-    async def stat(self, ref: str) -> Optional[dict]:
-        """元信息 {name, size, contentType, mtime}；不存在返回 None。"""
-
-    @abstractmethod
-    async def remove(self, ref: str) -> bool:
-        """删除文件；不存在返回 False，成功返回 True。"""
-
-    @abstractmethod
-    async def presigned_url(self, ref: str, expires: int = 3600) -> Optional[str]:
-        """临时访问 URL（对象存储支持）；后端不支持时返回 None。"""
-
-    # ---------- 基类通用工具 ----------
-
-    @staticmethod
-    def safe_filename(filename: str) -> str:
-        """仅取 basename，防路径穿越（本地路径拼接与对象命名通用）。"""
-        return os.path.basename(filename or "unnamed")
-
-    @staticmethod
-    def new_save_args(filename: str, data: bytes) -> tuple[str, str, int]:
-        """子类 save_bytes 通用入参处理：返回 (file_id, safe_name, size) 并做大小校验。"""
-        if len(data) > MAX_FILE_SIZE:
-            raise ValueError(f"文件超过大小限制（{MAX_FILE_SIZE // 1024 // 1024}MB）")
-        return uuid.uuid4().hex, StorageBackend.safe_filename(filename), len(data)
+    def ensure_ready(self) -> None:
+        """每个入口方法第一行调用（本地后端无外部依赖，init 后即 True）。"""
+        if not self._enabled:
+            raise RuntimeError(
+                f"{self.backend_name} 存储后端未初始化（请检查 Nacos storage 配置段）")
 
     async def close(self) -> None:
-        """释放资源（默认无操作，子类按需重写）。"""
+        """释放资源（默认无操作，持有连接/会话的子类按需重写）。"""
+
+
+# ==================== 命名与校验（各后端共用） ====================
+
+def new_file_name(original: str) -> str:
+    """原始文件名 → 唯一存储名 {uuid hex}_{安全文件名}。
+
+    只保留 basename（客户端带路径时丢掉目录），并拦掉路径分隔符/控制字符，
+    使存储名在任何后端都是一层扁平名字，不存在目录穿越。
+    """
+    base = os.path.basename((original or "").replace("\\", "/")).strip()
+    safe = "".join(ch for ch in base if ch >= " " and ch not in '"<>|?*').strip()
+    if len(safe) > 180:  # 保住扩展名的同时防止名字过长
+        stem, ext = os.path.splitext(safe)
+        safe = stem[:180 - len(ext)] + ext
+    return f"{uuid.uuid4().hex[:_ID_LEN]}_{safe or 'unnamed'}"
+
+
+def original_name(name: str) -> str:
+    """存储名 → 原始文件名（剥掉 uuid 前缀；不是本工具生成的名字则原样返回）。"""
+    name = name or ""
+    head, sep, tail = name.partition("_")
+    if sep and len(head) == _ID_LEN and all(c in "0123456789abcdef" for c in head.lower()):
+        return tail or name
+    return name
+
+
+def check_name(name: str) -> str:
+    """校验文件名合法性（下载/删除/判存在都以此为准入口，防路径穿越）。"""
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name or os.path.basename(name) != name:
+        raise ValueError(f"非法文件名: {name!r}")
+    return name

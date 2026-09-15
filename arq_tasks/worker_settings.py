@@ -7,11 +7,12 @@
     python -m arq_tasks.run_workers -n 4 -p 2
 本文件所有配置均显式写明取值与原因,便于后续维护调整。
 """
+import asyncio
 import os
 from arq.connections import RedisSettings
 
-from arq_tasks.tasks.workflow import bootstrap, shutdown
-from common.common_arq.queue import ARQ_REDIS_URL, worker_health_key, SPLIT_NAME, QUEUE_NAME
+from arq_tasks.tasks.workflow import shutdown, bootstrap, prepare_config
+from common.common_arq.queue import worker_health_key, SPLIT_NAME, QUEUE_NAME
 
 
 class WorkerSettings:
@@ -30,16 +31,18 @@ class WorkerSettings:
         "arq_tasks.tasks.workflow.resume_workflow",
     ]
 
-    # redis 连接参数(与生产端同源,保证投递/消费指向同一 Redis)
-    redis_settings = RedisSettings.from_dsn(ARQ_REDIS_URL)
-    # redis_settings.password = "123456"
-    redis_settings.max_connections = 100
-
-    # 进程启动/退出钩子(每 worker 进程各执行一次,替代旧 celery 方案的每任务幂等 bootstrap)
-    # 注意:arq 0.28 的 on_startup/on_shutdown 必须传可调用对象(只有 functions 支持字符串
-    # 路径按名解析,钩子直接 self.on_startup(self.ctx) 调用,传字符串会报 'str' object is not callable)
     on_startup = bootstrap
     on_shutdown = shutdown
+
+    # worker_settings.py 模块级（import 期执行，此时 arq 还没建 loop）
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)  # 关键：不设的话 arq 会另建一个 loop
+    _loop.run_until_complete(prepare_config())  # 只 await 读 Nacos → CustomRedisSettings.yml = ...
+
+    # 不 close：arq 的 Worker.__init__ 走 get_event_loop() 拿到的就是这个 loop，全进程同一个 loop
+    # redis 连接参数(与生产端同源,保证投递/消费指向同一 Redis)
+    from common.common_arq.queue import CustomRedisSettings
+    redis_settings = CustomRedisSettings.get_redis_setting()
 
     # ---------- 并发与超时 ----------
     max_jobs = 100  # 进程内并发上限(0=不限)

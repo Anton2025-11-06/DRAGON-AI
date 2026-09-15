@@ -36,9 +36,9 @@ async def _user_id(request: Request) -> int:
 
 @router.get("/page", summary="分页查询工作流列表")
 @has_permission("workflow:workflow:list")
-async def page_workflows(request: Request, current: int = 1, size: int = 10,
+async def page_workflows(request: Request, page: int = 1, page_size: int = 10,
                          name: str = None, status: str = None):
-    data = await WorkflowService.page(current=current, size=size, name=name, status=status)
+    data = await WorkflowService.page(current=page, size=page_size, name=name, status=status)
     return ApiResponse.success(data=data)
 
 

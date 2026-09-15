@@ -1,15 +1,18 @@
 <script setup lang="ts">
 /**
  * LLM 节点配置表单（对齐 common_model 12 能力类型）
- * 依据所选模型登记的能力类型（category）动态展示对应输入项：
- * - 文生文：系统/用户提示词、温度、MaxToken、深度思考、流式、Vision、Memory、结构化输出
- * - 图片理解/视频理解/OCR：媒体输入变量 +（提示词）+ 采样参数
+ * 依据所选模型登记的能力类型（category）+ 模型管理的能力位（supports_stream/supports_thinking）
+ * 动态展示对应输入项；页面上没有展示的字段不会写进节点配置：
+ * - 文生文：系统/用户提示词、流式、深度思考、Vision、结构化输出
+ * - 图片理解/视频理解/OCR：媒体输入变量 +（提示词）
+ * 温度/max_tokens 等模型调用参数在 12 类上都不占节点字段：统一由表单底部
+ * 「常用参数」编辑（默认取模型管理登记值），运行时合并进 model_params 透传厂商。
  * - 文本向量：文本输入；图片向量：图片输入
  * - 文本重排：查询变量 + 文档变量 + topN
  * - 文生图/文生视频/图生视频/文生音频/音频转文字：对应生成入参
  * 上游媒体/文本均以 {{节点.变量}} 引用，或直接粘贴 URL/文本（后端 _build_kwargs 解析）。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 
 import {
   MODEL_TYPES_STREAMABLE,
@@ -38,7 +41,7 @@ import {
 import { message } from 'ant-design-vue';
 
 import { ModelSelect } from '../model-select';
-import { VariableInput } from '../variable-selector';
+import { VariableInput, VariableSelector } from '../variable-selector';
 
 import * as modelApi from '../../../model-plaza/api';
 import ModelTryPanel from '../../../model-plaza/components/ModelTryPanel.vue';
@@ -72,8 +75,6 @@ const formData = reactive<
   modelType: MT_TEXT_TO_TEXT,
   systemPrompt: '',
   promptTemplate: '',
-  temperature: 0.7,
-  maxTokens: undefined,
   thinking: false,
   streaming: true,
   outputVariable: '',
@@ -89,12 +90,10 @@ const formData = reactive<
   voice: '',
   visionEnabled: false,
   imageVariables: [],
-  memoryEnabled: false,
-  memoryWindowSize: 10,
   structuredOutput: { ...defaultStructuredOutput },
 });
 
-// ==================== 节点级常用参数（按所选模型登记的 common_params 预置，可改值/新增/删除）====================
+// ==================== 节点级常用参数（默认取模型管理登记的 common_params，可改值/新增/删除）====================
 interface ParamRow {
   name: string;
   type: 'boolean' | 'integer' | 'number' | 'object' | 'string';
@@ -154,23 +153,62 @@ function castParamRow(p: ParamRow): ParamRow {
     desc: p.desc || '',
   };
 }
-/** 拉取所选模型登记的 common_params，预置为可编辑参数行（用户切换模型时调用） */
-async function seedParamsFromModel() {
+// 所选模型在模型管理登记的能力位：开启了对应能力才展示开关，展示了才下发该参数
+const modelCaps = ref({ supportsStream: false, supportsThinking: false });
+const capsLoading = ref(false);
+/** 已发起过详情拉取的 modelId（config 回灌时避免重复请求） */
+const capsRequestedFor = ref<number | undefined>(undefined);
+
+function rowsFromCommonParams(detail: modelApi.ModelDetailRep): ParamRow[] {
+  return (detail.common_params || []).map((p) => ({
+    name: p.name || '',
+    type: (p.type || 'string') as ParamRow['type'],
+    value: p.default,
+    desc: p.desc || '',
+  }));
+}
+
+/** 入参 params 与当前参数行等价 → 判定为自身 emit 的回灌，不重建行 */
+function isSameParams(params: any[]): boolean {
+  if (params.length !== paramRows.value.length) return false;
+  return params.every((p, i) => {
+    const row = castParamRow(paramRows.value[i] as ParamRow);
+    return (
+      row.name === (p.name || '') &&
+      row.type === (p.type || 'string') &&
+      JSON.stringify({ v: row.value }) === JSON.stringify({ v: p.value })
+    );
+  });
+}
+
+/**
+ * 拉取所选模型详情：能力位（流式/思考）+ 登记的常用参数。
+ * seedParams=true 时用登记值预置参数行（用户选模型 / 手动导入 / 节点尚无已存参数）；
+ * 完成后重新下发一次配置（可见性变化 → 不该存在的字段要被清掉）。
+ */
+async function loadModelMeta(seedParams: boolean) {
   const id = Number(formData.modelId);
+  capsRequestedFor.value = id || undefined;
   if (!id) {
+    modelCaps.value = { supportsStream: false, supportsThinking: false };
     paramRows.value = [];
+    handleChange();
     return;
   }
+  capsLoading.value = true;
   try {
     const detail = await modelApi.GetDetail(id);
-    paramRows.value = (detail.common_params || []).map((p) => ({
-      name: p.name || '',
-      type: (p.type || 'string') as ParamRow['type'],
-      value: p.default,
-      desc: p.desc || '',
-    }));
+    modelCaps.value = {
+      supportsStream: !!detail.supports_stream,
+      supportsThinking: !!detail.supports_thinking,
+    };
+    if (seedParams) paramRows.value = rowsFromCommonParams(detail);
   } catch {
-    paramRows.value = [];
+    // 详情拉不到时按「未开启」处理：宁可不显示/不下发流式思考，也不要把默认值写进配置
+    modelCaps.value = { supportsStream: false, supportsThinking: false };
+    if (seedParams) paramRows.value = [];
+  } finally {
+    capsLoading.value = false;
   }
   handleChange();
 }
@@ -184,8 +222,6 @@ watch(
       modelType: config.modelType || MT_TEXT_TO_TEXT,
       systemPrompt: config.systemPrompt || '',
       promptTemplate: config.promptTemplate || '',
-      temperature: config.temperature ?? 0.7,
-      maxTokens: config.maxTokens,
       thinking: config.thinking ?? false,
       streaming: config.streaming ?? true,
       outputVariable: config.outputVariable || '',
@@ -201,21 +237,24 @@ watch(
       voice: config.voice || '',
       visionEnabled: config.visionEnabled ?? false,
       imageVariables: config.imageVariables || [],
-      memoryEnabled: config.memoryEnabled ?? false,
-      memoryWindowSize: config.memoryWindowSize ?? 10,
       structuredOutput: config.structuredOutput
         ? { ...defaultStructuredOutput, ...config.structuredOutput }
         : { ...defaultStructuredOutput },
     });
-    // 回填：用已存 config.params 覆盖（编辑既有工作流保留用户配置）
-    paramRows.value = Array.isArray(config.params)
-      ? config.params.map((p) => ({
-          name: p.name || '',
-          type: (p.type || 'string') as ParamRow['type'],
-          value: p.value,
-          desc: p.desc || '',
-        }))
-      : [];
+    // 回填已存参数行；自身 emit 触发的回灌不重建（避免输入丢失焦点、也避免覆盖异步种子结果）
+    const incoming = Array.isArray(config.params) ? config.params : [];
+    if (!isSameParams(incoming)) {
+      paramRows.value = incoming.map((p) => ({
+        name: p.name || '',
+        type: (p.type || 'string') as ParamRow['type'],
+        value: p.value,
+        desc: p.desc || '',
+      }));
+    }
+    // 尚未发起过该模型详情拉取（首次渲染 / 外部改了模型）：拉能力位，节点无已存参数时顺带预置
+    if (formData.modelId && capsRequestedFor.value !== Number(formData.modelId)) {
+      loadModelMeta(incoming.length === 0);
+    }
   },
   { immediate: true, deep: true },
 );
@@ -237,16 +276,17 @@ const showPrompt = computed(() =>
     MT_TEXT_TO_AUDIO,
   ].includes(cat.value),
 );
-// 采样参数（温度/MaxToken）：仅对话族与理解族有意义
-const showSampling = computed(() =>
-  [MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR].includes(
-    cat.value,
-  ),
+// 流式/深度思考：能力类型支持 且 模型管理开启对应能力位，才展示、才下发
+const streamCapable = computed(() =>
+  MODEL_TYPES_STREAMABLE.includes(cat.value),
 );
-const showStream = computed(() => MODEL_TYPES_STREAMABLE.includes(cat.value));
-const showThinking = computed(() => showStream.value);
+const showStream = computed(
+  () => streamCapable.value && modelCaps.value.supportsStream,
+);
+const showThinking = computed(
+  () => streamCapable.value && modelCaps.value.supportsThinking,
+);
 const showVision = computed(() => isChat.value);
-const showMemory = computed(() => isChat.value);
 const showStructured = computed(() => isChat.value);
 const showInput = computed(() =>
   [MT_TEXT_EMBEDDING, MT_MULTIMODAL_EMBEDDING].includes(cat.value),
@@ -351,6 +391,11 @@ async function onTryRun(payload: {
   }
 }
 
+/**
+ * 下发节点配置：仅在页面上展示的字段才写入 config
+ * （未展示 = 该能力类型/该模型不具备，保存时不该带这个参数）。
+ * 温度/max_tokens 等调用参数不在此列：全部走底部「常用参数」（config.params）。
+ */
 function handleChange() {
   const config: LLMNodeConfig = {
     modelId: formData.modelId,
@@ -359,10 +404,8 @@ function handleChange() {
     outputVariable: formData.outputVariable,
     promptTemplate: formData.promptTemplate,
     systemPrompt: formData.systemPrompt,
-    temperature: formData.temperature,
-    maxTokens: formData.maxTokens,
-    thinking: formData.thinking,
-    streaming: formData.streaming,
+    thinking: showThinking.value ? formData.thinking : undefined,
+    streaming: showStream.value ? formData.streaming : undefined,
     inputVariable: formData.inputVariable,
     imageVariable: formData.imageVariable,
     audioVariable: formData.audioVariable,
@@ -373,12 +416,11 @@ function handleChange() {
     size: formData.size || undefined,
     imageN: formData.imageN,
     voice: formData.voice || undefined,
-    visionEnabled: formData.visionEnabled,
-    imageVariables: formData.visionEnabled ? formData.imageVariables : undefined,
-    memoryEnabled: formData.memoryEnabled,
-    memoryWindowSize: formData.memoryEnabled
-      ? formData.memoryWindowSize
-      : undefined,
+    visionEnabled: showVision.value ? formData.visionEnabled : undefined,
+    imageVariables:
+      showVision.value && formData.visionEnabled
+        ? formData.imageVariables
+        : undefined,
     structuredOutput: formData.structuredOutput.enabled
       ? { ...formData.structuredOutput }
       : undefined,
@@ -387,18 +429,22 @@ function handleChange() {
   emit('update:config', config);
 }
 
-// 类型/模型切换：清空无关输入 + 重新拉取该模型登记的常用参数预置
-async function handleTypeChange() {
+/**
+ * Vision 图像变量：从【选变量】弹层追加一条上游引用（去重），与 tags 手动输入并存。
+ * 引用格式由 VariableSelector 统一生成（{{inputs.x}} / {{nodes.id.x}}），后端 ctx.resolve 解析。
+ */
+function addImageVariable(reference: string) {
+  const list = formData.imageVariables || [];
+  if (!reference || list.includes(reference)) return;
+  formData.imageVariables = [...list, reference];
   handleChange();
-  await seedParamsFromModel();
 }
 
-// 旧工作流节点（尚未携带 params）首次挂载：若已选模型则按模型登记参数预置
-onMounted(() => {
-  if (formData.modelId && !(props.config.params && props.config.params.length)) {
-    seedParamsFromModel();
-  }
-});
+// 类型/模型切换：清空无关输入 + 按新模型登记的能力位与常用参数重新拉取
+async function handleTypeChange() {
+  handleChange();
+  await loadModelMeta(true);
+}
 </script>
 
 <template>
@@ -536,46 +582,9 @@ onMounted(() => {
       />
     </a-form-item>
 
-    <!-- 采样参数 -->
-    <a-form-item v-if="showSampling" label="温度">
-      <a-row :gutter="12">
-        <a-col :span="18">
-          <a-slider
-            v-model:value="formData.temperature"
-            :min="0"
-            :max="2"
-            :step="0.1"
-            @change="handleChange"
-          />
-        </a-col>
-        <a-col :span="6">
-          <a-input-number
-            v-model:value="formData.temperature"
-            :min="0"
-            :max="2"
-            :step="0.1"
-            size="small"
-            style="width: 100%"
-            @change="handleChange"
-          />
-        </a-col>
-      </a-row>
-    </a-form-item>
-
-    <a-form-item v-if="showSampling" label="最大 Token">
-      <a-input-number
-        v-model:value="formData.maxTokens"
-        :min="1"
-        :max="128000"
-        placeholder="留空使用模型默认值"
-        style="width: 100%"
-        @change="handleChange"
-      />
-    </a-form-item>
-
-    <!-- 增强功能（流式 / 思考 / Vision / Memory） -->
+    <!-- 增强功能（流式 / 思考 / Vision：按模型能力位展示，不展示则不下发） -->
     <a-divider
-      v-if="showStream || showVision || showMemory"
+      v-if="showStream || showThinking || showVision"
       orientation="left"
       style="font-size: 12px; margin: 16px 0 12px"
     >
@@ -595,7 +604,7 @@ onMounted(() => {
           <template #label>
             <span>
               深度思考
-              <a-tooltip title="启用后模型返回推理过程（reasoning），仅部分模型支持">
+              <a-tooltip title="启用后模型返回推理过程（reasoning），仅模型管理开启思考能力的模型可选">
                 <QuestionCircleOutlined
                   style="margin-left: 4px; color: #8c8c8c"
                 />
@@ -623,51 +632,28 @@ onMounted(() => {
           />
         </a-form-item>
       </a-col>
-      <a-col v-if="showMemory" :span="8">
-        <a-form-item>
-          <template #label>
-            <span>
-              Memory
-              <a-tooltip title="启用后保持对话上下文，适用于多轮对话场景">
-                <QuestionCircleOutlined
-                  style="margin-left: 4px; color: #8c8c8c"
-                />
-              </a-tooltip>
-            </span>
-          </template>
-          <a-switch
-            v-model:checked="formData.memoryEnabled"
-            @change="handleChange"
-          />
-        </a-form-item>
-      </a-col>
     </a-row>
 
-    <!-- Vision 配置 -->
+    <!-- Vision 配置（后端 _build_messages 拼多模态 content：text + image_url） -->
     <template v-if="showVision && formData.visionEnabled">
       <a-form-item label="图像变量">
-        <a-select
-          v-model:value="formData.imageVariables"
-          mode="tags"
-          :placeholder="'输入图像变量引用，如 {{start.image}}'"
-          @change="handleChange"
-        />
-        <div class="form-hint">输入包含图像的变量引用，支持多个图像</div>
-      </a-form-item>
-    </template>
-
-    <!-- Memory 配置 -->
-    <template v-if="showMemory && formData.memoryEnabled">
-      <a-form-item label="记忆窗口大小">
-        <a-input-number
-          v-model:value="formData.memoryWindowSize"
-          :min="1"
-          :max="50"
-          placeholder="默认: 10"
-          style="width: 100%"
-          @change="handleChange"
-        />
-        <div class="form-hint">保留最近的对话轮数</div>
+        <div class="image-var-row">
+          <a-select
+            v-model:value="formData.imageVariables"
+            mode="tags"
+            class="image-var-select"
+            placeholder="选上游图像变量，或粘贴图片 URL 回车"
+            @change="handleChange"
+          />
+          <VariableSelector
+            :current-node-id="nodeId"
+            button-text="选变量"
+            @select="addImageVariable"
+          />
+        </div>
+        <div class="form-hint">
+          列表只列上游节点输出的变量（开始节点文件参数、文生图输出等），可选多个
+        </div>
       </a-form-item>
     </template>
 
@@ -737,10 +723,27 @@ onMounted(() => {
       </template>
     </template>
 
-    <!-- 常用参数：按所选模型登记的参数预置，可改值（覆盖默认）/新增（未登记）/删除；运行时合并进 model_params -->
+    <!-- 常用参数：默认取模型管理登记值（可改值/新增/删除）；运行时合并进 model_params -->
     <a-divider orientation="left" style="font-size: 12px; margin: 16px 0 12px">
       常用参数
     </a-divider>
+    <div class="param-bar">
+      <a-button
+        size="small"
+        :loading="capsLoading"
+        :disabled="!formData.modelId"
+        @click="loadModelMeta(true)"
+      >
+        从模型管理导入
+      </a-button>
+      <span class="form-hint">
+        {{
+          formData.modelId
+            ? '全部调用参数（温度 / max_tokens 等）在此设置：默认沿用模型管理登记值，可改值或新增'
+            : '选择模型后自动带出模型管理登记的常用参数'
+        }}
+      </span>
+    </div>
     <div class="param-edit">
       <div class="param-edit__head">
         <span class="pc-name">参数名</span>
@@ -884,6 +887,24 @@ onMounted(() => {
     gap: 8px;
     align-items: center;
     margin-bottom: 16px;
+  }
+
+  .image-var-row {
+    display: flex;
+    gap: 4px;
+    align-items: flex-start;
+
+    .image-var-select {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+
+  .param-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
   }
 
   :deep(.ant-divider-inner-text) {

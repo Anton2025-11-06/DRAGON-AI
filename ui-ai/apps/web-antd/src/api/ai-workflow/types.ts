@@ -601,6 +601,8 @@ export interface StreamTokenEvent extends ExecutionEvent {
   nodeId: string;
   /** Token内容 */
   token: string;
+  /** true 表示该增量属于思维链(reasoning)，false/缺省为正文 */
+  reasoning?: boolean;
 }
 
 /**
@@ -807,7 +809,10 @@ export interface ContextVariable {
 /**
  * LLM 大模型节点配置 (Workflow Model Node)
  * 经 common_model 支持 12 种能力类型（按所选模型登记的 category 类型化直连），
- * 支持 Vision、Memory、结构化输出，及各能力类型的媒体输入变量。
+ * 支持 Vision、结构化输出，及各能力类型的媒体输入变量。
+ * 注：streaming/thinking 仅在页面上展示时才会写入配置（由模型登记的能力类型 +
+ * supports_stream/supports_thinking 决定）；温度/maxTokens 不再作为节点字段——
+ * 全部模型调用参数统一走 params（常用参数），旧图残留字段后端忽略。
  */
 export interface LLMNodeConfig {
   /** 模型 ID */
@@ -820,13 +825,9 @@ export interface LLMNodeConfig {
   systemPrompt?: string;
   /** 用户提示词模板 (支持变量引用: {{nodeName.variableName}}) */
   promptTemplate?: string;
-  /** 温度参数 (0-2) */
-  temperature?: number;
-  /** 最大 Token 数 */
-  maxTokens?: number;
-  /** 深度思考（仅支持 stream 的三类有意义） */
+  /** 深度思考（仅能力类型支持且模型管理开启 supports_thinking 时写入） */
   thinking?: boolean;
-  /** 是否流式输出 */
+  /** 是否流式输出（仅能力类型支持且模型管理开启 supports_stream 时写入） */
   streaming?: boolean;
   /** 输出变量名 */
   outputVariable?: string;
@@ -854,10 +855,6 @@ export interface LLMNodeConfig {
   imageN?: number;
   /** 音色（文生音频） */
   voice?: string;
-  /** Memory 开关（对话记忆） */
-  memoryEnabled?: boolean;
-  /** 记忆窗口大小 */
-  memoryWindowSize?: number;
   /** 结构化输出配置 */
   structuredOutput?: StructuredOutput;
   /** 上下文变量列表 */
@@ -1003,11 +1000,6 @@ export type ParameterType =
   | 'string';
 
 /**
- * 推理模式枚举
- */
-export type InferenceMode = 'FUNCTION_CALL' | 'PROMPT_BASED';
-
-/**
  * 提取参数定义
  */
 export interface ExtractParameter {
@@ -1038,12 +1030,6 @@ export interface ParameterExtractorConfig {
   instructions?: string;
   /** 要提取的参数列表 */
   parameters?: ExtractParameter[];
-  /** 推理模式 */
-  inferenceMode?: InferenceMode;
-  /** 是否启用记忆（对话历史） */
-  memoryEnabled?: boolean;
-  /** 记忆窗口大小（启用记忆时有效） */
-  memoryWindowSize?: number;
 }
 
 // ==================== IF_ELSE 节点配置 ====================
@@ -1314,10 +1300,10 @@ export type DocumentType =
 
 /**
  * 文档提取器节点配置 (Workflow Document Capability)
- * 从文档中提取文本 (PDF、Word、Excel、PPT 等)
+ * 从文档 URL 中提取文本 (PDF、Word、Excel、PPT 等)：后端按 URL 拉取字节后内存解析
  */
 export interface DocExtractorConfig {
-  /** 文件变量 (支持变量引用: {{nodeName.fileVariable}}) */
+  /** 文件变量 (引用开始节点的文件参数: {{nodeName.fileVariable}}，取其上传后返回的 url) */
   fileVariable?: string;
   /** 支持的文档类型 */
   supportedTypes?: DocumentType[];
