@@ -91,7 +91,7 @@ class WorkflowNodeExecution(Base):
     execution_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     node_id: Mapped[str] = mapped_column(String(64), nullable=False)
     node_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    # RUNNING/COMPLETED/FAILED/SKIPPED
+    # RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT（后两个由并行分支被砍时收敛写入）
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="RUNNING")
     node_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     input: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

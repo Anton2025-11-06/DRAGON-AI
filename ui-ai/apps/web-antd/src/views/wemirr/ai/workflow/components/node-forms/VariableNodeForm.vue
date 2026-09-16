@@ -20,11 +20,24 @@
         </div>
 
         <a-form-item label="目标变量名" required>
-          <a-input
-            v-model:value="assignment.variableName"
-            placeholder="例如: answer"
-            @change="handleChange"
-          />
+          <div class="target-name-row">
+            <a-input
+              v-model:value="assignment.variableName"
+              placeholder="自定义变量名，例如: answer"
+              @change="handleChange"
+            />
+            <VariableSelector
+              :current-node-id="nodeId"
+              button-text="引用上游"
+              @select="
+                (reference: string) =>
+                  handleTargetReferenceSelect(assignment, reference)
+              "
+            />
+          </div>
+          <div class="form-hint">
+            直接输入即自定义变量名；点「引用上游」选中的变量会在运行时取其值作为目标变量名
+          </div>
         </a-form-item>
 
         <a-form-item label="赋值类型">
@@ -77,7 +90,7 @@ import type {
 
 import { reactive, watch } from 'vue';
 
-import { VariableInput } from '../variable-selector';
+import { VariableInput, VariableSelector } from '../variable-selector';
 
 interface Props {
   config: VariableAssignerConfig;
@@ -144,6 +157,15 @@ function handleAssignmentTypeChange(assignment: Assignment) {
   handleChange();
 }
 
+/**
+ * 目标变量名引用上游变量（BUG7）：名字不再只能是字面量，
+ * 选中后把变量引用（如 {{nodes.xx.output}}）写回 variableName，后端运行时解析取值作为变量名。
+ */
+function handleTargetReferenceSelect(assignment: Assignment, reference: string) {
+  assignment.variableName = reference;
+  handleChange();
+}
+
 function handleChange() {
   emit('update:config', {
     assignments: formData.assignments.map((assignment) => ({ ...assignment })),
@@ -169,6 +191,18 @@ function handleChange() {
   border: 1px solid #f0f0f0;
   border-radius: 6px;
   background: #fafafa;
+}
+
+.target-name-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.form-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8c8c8c;
 }
 
 .assignment-header {

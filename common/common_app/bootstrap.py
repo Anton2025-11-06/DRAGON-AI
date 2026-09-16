@@ -56,6 +56,15 @@ def _init_httpx_pool():
     httpx_pool.init()
 
 
+def get_container_default_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 53))
+            return sock.getsockname()[0]
+    except:
+        return "127.0.0.1"
+
+
 def create_app(service_name: str,
                default_port: int,
                routers: list[APIRouter],
@@ -94,7 +103,7 @@ def create_app(service_name: str,
             server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
             service_name=service_name,
             # TODO 自动获取 实例IP
-            ip=socket.gethostname(),
+            ip=get_container_default_ip(),
             port=port,
             namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
             log_level=Config.nacos_log_level,

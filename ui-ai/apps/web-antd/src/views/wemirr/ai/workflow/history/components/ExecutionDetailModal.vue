@@ -39,6 +39,8 @@ const statusConfig: Record<string, { color: string; text: string; icon: any }> =
     FAILED: { color: 'error', text: '失败', icon: CloseCircleOutlined },
     PAUSED: { color: 'warning', text: '已暂停', icon: PauseCircleOutlined },
     CANCELLED: { color: 'default', text: '已取消', icon: StopOutlined },
+    // 并行分支等待超时被停止（非失败），黄色告警
+    TIMEOUT: { color: 'warning', text: '已超时', icon: ClockCircleOutlined },
   };
 
 const visible = computed({
@@ -89,6 +91,9 @@ function getNodeStatusColor(status?: string): string {
     FAILED: 'red',
     RUNNING: 'blue',
     PENDING: 'gray',
+    // 超时用黄色，不再按蓝色执行中展示
+    TIMEOUT: 'gold',
+    CANCELLED: 'gray',
   };
   return colors[status || 'PENDING'] || 'gray';
 }
@@ -100,8 +105,17 @@ function getNodeStatusText(status?: string): string {
     FAILED: '失败',
     RUNNING: '执行中',
     PENDING: '等待中',
+    TIMEOUT: '已超时',
+    CANCELLED: '已取消',
   };
   return texts[status || 'PENDING'] || status || '-';
+}
+
+/** 超时/取消不是执行失败，错误条用黄色告警 */
+function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
+  if (status === 'TIMEOUT') return 'warning';
+  if (status === 'CANCELLED') return 'info';
+  return 'error';
 }
 </script>
 
@@ -225,7 +239,11 @@ function getNodeStatusText(status?: string): string {
                   </span>
                 </div>
                 <div v-if="node.error" class="node-error">
-                  <a-alert type="error" :message="node.error" size="small" />
+                  <a-alert
+                    :type="getNodeErrorType(node.status)"
+                    :message="node.error"
+                    size="small"
+                  />
                 </div>
                 <Collapse
                   v-if="node.input || node.output"

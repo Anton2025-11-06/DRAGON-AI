@@ -74,7 +74,7 @@ def build_node_definitions() -> list[dict]:
             _field("fields", "输入字段", "InputFieldList", "array", False, []),
         ],
         default_config={"fields": [
-            {"name": "query", "label": "用户问题", "type": "PARAGRAPH", "required": True},
+            {"name": "query", "label": "用户问题", "type": "TEXT", "required": True},
         ]},
     ))
     defs.append(_def(
@@ -93,7 +93,7 @@ def build_node_definitions() -> list[dict]:
 
     # ---------- AI ----------
     defs.append(_def(
-        "LLM", "大模型", "按模型能力类型经 common_model 调用（支持全部 12 类：文生文/向量/重排/图文理解/OCR/图像音视频生成等）", "ai", "Robot", "#1677ff",
+        "LLM", "大模型", "按模型能力类型调用（支持全部 12 类：文生文/向量/重排/图文理解/OCR/图像音视频生成等）", "ai", "Robot", "#1677ff",
         form_component="LlmNodeForm",
         required_fields=["modelId"],
         output_variables=["output", "text", "reasoning", "usage",
@@ -299,7 +299,9 @@ def build_node_definitions() -> list[dict]:
         required_fields=["inputVariable"],
         output_variables=["output", "count"],
         fields=[
-            _field("inputVariable", "输入数组", "VariableSelect", "string", True),
+            _field("inputVariable", "输入数组", "VariableSelect", "string", True,
+                   None, "", "可引用全部上游节点的输出（不限数组）；支持 .字段/[下标] 再次提取，"
+                             "上游为 JSON 文本时会自动解析后取值"),
             _field("operationType", "操作类型", "Select", "string", True, "FILTER",
                    options=[("FILTER", "过滤"), ("SORT", "排序"), ("SLICE", "切片"),
                             ("EXTRACT", "提取字段"), ("UNIQUE", "去重"), ("LIMIT", "限量"),

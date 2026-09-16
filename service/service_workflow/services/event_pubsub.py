@@ -20,8 +20,11 @@ Pub/Sub 的天然限制是没有历史消息：晚订阅者会丢事件，因此
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator, Optional
+
+from fastapi import WebSocket
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -32,9 +35,9 @@ from service.service_workflow.workflow_engine.engine import (
 from service.service_workflow.workflow_engine.events import WorkflowEvent
 
 # ---------- 常量 ----------
-EVT_CHANNEL_PREFIX = "workflow:evt:"   # 事件频道前缀（每次执行一个频道）
-SUBSCRIBE_IDLE_MS = 5000               # 订阅阻塞读窗口（毫秒）
-IDLE_DB_CHECK = 4                      # 连续空读达到该次数后查 DB 收尾
+EVT_CHANNEL_PREFIX = "workflow:evt:"  # 事件频道前缀（每次执行一个频道）
+SUBSCRIBE_IDLE_MS = 5000  # 订阅阻塞读窗口（毫秒）
+IDLE_DB_CHECK = 4  # 连续空读达到该次数后查 DB 收尾
 
 TERMINAL_EVENT_TYPES = {"workflow.completed", "workflow.failed", "workflow.cancelled"}
 FINAL_DB_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
@@ -45,16 +48,22 @@ def channel_for(execution_id: str) -> str:
     return f"{EVT_CHANNEL_PREFIX}{execution_id}"
 
 
-async def publish_event_hook(event: WorkflowEvent) -> None:
+async def publish_event_hook(event: WorkflowEvent,
+                             websocket: Optional[WebSocket] = None) -> None:
     """EventBus 的 pub hook：把事件实时 PUBLISH 到 Redis 频道。
 
     由 service 层装配 runtime 时注入（EventBus(publish_hook=...)），
     节点执行过程中的所有事件（含 node.delta token 流）即时广播，
     供其他进程的 SSE 订阅者消费。失败只记日志，不阻断引擎本地执行。
+
+    websocket 非空（DEBUG 同步执行）时直接经该连接回推，否则走 Redis 频道。
     """
     try:
-        await redis_client.client.publish(channel_for(event.execution_id),
-                                          event.to_json())
+        if websocket is not None:
+            await websocket.send_text(event.to_json())
+        else:
+            await redis_client.client.publish(channel_for(event.execution_id),
+                                              event.to_json())
     except Exception as e:  # noqa: BLE001
         log.warning("event publish failed exec={}: {}", event.execution_id, e)
 

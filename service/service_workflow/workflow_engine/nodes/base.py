@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from common.common_entity.graph_error_entity import GraphIssue
 # 文件变量 → URL 的归一逻辑住在上下文模块（模板渲染也要用），这里直接复用避免两份实现
 from service.service_workflow.workflow_engine.context import file_url
 
@@ -74,6 +75,23 @@ class BaseNodeExecutor:
     def cfg(self, key: str, default: Any = None) -> Any:
         return self.config.get(key, default)
 
+    def input_pass_through(self, ctx: "ExecutionContext") -> dict:
+        """入边来源节点的输出快照（输入透传用）。
+
+        分支/屏障类控制节点（IF_ELSE、PARALLEL）原本只输出路由信息，节点追踪里
+        看不到数据流过；用本方法把上游输出铺底进自己的 output，下游与追踪都能看到
+        透传的输入数据。以 ctx.graph 为准（runtime 可能未注入，如单测环境）。
+        """
+        merged: dict = {}
+        graph = getattr(ctx, "graph", None)
+        if graph is None:
+            return merged
+        for edge in graph.get_in_edges(self.node.id) or []:
+            output = ctx.get_node_output(edge.source)
+            if isinstance(output, dict):
+                merged.update(output)
+        return merged
+
     def emit_output_enabled(self) -> bool:
         """节点「返回内容」开关:显式 false 才关闭,缺省/其他值视为开启。
 
@@ -99,7 +117,6 @@ class BaseNodeExecutor:
 
 
 def issue(code, severity, message, node, suggestion=None):
-    from service.service_workflow.workflow_engine.graph import GraphIssue
     return GraphIssue(code=code, severity=severity, message=message,
                       node_id=node.id, node_label=node.label, node_type=node.type,
                       suggestion=suggestion)

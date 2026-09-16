@@ -17,17 +17,21 @@ delete/exists），不落库：文件名（{uuid}_{原名}）就是唯一标识�
 """
 from __future__ import annotations
 
-import mimetypes
-import os
-from typing import Any, List, Optional
-from urllib.parse import quote, urlsplit
+import asyncio
+import json
+import time
+from typing import Any, Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, Query, Request, UploadFile, File
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, Body, Query, Request, WebSocket
+from fastapi.responses import StreamingResponse
+from starlette.websockets import WebSocketState
 
-from common import common_storage
+from common.common_entity.rbac_entity import OperateLog
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import get_login_user, has_permission
+from common.common_log.log_init import log
+from common.common_middleware.operate_log_middleware import _mask_sensitive, _persist_log
+from common.common_permission.permission import get_user_id, has_permission
 from service.service_workflow.schemas.workflow_schema import (
     ApiKeyCreateReq, WorkflowExecutionReq,
 )
@@ -35,14 +39,6 @@ from service.service_workflow.services.workflow_apikey_service import WorkflowAp
 from service.service_workflow.services.workflow_execution_service import WorkflowExecutionService
 
 router = APIRouter(prefix="/workflow-executions", tags=["工作流执行"])
-
-
-async def _user_id(request: Request) -> int:
-    try:
-        login_user = await get_login_user(request)
-        return int(login_user.get("user_id") or 0)
-    except Exception:  # noqa: BLE001
-        return 0
 
 
 # ==================== 固定路径(先声明) ====================
@@ -54,18 +50,108 @@ async def execute_workflow_async(request: Request, workflow_id: int, body: Workf
     trigger 判定:请求头带 X-Workflow-Token(网关 API Key 模式翻译) → API 触发,
     API 触发只执行已发布版本快照,且要求工作流已发布(见 _prepare_execution)。
     """
-    trigger = "API" if request.headers.get("X-Workflow-Token") else "DEBUG"
-    execution_id = await WorkflowExecutionService.execute_async(
-        workflow_id, body, user_id=await _user_id(request), trigger_type=trigger)
+    execution_id = await WorkflowExecutionService.execute_async(workflow_id, body, user_id=await get_user_id(request))
     return ApiResponse.success(data=execution_id, message="任务已提交")
+
+
+@router.websocket("/workflows/{workflow_id}/execute-sync")
+async def execute_workflow_sync(websocket: WebSocket, workflow_id: int):
+    """同步执行(WebSocket)：接受连接后读取首帧入参（含网关注入的 login_user），
+    执行过程中事件经同一连接实时回推，结束关闭连接。
+
+    浏览器 WS 无法带 Authorization 头，登录态由网关解析后随首帧 login_user 下发；
+    TokenCheck/OperateLog 等 BaseHTTPMiddleware 对 websocket scope 不生效，故此处
+    把 login_user 写回 scope（供 get_user_id 复用）并手动落审计日志。
+    """
+    start = time.perf_counter()
+    login_user: dict = {}
+    body: Optional[WorkflowExecutionReq] = None
+    status = 500
+    error_msg = None
+
+    async def _safe_send_json(websocket: WebSocket, payload: dict) -> None:
+        """尽力而为地发一帧：未 accept / 客户端已断开 / 事件循环已收尾时静默跳过。
+
+        异常分支里直接 send_json 会在「连接已断」时二次抛错，把真正的错误盖掉。
+        """
+        try:
+            if websocket.application_state == WebSocketState.CONNECTED:
+                await websocket.send_json(payload)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        await websocket.accept()
+        data = await websocket.receive_json()
+        login_user = data.pop("login_user", None) or {}
+        data.pop("Authorization", None)
+        data.pop("authorization", None)
+        # get_login_user/get_user_id 读取 scope["login_user"]，写回即可复用原口径
+        websocket.scope["login_user"] = login_user
+        body = WorkflowExecutionReq(**data)
+        await WorkflowExecutionService.execute_sync(
+            websocket, workflow_id, body, user_id=await get_user_id(websocket))
+        status = 200
+        await _safe_send_json(websocket, {"code": status, "message": "执行成功"})
+    except Exception as e:  # noqa: BLE001
+        error_msg = str(e)[:2000]
+        await _safe_send_json(websocket,
+                              {"code": status, "message": f"执行过程中发生错误:{str(e)}"})
+    finally:
+        # 先完成关闭握手再落审计，保证对端拿到正常 close 帧
+        async def _safe_close(websocket: WebSocket) -> None:
+            """显式完成 WS 关闭握手（发 close 帧）。
+
+            必须显式 close：处理器直接 return 时 uvicorn 只掐 TCP 传输，不发 close 帧，
+            网关侧 websockets 客户端会抛 ConnectionClosedError(no close frame received or
+            sent)。注意 WebSocketState 是 IntEnum，不能用字符串 "connected" 比较。
+            """
+            try:
+                if websocket.application_state == WebSocketState.CONNECTED:
+                    await websocket.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        await _safe_close(websocket)
+
+        def audit_ws_run(websocket: WebSocket, workflow_id: int, body: Optional[WorkflowExecutionReq],
+                         login_user: dict, start: float, status: int, error_msg: Optional[str]) -> None:
+            """execute-sync WS 手动审计：OperateLogMiddleware 基于 BaseHTTPMiddleware，
+            对 websocket 连接不触发，故在此补落 tb_operate_log（失败仅告警，不阻断关闭）。"""
+            try:
+                params = {
+                    "workflowId": workflow_id,
+                    "inputs": body.inputs if body else None,
+                    "breakpoints": body.breakpoints if body else None,
+                }
+                record = OperateLog(
+                    trace_id=websocket.scope.get("trace_id") or uuid4().hex[:12],
+                    user_id=login_user.get("user_id"),
+                    username=login_user.get("username"),
+                    module="workflow",
+                    operation=f"api/workflow/workflow-executions/workflows/{workflow_id}/execute-sync",
+                    method="WEBSOCKET",
+                    path=f"api/workflow/workflow-executions/workflows/{workflow_id}/execute-sync",
+                    params=json.dumps(_mask_sensitive(params), ensure_ascii=False)[:2000],
+                    ip=websocket.client.host if websocket.client else None,
+                    user_agent=websocket.headers.get("user-agent", "")[:255],
+                    status=status,
+                    cost_ms=round((time.perf_counter() - start) * 1000, 2),
+                    error_msg=error_msg,
+                )
+                asyncio.create_task(_persist_log(record))
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"execute-sync audit log failed: {str(e)}")
+
+        audit_ws_run(websocket, workflow_id, body, login_user, start, status, error_msg)
 
 
 @router.get("/page", summary="分页查询执行历史")
 @has_permission("workflow:execution:list")
-async def page_executions(request: Request, current: int = 1, size: int = 10,
-                          workflowId: str = None, status: str = None):
+async def page_executions(request: Request, page: int = 1, page_size: int = 10,
+                          executionId: str = None, status: str = None):
     data = await WorkflowExecutionService.page_executions(
-        current=current, size=size, workflow_id=workflowId, status=status)
+        current=page, size=page_size, execution_id=executionId, status=status)
     return ApiResponse.success(data=data)
 
 
@@ -167,10 +253,10 @@ async def resume_from_snapshot(request: Request, execution_id: str,
 
 @router.get("/workflows/{workflow_id}/executions", summary="工作流执行历史")
 @has_permission("workflow:execution:list")
-async def get_workflow_executions(request: Request, workflow_id: int,
-                                  current: int = 1, size: int = 10, status: str = None):
+async def get_workflow_executions(request: Request, executionId: str = None,
+                                  page: int = 1, page_size: int = 10, status: str = None):
     data = await WorkflowExecutionService.page_executions(
-        current=current, size=size, workflow_id=str(workflow_id), status=status)
+        current=page, size=page_size, execution_id=executionId, status=status)
     return ApiResponse.success(data=data)
 
 
@@ -185,7 +271,7 @@ async def create_api_key(request: Request, body: ApiKeyCreateReq):
     try:
         resp = await WorkflowApiKeyService.create(
             body.workflowId, body.name, body.rateLimit or 0, body.expireDays,
-            user_id=await _user_id(request))
+            user_id=await get_user_id(request))
         return ApiResponse.success(data=resp, message="创建成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -216,75 +302,3 @@ async def delete_api_key(request: Request, api_key_id: int):
     if not ok:
         return ApiResponse.error(400, "API Key 不存在")
     return ApiResponse.success(message="删除成功")
-
-
-# ==================== 文件（存储能力全在 common_storage，本路由只做形参适配） ====================
-
-file_router = APIRouter(prefix="/workflow-files", tags=["工作流文件"])
-
-# 匿名下载入口路径（网关对外口径，与 TokenCheckMiddleware 白名单一致）
-_DOWNLOAD_PATH = "/api/workflow/workflow-files/download"
-
-
-def _download_base(request: Request) -> str:
-    """本地存储后端的匿名下载基址：环境变量 FILE_PUBLIC_BASE > 请求 Origin/Referer > Host。
-
-    网关不透传原始 Host（下游看到的是实例内网地址），所以优先用浏览器带过来的对外地址；
-    公网/CDN 场景用 FILE_PUBLIC_BASE 固定。OSS 后端用预签名 URL，不依赖本基址。
-    """
-    base = os.environ.get("FILE_PUBLIC_BASE", "").rstrip("/")
-    if not base:
-        origin = urlsplit(request.headers.get("origin")
-                          or request.headers.get("referer") or "")
-        base = (f"{origin.scheme}://{origin.netloc}" if origin.scheme and origin.netloc
-                else f"{request.url.scheme}://{request.url.netloc}")
-    return f"{base}{_DOWNLOAD_PATH}"
-
-
-@file_router.post("/upload", summary="上传单个文件，返回匿名可访问 URL")
-async def upload_file(request: Request, file: UploadFile = File(...)):
-    info = (await common_storage.upload(file, base_url=_download_base(request)))[0]
-    if not info["ok"]:
-        return ApiResponse.error(400, info.get("error") or "上传失败")
-    return ApiResponse.success(data=info, message="上传成功")
-
-
-@file_router.post("/upload-batch", summary="批量上传文件")
-async def upload_files(request: Request, files: List[UploadFile] = File(...)):
-    infos = await common_storage.upload(files, base_url=_download_base(request))
-    failed = [i for i in infos if not i["ok"]]
-    return ApiResponse.success(
-        data=infos,
-        message=f"成功 {len(infos) - len(failed)} 个" +
-                (f"，失败 {len(failed)} 个：{failed[0]['error']}" if failed else ""))
-
-
-@file_router.get("/download/{name}", summary="按文件名下载（匿名，地址由上传接口返回）")
-async def download_file(name: str):
-    """本地后端的匿名下载入口（OSS 预签名 URL 不经过这里，但同样支持手动访问）。"""
-    try:
-        data = await common_storage.download(name)
-    except ValueError as e:
-        return ApiResponse.error(404, str(e))
-    display = common_storage.original_name(name)
-    # Content-Disposition 头部按 latin-1 编码，中文名需回退名 + RFC 5987 filename*
-    ascii_name = display.encode("ascii", "ignore").decode("ascii").strip() or "download"
-    return Response(
-        content=data,
-        media_type=mimetypes.guess_type(display)[0] or "application/octet-stream",
-        headers={"Content-Disposition":
-                 f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(display)}'})
-
-
-@file_router.get("/exists/{name}", summary="按文件名判断是否存在")
-async def file_exists(name: str):
-    return ApiResponse.success(data=await common_storage.exists(name))
-
-
-@file_router.delete("/{name}", summary="按文件名删除")
-async def delete_file(name: str):
-    try:
-        ok = await common_storage.delete(name)
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-    return ApiResponse.success(message="删除成功" if ok else "文件不存在")

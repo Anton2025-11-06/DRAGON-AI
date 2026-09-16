@@ -41,13 +41,51 @@
                   v-for="variable in node.variables"
                   :key="variable.name"
                   class="variable-item"
-                  @click="selectVariable(node, variable)"
                 >
-                  <span class="var-icon">{x}</span>
-                  <span class="var-name">{{ variable.name }}</span>
-                  <a-tag size="small" :color="getTypeColor(variable.type)">
-                    {{ variable.type }}
-                  </a-tag>
+                  <div
+                    class="variable-row"
+                    @click="selectVariable(node, variable)"
+                  >
+                    <span class="var-icon">{x}</span>
+                    <span class="var-name">{{ variable.name }}</span>
+                    <a-tag size="small" :color="getTypeColor(variable.type)">
+                      {{ variable.type }}
+                    </a-tag>
+                    <span
+                      v-if="enablePath"
+                      class="path-toggle"
+                      :class="{
+                        active: editingPathKey === pathRowKey(node, variable),
+                      }"
+                      @click.stop="togglePathEdit(node, variable)"
+                    >
+                      路径
+                    </span>
+                  </div>
+                  <div
+                    v-if="editingPathKey === pathRowKey(node, variable)"
+                    class="path-editor"
+                    @click.stop
+                  >
+                    <div class="path-editor-row">
+                      <a-input
+                        v-model:value="pathDraft[editingPathKey]"
+                        size="small"
+                        placeholder="子路径，如 data.list[0]"
+                        @press-enter="insertWithPath(node, variable)"
+                      />
+                      <a-button
+                        size="small"
+                        type="primary"
+                        @click="insertWithPath(node, variable)"
+                      >
+                        插入
+                      </a-button>
+                    </div>
+                    <div class="path-hint">
+                      {{ pathHintText(node, variable) }}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -83,7 +121,7 @@
 import type { Component } from 'vue';
 import type { NodeType, ExtendedVariableType } from '#/api/ai-workflow/types';
 
-import { computed, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import {
   PlusOutlined,
   RightOutlined,
@@ -104,7 +142,10 @@ import {
 } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
-import { buildWorkflowVariableReference } from './variable-reference';
+import {
+  buildWorkflowVariableReference,
+  normalizeVariablePathSuffix,
+} from './variable-reference';
 
 // ==================== 类型定义 ====================
 
@@ -139,12 +180,15 @@ interface Props {
   buttonText?: string;
   /** 是否只显示特定类型的变量 */
   filterTypes?: ExtendedVariableType[];
+  /** 是否允许在变量后追加 JSON 路径/下标再次提取（如 .data.list[0]） */
+  enablePath?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   currentNodeId: '',
   buttonText: '插入变量',
   filterTypes: () => [],
+  enablePath: false,
 });
 
 const emit = defineEmits<{
@@ -171,6 +215,12 @@ const searchText = ref('');
 
 /** 展开的节点 */
 const expandedNodes = ref<Set<string>>(new Set());
+
+/** 子路径输入草稿（按「节点+变量」隔离） */
+const pathDraft = reactive<Record<string, string>>({});
+
+/** 当前展开子路径输入的变量行 key */
+const editingPathKey = ref('');
 
 // ==================== 图标映射 ====================
 
@@ -280,13 +330,13 @@ const filteredNodes = computed<NodeWithVariables[]>(() => {
       .filter((node) => node.variables.length > 0);
   }
 
-  // 按类型过滤
+  // 按类型过滤（类型族匹配，见 typeMatchesFilter）
   if (props.filterTypes.length > 0) {
     nodes = nodes
       .map((node) => ({
         ...node,
         variables: node.variables.filter((v) =>
-          props.filterTypes.includes(v.type),
+          typeMatchesFilter(v.type, props.filterTypes),
         ),
       }))
       .filter((node) => node.variables.length > 0);
@@ -296,6 +346,28 @@ const filteredNodes = computed<NodeWithVariables[]>(() => {
 });
 
 // ==================== 方法 ====================
+
+/**
+ * 变量类型是否命中过滤条件（按「类型族」匹配，不做字面量全等）。
+ *
+ * 之前用 filterTypes.includes(v.type) 精确比较，导致 Array[string]/Array[File]
+ * 等带元素类型的数组、以及 CODE/HTTP 这类声明为 object 但实际可返回数组的
+ * 输出全被过滤掉，列表处理节点的「输入数组」里选不到任何上游变量。
+ */
+function typeMatchesFilter(
+  type: ExtendedVariableType,
+  filterTypes: ExtendedVariableType[],
+): boolean {
+  if (filterTypes.length === 0) return true;
+  const actual = (type ?? '').trim().toLowerCase();
+  const arrayLike = actual === 'array' || actual.startsWith('array[');
+  return filterTypes.some((want) => {
+    const wanted = (want ?? '').trim().toLowerCase();
+    // 要求数组：各种 Array[x] 均命中；object 也放行（代码/HTTP 返回数组很常见）
+    if (wanted === 'array') return arrayLike || actual === 'object';
+    return actual === wanted;
+  });
+}
 
 /**
  * 获取上游节点ID集合
@@ -469,6 +541,10 @@ function getNodeOutputVariables(
     case 'VARIABLE_AGGREGATOR':
       if (config.groups && Array.isArray(config.groups)) {
         config.groups.forEach((group: any) => {
+          // 未填写输出名的聚合组属于待配置状态，不作为可引用变量输出
+          if (!group.outputVariable) {
+            return;
+          }
           variables.push({
             name: group.outputVariable,
             type: group.variableType || 'object',
@@ -509,13 +585,22 @@ function getNodeOutputVariables(
       }
       break;
 
-    case 'LIST_OPERATOR':
-      variables.push({
-        name: config.outputVariable || 'result',
-        type: 'array',
-        description: '列表操作结果',
-      });
+    case 'LIST_OPERATOR': {
+      // 默认输出名与后端 ListOperatorNodeExecutor（cfg.outputVariable or "output"）保持一致
+      variables.push(
+        {
+          name: config.outputVariable || 'output',
+          type: 'array',
+          description: '列表操作结果',
+        },
+        {
+          name: 'count',
+          type: 'number',
+          description: '输入数组元素数量',
+        },
+      );
       break;
+    }
 
     case 'VARIABLE_ASSIGNER':
       if (config.assignments && Array.isArray(config.assignments)) {
@@ -531,7 +616,7 @@ function getNodeOutputVariables(
 
     case 'TOOL':
       variables.push({
-        name: config.outputVariable || 'result',
+        name: config.outputVariable || 'output',
         type: 'object',
         description: '工具执行结果',
       });
@@ -562,6 +647,8 @@ function getNodeOutputVariables(
  */
 function mapInputFieldType(fieldType: string): ExtendedVariableType {
   const typeMap: Record<string, ExtendedVariableType> = {
+    // 短/长文本已合并为 TEXT，旧图的 SHORT_TEXT / PARAGRAPH 仍保留映射
+    TEXT: 'string',
     SHORT_TEXT: 'string',
     PARAGRAPH: 'string',
     NUMBER: 'number',
@@ -610,11 +697,67 @@ function selectVariable(node: NodeWithVariables, variable: NodeVariable) {
   popoverVisible.value = false;
 }
 
+/**
+ * 子路径输入行的唯一 key
+ */
+function pathRowKey(node: NodeWithVariables, variable: NodeVariable): string {
+  return `${node.id}::${variable.name}`;
+}
+
+/**
+ * 展开/收起某变量的子路径输入
+ */
+function togglePathEdit(node: NodeWithVariables, variable: NodeVariable) {
+  const key = pathRowKey(node, variable);
+  editingPathKey.value = editingPathKey.value === key ? '' : key;
+  if (pathDraft[key] === undefined) {
+    pathDraft[key] = '';
+  }
+}
+
+/** 当前行的子路径后缀；null 表示写法非法 */
+function draftPathSuffix(key: string): null | string {
+  return normalizeVariablePathSuffix(pathDraft[key] || '');
+}
+
+/**
+ * 子路径输入下的实时提示（预览将插入的引用 / 写法错误）
+ */
+function pathHintText(node: NodeWithVariables, variable: NodeVariable): string {
+  const key = pathRowKey(node, variable);
+  const suffix = draftPathSuffix(key);
+  if (suffix === null) {
+    return '只支持字段名、. 与 [下标]，如 data.list[0]';
+  }
+  if (!(pathDraft[key] || '').trim()) {
+    return '留空即引用整个变量；可填 data.list 或 [0]（上游是 JSON 文本时会自动解析后取值）';
+  }
+  return `将插入：${node.label || node.id}.${variable.name}${suffix}`;
+}
+
+/**
+ * 按「变量 + 子路径」插入引用
+ */
+function insertWithPath(node: NodeWithVariables, variable: NodeVariable) {
+  const suffix = draftPathSuffix(pathRowKey(node, variable));
+  if (suffix === null) {
+    return; // 提示文案已给出，等用户改正写法
+  }
+  const reference = buildWorkflowVariableReference(node, variable, suffix);
+  emit('select', reference, variable, node);
+  editingPathKey.value = '';
+  popoverVisible.value = false;
+}
+
 // ==================== 监听 ====================
 
-// 打开弹出框时，默认展开第一个节点
+// 打开弹出框时，默认展开第一个节点（并收起上次的子路径输入）
 watch(popoverVisible, (visible) => {
-  if (visible && filteredNodes.value.length > 0) {
+  if (!visible) {
+    return;
+  }
+  editingPathKey.value = '';
+  if (filteredNodes.value.length > 0) {
     expandedNodes.value = new Set([filteredNodes.value[0]!.id]);
   }
 });
@@ -705,15 +848,50 @@ defineExpose({
     }
 
     .variable-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px 8px 24px;
-      cursor: pointer;
-      transition: background-color 0.2s;
+      .variable-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px 8px 24px;
+        cursor: pointer;
+        transition: background-color 0.2s;
 
-      &:hover {
-        background-color: #e6f7ff;
+        &:hover {
+          background-color: #e6f7ff;
+        }
+      }
+
+      .path-toggle {
+        flex-shrink: 0;
+        padding: 0 5px;
+        font-size: 11px;
+        line-height: 16px;
+        color: #1890ff;
+        border: 1px solid #91d5ff;
+        border-radius: 3px;
+
+        &:hover,
+        &.active {
+          color: #fff;
+          background-color: #1890ff;
+        }
+      }
+
+      .path-editor {
+        padding: 6px 12px 8px 24px;
+
+        .path-editor-row {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .path-hint {
+          margin-top: 4px;
+          font-size: 11px;
+          line-height: 16px;
+          color: #8c8c8c;
+        }
       }
 
       .var-icon {

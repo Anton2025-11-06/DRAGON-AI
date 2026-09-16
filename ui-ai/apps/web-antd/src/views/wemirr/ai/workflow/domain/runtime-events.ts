@@ -57,6 +57,26 @@ export interface NodeFailedEvent extends WorkflowRuntimeEventBase {
   stackTrace?: string;
 }
 
+/** 并行分支等待超时被停止的节点（超时策略产生的终态，非失败） */
+export interface NodeTimeoutEvent extends WorkflowRuntimeEventBase {
+  type: 'node.timeout';
+  nodeId: string;
+  /** 所属并行分支 id */
+  branchId?: string;
+  duration?: number;
+  error?: string;
+}
+
+/** 并行分支被其他分支先完成短路的节点（非失败） */
+export interface NodeCancelledEvent extends WorkflowRuntimeEventBase {
+  type: 'node.cancelled';
+  nodeId: string;
+  /** 所属并行分支 id */
+  branchId?: string;
+  duration?: number;
+  error?: string;
+}
+
 export interface WorkflowPausedEvent extends WorkflowRuntimeEventBase {
   type: 'workflow.paused';
   nodeId: string;
@@ -80,10 +100,12 @@ export interface WorkflowCancelledEvent extends WorkflowRuntimeEventBase {
 }
 
 export type WorkflowRuntimeEvent =
+  | NodeCancelledEvent
   | NodeCompletedEvent
   | NodeDeltaEvent
   | NodeFailedEvent
   | NodeStartedEvent
+  | NodeTimeoutEvent
   | WorkflowCancelledEvent
   | WorkflowCompletedEvent
   | WorkflowFailedEvent

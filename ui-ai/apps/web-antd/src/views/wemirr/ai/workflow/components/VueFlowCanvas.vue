@@ -30,6 +30,7 @@ import {
   VueFlow,
 } from '@vue-flow/core';
 import { MiniMap } from '@vue-flow/minimap';
+import { message } from 'ant-design-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 import { generateUUID } from '#/utils/uuid';
@@ -189,10 +190,49 @@ function onPaneClick() {
 }
 
 /**
+ * 连线合法性判定：禁止自环，更禁止从出口连回上游节点（会形成环路）。
+ *
+ * 判定方式：从 target 沿现有出边能正向走到 source，则 target 就是 source
+ * 的上游，新增 source → target 会构成环，必须拒绝。
+ */
+function isConnectionAllowed(connection: Connection): boolean {
+  const source = connection.source;
+  const target = connection.target;
+  if (!source || !target) return false;
+  if (source === target) return false;
+
+  const adjacency = new Map<string, string[]>();
+  for (const edge of getEdges.value) {
+    const list = adjacency.get(edge.source) || [];
+    list.push(edge.target);
+    adjacency.set(edge.source, list);
+  }
+
+  const visited = new Set<string>([target]);
+  const stack = [target];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const next of adjacency.get(current) || []) {
+      if (next === source) return false;
+      if (!visited.has(next)) {
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * 连接事件
  */
 function onConnect(connection: Connection) {
   if (props.readonly) return;
+
+  if (!isConnectionAllowed(connection)) {
+    message.warning('不能连接到上游节点或自身，否则工作流会形成环路');
+    return;
+  }
 
   const newEdge: Edge = {
     id: generateUUID(),
@@ -469,7 +509,8 @@ function focusNode(nodeId: string) {
 }
 
 /**
- * 美化布局：按依赖关系拓扑分层自动排列节点（同层垂直居中），供【适应】按钮一键整理画布
+ * 美化布局：按依赖关系左右分层，每层围绕同一条水平对称轴上下居中，
+ * 供【适应】按钮一键整理画布（主干在水平线上，分支对称展开）
  */
 function beautifyLayout() {
   const nodeList = getNodes.value;
@@ -495,7 +536,7 @@ function beautifyLayout() {
     .map((n) => n.id);
   queue.forEach((id) => levelMap.set(id, 0));
   let level = 0;
-  while (queue.length) {
+  while (queue.length > 0) {
     const size = queue.length;
     for (let i = 0; i < size; i++) {
       const id = queue.shift()!;
@@ -509,10 +550,10 @@ function beautifyLayout() {
     level += 1;
   }
   // 环/孤岛兜底：未分层的节点追加到最新层
-  const maxLevel = nodeList.reduce(
-    (m, n) => Math.max(m, levelMap.get(n.id) ?? 0),
-    0,
-  );
+  let maxLevel = 0;
+  for (const n of nodeList) {
+    maxLevel = Math.max(maxLevel, levelMap.get(n.id) ?? 0);
+  }
   nodeList.forEach((n) => {
     if (!levelMap.has(n.id)) levelMap.set(n.id, maxLevel + 1);
   });
@@ -536,27 +577,47 @@ function beautifyLayout() {
   // 布局参数：列距/行距/边距，节点尺寸优先取实际渲染尺寸
   const NODE_W = 248;
   const NODE_H = 148;
-  const GAP_X = 80;
+  const GAP_X = 100;
   const GAP_Y = 56;
   const PAD = 48;
 
-  const levelIds = [...layerMap.keys()].sort((a, b) => a - b);
+  // vue-flow GraphNode.dimensions 为已渲染尺寸（宽高校准布局用）
+  const sizeOf = (id: string) => {
+    const n = nodeList.find((x) => x.id === id);
+    return {
+      w: n?.dimensions?.width || NODE_W,
+      h: n?.dimensions?.height || NODE_H,
+    };
+  };
+
+  const levelIds = [...layerMap.keys()].toSorted((a, b) => a - b);
+  // 每层的总高度（按实际节点高 + 行距累加），用于围绕同一水平轴对称居中
+  const boxes = levelIds.map((lv) => {
+    const ids = layerMap.get(lv) || [];
+    let height = Math.max(0, ids.length - 1) * GAP_Y;
+    for (const id of ids) height += sizeOf(id).h;
+    return { height, ids, lv };
+  });
+  // 列宽取最宽节点，避免长节点横向重叠
+  const colPitch =
+    Math.max(NODE_W, ...nodeList.map((n) => n.dimensions?.width || NODE_W)) +
+    GAP_X;
+  // 所有层共用一条水平对称轴：最高层的中心线即主干线
+  const axisY = PAD + Math.max(1, ...boxes.map((b) => b.height)) / 2;
+
   const posMap = new Map<string, { x: number; y: number }>();
-  let yCursor = PAD;
-  levelIds.forEach((lv) => {
-    const ids = layerMap.get(lv)!;
-    const layerH = ids.length * (NODE_H + GAP_Y) - GAP_Y;
-    ids.forEach((id, idx) => {
-      const n = nodeList.find((x) => x.id === id);
-      if (!n) return;
-      // vue-flow GraphNode.dimensions 为已渲染尺寸（宽高校准布局用）
-      const { width: w, height: h } = n.dimensions ?? {};
+  boxes.forEach(({ height, ids, lv }) => {
+    // 该层整体居中于对称轴：单节点层正好落在主干水平线上，
+    // 多分支层则以上下对称的方式展开，不再整体向下堆叠
+    let y = axisY - height / 2;
+    ids.forEach((id) => {
+      const { h, w } = sizeOf(id);
       posMap.set(id, {
-        x: PAD + lv * (NODE_W + GAP_X) + (NODE_W - (w || NODE_W)) / 2,
-        y: yCursor + idx * (NODE_H + GAP_Y) + (NODE_H - (h || NODE_H)) / 2,
+        x: PAD + lv * colPitch + (colPitch - GAP_X - w) / 2,
+        y,
       });
+      y += h + GAP_Y;
     });
-    yCursor += layerH + GAP_Y;
   });
 
   // 写回节点位置（重建数组触发响应式更新）

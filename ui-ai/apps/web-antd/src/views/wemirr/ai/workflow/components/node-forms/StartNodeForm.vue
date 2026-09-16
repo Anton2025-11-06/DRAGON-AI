@@ -92,12 +92,10 @@
           <a-select
             v-model:value="editingField.type"
             placeholder="选择字段类型"
+            @change="handleTypeChange"
           >
-            <a-select-option value="SHORT_TEXT">
-              <FontSizeOutlined /> 短文本
-            </a-select-option>
-            <a-select-option value="PARAGRAPH">
-              <AlignLeftOutlined /> 长文本
+            <a-select-option value="TEXT">
+              <FontSizeOutlined /> 文本
             </a-select-option>
             <a-select-option value="NUMBER">
               <NumberOutlined /> 数字
@@ -106,7 +104,7 @@
               <UnorderedListOutlined /> 下拉选择
             </a-select-option>
             <a-select-option value="CHECKBOX">
-              <CheckSquareOutlined /> 复选框
+              <ControlOutlined /> 开关
             </a-select-option>
             <a-select-option value="SINGLE_FILE">
               <FileOutlined /> 单文件
@@ -115,6 +113,7 @@
               <FolderOutlined /> 多文件
             </a-select-option>
           </a-select>
+          <div class="form-hint">短文本与长文本已合并为「文本」类型</div>
         </a-form-item>
 
         <a-form-item label="字段描述">
@@ -141,21 +140,16 @@
           </a-col>
         </a-row>
 
-        <!-- 文本类型特有配置 -->
-        <template
-          v-if="
-            editingField.type === 'SHORT_TEXT' ||
-            editingField.type === 'PARAGRAPH'
-          "
-        >
+        <!-- 文本类型特有配置（短文本 + 长文本已合并） -->
+        <template v-if="isTextInputType(editingField.type)">
           <a-row :gutter="16">
             <a-col :span="12">
               <a-form-item label="最大长度">
                 <a-input-number
                   v-model:value="editingField.maxLength"
                   :min="1"
-                  :max="editingField.type === 'SHORT_TEXT' ? 256 : 100000"
-                  placeholder="可选"
+                  :max="100_000"
+                  placeholder="可选，默认不限制"
                   style="width: 100%"
                 />
               </a-form-item>
@@ -201,16 +195,38 @@
           </a-row>
         </template>
 
-        <!-- 下拉选择类型特有配置 -->
+        <!-- 下拉选择类型特有配置：选项列表 -->
         <template v-if="editingField.type === 'SELECT'">
           <a-form-item label="选项列表" required>
-            <a-select
-              v-model:value="editingField.options"
-              mode="tags"
-              placeholder="输入选项后按回车添加"
-              style="width: 100%"
-            />
-            <div class="form-hint">输入选项后按回车添加，可添加多个选项</div>
+            <div class="options-editor">
+              <div
+                v-for="(opt, optIndex) in editingField.options"
+                :key="optIndex"
+                class="option-row"
+              >
+                <span class="option-index">{{ optIndex + 1 }}</span>
+                <a-input
+                  :value="opt"
+                  placeholder="选项文本，如: 中文"
+                  @update:value="(val: any) => updateOption(optIndex, val)"
+                />
+                <a-button
+                  type="text"
+                  size="small"
+                  danger
+                  @click="removeOption(optIndex)"
+                >
+                  <DeleteOutlined />
+                </a-button>
+              </div>
+              <a-button type="dashed" size="small" block @click="addOption">
+                <template #icon><PlusOutlined /></template>
+                添加选项
+              </a-button>
+            </div>
+            <div class="form-hint">
+              至少配置一个选项，预览运行时下拉框会按此列表生成选项
+            </div>
           </a-form-item>
         </template>
 
@@ -246,15 +262,16 @@
           </a-row>
           <a-form-item
             v-if="editingField.type === 'FILE_LIST'"
-            label="最大文件数量"
+            label="最多文件数量"
           >
             <a-input-number
               v-model:value="editingField.maxFileCount"
               :min="1"
               :max="20"
-              placeholder="默认5"
+              :placeholder="`默认${DEFAULT_MAX_FILE_COUNT}`"
               style="width: 100%"
             />
+            <div class="form-hint">预览运行时超过该数量的文件会被拒绝上传</div>
           </a-form-item>
         </template>
       </a-form>
@@ -282,17 +299,12 @@
  * START 节点配置表单
  * 定义工作流输入字段，支持多种输入类型和字段拖拽排序
  */
-import type {
-  InputField,
-  InputFieldType,
-  StartNodeConfig,
-} from '#/api/ai-workflow/types';
+import type { InputField, StartNodeConfig } from '#/api/ai-workflow/types';
 
 import { computed, reactive, ref, watch } from 'vue';
 
 import {
-  AlignLeftOutlined,
-  CheckSquareOutlined,
+  ControlOutlined,
   DeleteOutlined,
   EditOutlined,
   FileOutlined,
@@ -303,7 +315,16 @@ import {
   PlusOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons-vue';
+import { message } from 'ant-design-vue';
 import draggable from 'vuedraggable';
+
+import {
+  DEFAULT_MAX_FILE_COUNT,
+  getInputFieldTypeColor,
+  getInputFieldTypeLabel,
+  isTextInputType,
+  normalizeInputFieldType,
+} from '../../domain/input-field-type';
 
 // Props
 interface Props {
@@ -329,7 +350,7 @@ const editingFieldIndex = ref(-1);
 const editingField = reactive<InputField>({
   name: '',
   label: '',
-  type: 'SHORT_TEXT',
+  type: 'TEXT',
   required: false,
   defaultValue: undefined,
   description: '',
@@ -355,27 +376,7 @@ const maxFileSizeMB = computed({
   },
 });
 
-// 字段类型标签映射
-const fieldTypeLabels: Record<InputFieldType, string> = {
-  SHORT_TEXT: '短文本',
-  PARAGRAPH: '长文本',
-  NUMBER: '数字',
-  SELECT: '下拉选择',
-  CHECKBOX: '复选框',
-  SINGLE_FILE: '单文件',
-  FILE_LIST: '多文件',
-};
-
-// 字段类型颜色映射
-const fieldTypeColors: Record<InputFieldType, string> = {
-  SHORT_TEXT: 'blue',
-  PARAGRAPH: 'cyan',
-  NUMBER: 'green',
-  SELECT: 'purple',
-  CHECKBOX: 'orange',
-  SINGLE_FILE: 'magenta',
-  FILE_LIST: 'red',
-};
+// 字段类型标签/颜色映射统一维护在 domain/input-field-type.ts
 
 // 监听配置变化
 watch(
@@ -389,15 +390,70 @@ watch(
 /**
  * 获取字段类型标签
  */
-function getFieldTypeLabel(type: InputFieldType): string {
-  return fieldTypeLabels[type] || type;
+function getFieldTypeLabel(type: string): string {
+  return getInputFieldTypeLabel(type);
 }
 
 /**
  * 获取字段类型颜色
  */
-function getFieldTypeColor(type: InputFieldType): string {
-  return fieldTypeColors[type] || 'default';
+function getFieldTypeColor(type: string): string {
+  return getInputFieldTypeColor(type);
+}
+
+/**
+ * 字段类型切换：清理与旧类型相关的特有配置，避免残留字段干扰
+ */
+function handleTypeChange() {
+  const type = normalizeInputFieldType(editingField.type);
+  editingField.type = type;
+  if (isTextInputType(type)) {
+    editingField.minValue = undefined;
+    editingField.maxValue = undefined;
+    editingField.options = [];
+  } else if (type === 'NUMBER') {
+    editingField.maxLength = undefined;
+    editingField.pattern = undefined;
+    editingField.patternMessage = undefined;
+    editingField.options = [];
+  } else if (type === 'SELECT') {
+    if (!editingField.options || editingField.options.length === 0) {
+      editingField.options = [''];
+    }
+  } else {
+    editingField.maxLength = undefined;
+    editingField.pattern = undefined;
+    editingField.patternMessage = undefined;
+    editingField.minValue = undefined;
+    editingField.maxValue = undefined;
+    editingField.options = [];
+  }
+  if (type !== 'FILE_LIST') {
+    editingField.maxFileCount = undefined;
+  }
+  if (type !== 'SINGLE_FILE' && type !== 'FILE_LIST') {
+    editingField.allowedFileTypes = [];
+    editingField.maxFileSize = undefined;
+  }
+}
+
+// ==================== 下拉选项编辑 ====================
+
+function addOption() {
+  if (!editingField.options) {
+    editingField.options = [];
+  }
+  editingField.options.push('');
+}
+
+function updateOption(index: number, value: string) {
+  if (editingField.options) {
+    editingField.options[index] = value;
+  }
+}
+
+function removeOption(index: number) {
+  editingField.options?.splice(index, 1);
 }
 
 /**
@@ -408,7 +464,7 @@ function addField() {
   Object.assign(editingField, {
     name: '',
     label: '',
-    type: 'SHORT_TEXT',
+    type: 'TEXT',
     required: false,
     defaultValue: undefined,
     description: '',
@@ -437,11 +493,12 @@ function editField(index: number) {
   Object.assign(editingField, {
     name: field.name || '',
     label: field.label || '',
-    type: field.type || 'SHORT_TEXT',
+    // 旧图的 SHORT_TEXT / PARAGRAPH 统一归一为 TEXT，保证编辑弹窗能回显
+    type: normalizeInputFieldType(field.type),
     required: field.required || false,
     defaultValue: field.defaultValue,
     description: field.description || '',
-    options: field.options || [],
+    options: field.options ? [...field.options] : [],
     maxLength: field.maxLength,
     minValue: field.minValue,
     maxValue: field.maxValue,
@@ -462,37 +519,61 @@ function saveField() {
     return;
   }
 
+  const type = normalizeInputFieldType(editingField.type);
+
+  // 下拉选择：选项是此类型的必配项（BUG6：原来没有可用的选项配置入口）
+  const options = (editingField.options || [])
+    .map((opt) => String(opt ?? '').trim())
+    .filter((opt) => opt !== '');
+  if (type === 'SELECT') {
+    if (options.length === 0) {
+      message.warning('请至少配置一个下拉选项');
+      return;
+    }
+    if (new Set(options).size !== options.length) {
+      message.warning('下拉选项不能重复');
+      return;
+    }
+  }
+
+  // 字段名重复检测（排除自身）
+  const duplicated = (formData.fields || []).some(
+    (item, itemIndex) =>
+      itemIndex !== editingFieldIndex.value && item.name === editingField.name,
+  );
+  if (duplicated) {
+    message.warning(`字段名称已存在: ${editingField.name}`);
+    return;
+  }
+
   const field: InputField = {
     name: editingField.name,
     label: editingField.label,
-    type: editingField.type,
+    type,
     required: editingField.required,
     defaultValue: editingField.defaultValue,
     description: editingField.description,
   };
 
   // 根据类型添加特定配置
-  if (editingField.type === 'SHORT_TEXT' || editingField.type === 'PARAGRAPH') {
+  if (isTextInputType(type)) {
     if (editingField.maxLength) field.maxLength = editingField.maxLength;
     if (editingField.pattern) {
       field.pattern = editingField.pattern;
       field.patternMessage = editingField.patternMessage;
     }
-  } else if (editingField.type === 'NUMBER') {
+  } else if (type === 'NUMBER') {
     if (editingField.minValue !== undefined)
       field.minValue = editingField.minValue;
     if (editingField.maxValue !== undefined)
       field.maxValue = editingField.maxValue;
-  } else if (editingField.type === 'SELECT') {
-    field.options = editingField.options;
-  } else if (
-    editingField.type === 'SINGLE_FILE' ||
-    editingField.type === 'FILE_LIST'
-  ) {
+  } else if (type === 'SELECT') {
+    field.options = options;
+  } else if (type === 'SINGLE_FILE' || type === 'FILE_LIST') {
     if (editingField.allowedFileTypes?.length)
       field.allowedFileTypes = editingField.allowedFileTypes;
     if (editingField.maxFileSize) field.maxFileSize = editingField.maxFileSize;
-    if (editingField.type === 'FILE_LIST' && editingField.maxFileCount) {
+    if (type === 'FILE_LIST' && editingField.maxFileCount) {
       field.maxFileCount = editingField.maxFileCount;
     }
   }
@@ -640,6 +721,25 @@ function handleChange() {
     margin-top: 4px;
     font-size: 11px;
     color: #8c8c8c;
+  }
+
+  .options-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    .option-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .option-index {
+      width: 18px;
+      font-size: 11px;
+      color: #8c8c8c;
+      text-align: right;
+    }
   }
 }
 

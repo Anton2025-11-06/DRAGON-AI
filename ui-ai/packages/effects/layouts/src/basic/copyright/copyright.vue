@@ -45,11 +45,11 @@ withDefaults(defineProps<Props>(), {
       {{ companyName }}
     </a>
     <a
-      href="https://beian.miit.gov.cn/"
+      href="https://github.com/Anton2025-11-06/DRAGON-AI/"
       class="hover:text-primary-hover mx-1"
       target="_blank"
     >
-      湘ICP备15017829号-2
+      GitHub项目地址
     </a>
   </div>
 </template>

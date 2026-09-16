@@ -9,9 +9,19 @@
         </a-button>
       </div>
 
+      <!-- BUG8：多个聚合组输出同名时页面即时提示，不用等到运行才发现 -->
+      <a-alert
+        v-if="duplicateNames.length > 0"
+        type="error"
+        show-icon
+        class="duplicate-alert"
+        message="聚合输出变量名重复"
+        :description="`以下变量名被多个聚合组使用：${duplicateNames.join('、')}，下游只会引用到最后一个组的值`"
+      />
+
       <draggable
         v-model="formData.groups"
-        item-key="outputVariable"
+        item-key="id"
         handle=".drag-handle"
         @change="handleChange"
       >
@@ -38,8 +48,12 @@
                   v-model:value="group.outputVariable"
                   placeholder="aggregatedResult"
                   size="small"
+                  :status="isDuplicateGroup(group) ? 'error' : undefined"
                   @change="handleChange"
                 />
+                <div v-if="isDuplicateGroup(group)" class="field-error">
+                  输出变量名重复，请为每个聚合组设置唯一名称
+                </div>
               </a-form-item>
 
               <!-- 变量类型约束 -->
@@ -172,7 +186,7 @@ import {
   MinusCircleOutlined,
   PlusOutlined,
 } from '@ant-design/icons-vue';
-import { reactive, watch } from 'vue';
+import { computed, reactive, watch } from 'vue';
 import draggable from 'vuedraggable';
 
 import { VariableInput } from '../variable-selector';
@@ -190,9 +204,15 @@ const emit = defineEmits<{
   (e: 'update:config', config: VariableAggregatorConfig): void;
 }>();
 
+// 生成唯一ID（拖拽/渲染的稳定 key；输出变量名可能为空或重名，不能当 key）
+function generateId(): string {
+  return `group_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
 // 创建默认聚合组
 function createDefaultGroup(): AggregationGroup {
   return {
+    id: generateId(),
     outputVariable: '',
     sourceVariables: [''],
     variableType: 'any' as AggregatorVariableType,
@@ -209,21 +229,71 @@ const formData = reactive<VariableAggregatorFormData>({
   groups: [createDefaultGroup()],
 });
 
+/** 补全稳定 key 与至少一行的源变量占位，保证空行也能渲染出来 */
+function normalizeGroups(
+  groups: AggregationGroup[] | undefined,
+): AggregationGroup[] {
+  if (!groups || groups.length === 0) {
+    return [createDefaultGroup()];
+  }
+  return groups.map((g) => ({
+    ...g,
+    id: g.id || generateId(),
+    sourceVariables: g.sourceVariables?.length ? [...g.sourceVariables] : [''],
+  }));
+}
+
+/**
+ * 本地刚 emit 出去的配置快照（nodeId + 组内容）。
+ * BUG8：父层（PropertyPanel / node.data）会把这份配置原样回传，若不加守卫，
+ * 回传值会立即重建 formData，把用户刚点出来的空聚合组/空源变量行覆盖掉，
+ * 表现为「点击添加聚合组、添加源变量毫无反应」。
+ */
+let emittedSignature = '';
+
+function signatureOf(groups: AggregationGroup[] | undefined): string {
+  return JSON.stringify(
+    (groups || []).map((g) => [
+      g.outputVariable || '',
+      g.variableType || '',
+      g.strategy || '',
+      g.sourceVariables || [],
+    ]),
+  );
+}
+
 // 监听配置变化
 watch(
   () => props.config,
   (config) => {
-    if (config.groups && config.groups.length > 0) {
-      formData.groups = config.groups.map((g) => ({
-        ...g,
-        sourceVariables: [...(g.sourceVariables || [''])],
-      }));
-    } else {
-      formData.groups = [createDefaultGroup()];
+    const groups = config?.groups;
+    if (`${props.nodeId}|${signatureOf(groups)}` === emittedSignature) {
+      // 自己刚 emit 的内容，保留本地编辑状态（含未填写的空行）
+      return;
     }
+    emittedSignature = '';
+    formData.groups = normalizeGroups(groups);
   },
   { immediate: true, deep: true },
 );
+
+/** 输出变量名重复的变量名列表（忽略空值，空值由必填语义另行提示） */
+const duplicateNames = computed<string[]>(() => {
+  const counts = new Map<string, number>();
+  for (const group of formData.groups || []) {
+    const name = (group.outputVariable || '').trim();
+    if (!name) {
+      continue;
+    }
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return [...counts].filter(([, count]) => count > 1).map(([name]) => name);
+});
+
+function isDuplicateGroup(group: AggregationGroup): boolean {
+  const name = (group.outputVariable || '').trim();
+  return !!name && duplicateNames.value.includes(name);
+}
 
 // 获取策略提示
 function getStrategyHint(strategy?: AggregationStrategy): string {
@@ -272,14 +342,15 @@ function removeSourceVariable(group: AggregationGroup, index: number) {
 
 // 处理配置变更
 function handleChange() {
+  // BUG8：不再过滤 outputVariable 为空的组与为空的源变量行，
+  // 用户加出来的空行属于待填写状态，过滤掉会让新增瞬间消失
   const config: VariableAggregatorConfig = {
-    groups: formData.groups
-      ?.map((g) => ({
-        ...g,
-        sourceVariables: g.sourceVariables?.filter((v) => v) || [],
-      }))
-      .filter((g) => g.outputVariable),
+    groups: (formData.groups || []).map((g) => ({
+      ...g,
+      sourceVariables: [...(g.sourceVariables || [])],
+    })),
   };
+  emittedSignature = `${props.nodeId}|${signatureOf(config.groups)}`;
   emit('update:config', config);
 }
 </script>
@@ -306,6 +377,10 @@ function handleChange() {
   }
 
   .groups-section {
+    .duplicate-alert {
+      margin-bottom: 12px;
+    }
+
     .section-header {
       display: flex;
       align-items: center;
@@ -357,6 +432,12 @@ function handleChange() {
           :deep(.ant-form-item-label) {
             padding-bottom: 2px;
           }
+        }
+
+        .field-error {
+          margin-top: 4px;
+          font-size: 11px;
+          color: #ff4d4f;
         }
 
         .strategy-hint {

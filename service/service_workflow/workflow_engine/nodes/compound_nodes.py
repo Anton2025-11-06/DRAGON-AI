@@ -13,20 +13,23 @@ import json
 from typing import Optional
 
 from service.service_workflow.workflow_engine.context import ExecutionContext
+from service.service_workflow.workflow_engine.graph import BRANCH_HANDLE_PREFIX
 from service.service_workflow.workflow_engine.nodes.base import (
     BaseNodeExecutor, NodeResult, issue,
 )
 
+BRANCH_PREFIX = BRANCH_HANDLE_PREFIX
+
 
 class LoopNodeExecutor(BaseNodeExecutor):
     """LOOP：while 循环 —— 评估 exitCondition（{{引用}} 或 true/false），不满足则执行 branch:body
-    子图，body 收敛后回到本节点重新评估。maxIterations 防失控（默认 1000）。"""
+    子图，body 收敛后回到本节点重新评估。maxIterations 防失控（默认 3）。"""
 
     node_type = "LOOP"
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
-        max_iter = int(cfg.get("maxIterations") or 1000)
+        max_iter = int(cfg.get("maxIterations") or 3)
         loop_var = cfg.get("loopVariable") or "loopIndex"
         iterations = 0
         last_outputs: dict = {}
@@ -154,33 +157,66 @@ class IterationNodeExecutor(BaseNodeExecutor):
 
 
 class ParallelNodeExecutor(BaseNodeExecutor):
-    """PARALLEL：显式并行屏障 —— 各 branch:{id} 分支并行执行，按 waitStrategy 汇合：
-    ALL 等全部 / ANY 任一 / FIRST 第一个（按画布 y 序优先）。"""
+    """PARALLEL：显式并行屏障 —— 各分支并行执行，按 waitStrategy 汇合：
+    ALL 等全部 / ANY 任一 / FIRST 第一个（按画布 y 序优先）。
+
+    分支识别优先级：
+    1. node.data.branches 显式配置的分支 id（走 branch:{id} 端口）
+    2. 画布上连出的 branch:{id} 端口出边
+    3. BUG15：并行节点在画布上只有一个 output 端口（不像 IF_ELSE 有多个分支端口），
+       用户是从同一个出口连出多条线代表多个并行分支，这些边的 source_handle 都是
+       output。按端口取不到 branch:* 时，把 output 端口的每条出边各视为一个分支，
+       否则并行节点退化成普通扇出、等待策略（任一完成）完全不生效。
+    """
 
     node_type = "PARALLEL"
 
+    # 画布单出口虚拟分支的 id 前缀（不是端口，只用于区分分支归属）
+    VIRTUAL_PREFIX = "node:"
+
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
+        # BUG13：与 IF_ELSE 一致，把入边上游的输出透传进本节点输出（铺底），
+        # 否则没有分支连线时追踪里只剩一个空 branches，看不到输入数据流过
+        passthrough = self.input_pass_through(ctx)
+        # 本节点要等分支汇合后才 COMPLETED，引擎在分支内节点跑完后才统一写 output；
+        # 先把透传数据铺进上下文，分支入口节点（并行后直接接的大模型等）才能
+        # 引用到 {{并行分支.xxx}}，节点追踪的输入视图也不会空
+        if passthrough:
+            ctx.set_node_output(self.node.id, passthrough)
         branches = cfg.get("branches") or []
-        if not branches:
-            # 未显式配置分支：取全部 branch:* 出边
-            outs = self.graph.get_out_edges(self.node.id)
-            branch_ids = [h[len("branch:"):] for h in
-                          (e.source_handle or "" for e in outs)
-                          if h.startswith("branch:")]
-            branches = [{"id": b, "name": b} for b in branch_ids]
-        if not branches:
-            return NodeResult(output={"branches": {}})
+        branch_ids: list[str] = []
+        entries: dict[str, list[str]] = {}
+        if branches:
+            branch_ids = [str(b.get("id")) for b in branches if b.get("id")]
+        else:
+            for edge in (self.graph.get_out_edges(self.node.id) or []):
+                handle = edge.source_handle or ""
+                if handle.startswith(BRANCH_PREFIX):
+                    bid = handle[len(BRANCH_PREFIX):]
+                    entry_ids = [edge.target]
+                else:
+                    bid = f"{self.VIRTUAL_PREFIX}{edge.target}"
+                    entry_ids = [edge.target]
+                if bid in entries:
+                    # 同一分支端口连多个节点 = 该分支的多个入口，一起收进分支
+                    entries[bid].append(edge.target)
+                    continue
+                entries[bid] = entry_ids
+                branch_ids.append(bid)
+        if not branch_ids:
+            return NodeResult(output={**passthrough, "branches": {}})
 
         strategy = (cfg.get("waitStrategy") or "ALL").upper()
         timeout_ms = int(cfg.get("timeout") or 0)
-        branch_ids = [str(b.get("id")) for b in branches if b.get("id")]
 
         results = await self.runtime.run_branches(
-            self.node, branch_ids, wait_strategy=strategy, timeout_ms=timeout_ms)
+            self.node, branch_ids, wait_strategy=strategy,
+            timeout_ms=timeout_ms, entries=entries)
 
         completed = {bid: bool(v) for bid, v in results.items()}
         return NodeResult(output={
+            **passthrough,
             "branches": results,
             "completed": completed,
             "waitStrategy": strategy,
@@ -188,9 +224,10 @@ class ParallelNodeExecutor(BaseNodeExecutor):
 
     @staticmethod
     def validate_node(node, graph) -> list:
-        issues = []
-        outs = [e for e in (graph.get_out_edges(node.id) or [])
-                if (e.source_handle or "").startswith("branch:")]
-        if not outs:
-            issues.append(issue("PAR_NO_BRANCH", "ERROR", "并行节点没有分支连线", node))
-        return issues
+        # issues = []
+        # outs = [e for e in (graph.get_out_edges(node.id) or [])
+        #         if (e.source_handle or "").startswith("branch:")]
+        # if not outs:
+        #     issues.append(issue("PAR_NO_BRANCH", "ERROR", "并行节点没有分支连线", node))
+        # return issues
+        return []

@@ -2,15 +2,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from common.common_entity.response_schema import ApiResponse
+from common.common_exception.custom_exception import WorkflowGraphError, UnauthorizedException
 from common.common_log.log_init import log
-
-
-class UnauthorizedException(Exception):
-    def __init__(self, message: str):
-        # 调用父类构造，保存异常信息到 args
-        super().__init__(message)
-        self.message = message
 
 
 def register_exception_handlers(app: FastAPI):
@@ -19,6 +14,12 @@ def register_exception_handlers(app: FastAPI):
         log.error(f"HTTPException: {exc.status_code} - {exc.detail}")
         return JSONResponse(status_code=exc.status_code,
                             content=ApiResponse(code=exc.status_code, message="请求失败").dict())
+
+    @app.exception_handler(WorkflowGraphError)
+    async def workflow_graph_exception_handler(request, exc: WorkflowGraphError):
+        log.error(f"WorkflowGraphError: {exc.issues}")
+        return JSONResponse(status_code=400,
+                            content=ApiResponse(code=400, message='\n'.join([i.message for i in exc.issues])).dict())
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):

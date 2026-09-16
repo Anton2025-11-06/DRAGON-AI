@@ -16,7 +16,7 @@ BUILTIN_TEMPLATES: list[dict] = [
                 {"id": "start_1", "type": "START", "label": "开始",
                  "position": {"x": 100, "y": 200},
                  "data": {"fields": [
-                     {"name": "query", "label": "用户问题", "type": "PARAGRAPH", "required": True},
+                     {"name": "query", "label": "用户问题", "type": "TEXT", "required": True},
                  ]}},
                 {"id": "llm_1", "type": "LLM", "label": "大模型",
                  "position": {"x": 350, "y": 200},
@@ -46,7 +46,7 @@ BUILTIN_TEMPLATES: list[dict] = [
                 {"id": "start_1", "type": "START", "label": "开始",
                  "position": {"x": 80, "y": 220},
                  "data": {"fields": [
-                     {"name": "query", "label": "用户问题", "type": "PARAGRAPH", "required": True},
+                     {"name": "query", "label": "用户问题", "type": "TEXT", "required": True},
                  ]}},
                 {"id": "kb_1", "type": "KNOWLEDGE_RETRIEVAL", "label": "知识检索",
                  "position": {"x": 320, "y": 220},
@@ -83,7 +83,7 @@ BUILTIN_TEMPLATES: list[dict] = [
                 {"id": "start_1", "type": "START", "label": "开始",
                  "position": {"x": 80, "y": 260},
                  "data": {"fields": [
-                     {"name": "query", "label": "用户问题", "type": "PARAGRAPH", "required": True},
+                     {"name": "query", "label": "用户问题", "type": "TEXT", "required": True},
                  ]}},
                 {"id": "cls_1", "type": "QUESTION_CLASSIFIER", "label": "问题分类",
                  "position": {"x": 320, "y": 260},
@@ -128,7 +128,7 @@ BUILTIN_TEMPLATES: list[dict] = [
                 {"id": "start_1", "type": "START", "label": "开始",
                  "position": {"x": 100, "y": 200},
                  "data": {"fields": [
-                     {"name": "text", "label": "原始文本", "type": "PARAGRAPH", "required": True},
+                     {"name": "text", "label": "原始文本", "type": "TEXT", "required": True},
                  ]}},
                 {"id": "pe_1", "type": "PARAMETER_EXTRACTOR", "label": "参数提取",
                  "position": {"x": 360, "y": 200},
@@ -162,8 +162,8 @@ BUILTIN_TEMPLATES: list[dict] = [
                 {"id": "start_1", "type": "START", "label": "开始",
                  "position": {"x": 80, "y": 200},
                  "data": {"fields": [
-                     {"name": "title", "label": "标题", "type": "SHORT_TEXT", "required": True},
-                     {"name": "items", "label": "要点（逗号分隔）", "type": "PARAGRAPH"},
+                     {"name": "title", "label": "标题", "type": "TEXT", "required": True},
+                     {"name": "items", "label": "要点（逗号分隔）", "type": "TEXT"},
                  ]}},
                 {"id": "code_1", "type": "CODE", "label": "解析要点",
                  "position": {"x": 330, "y": 200},

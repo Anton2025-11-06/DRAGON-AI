@@ -8,10 +8,12 @@
 
 变量引用语法（对齐前端 types.ts 注释）：{{nodeName.variableName}}
 解析顺序：node_id 精确匹配 → node label 匹配 → global 作用域。
-支持嵌套路径：{{node.obj.field}} / {{node.arr.0}}。
+支持嵌套路径与下标（JSONPath 风格子集）：{{node.obj.field}} / {{node.arr[0].name}}
+/ {{node.arr.0}}；路径中途是 JSON 字符串（如大模型输出的 JSON 文本）时会自动解析后继续下钻。
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -211,7 +213,6 @@ class ExecutionContext:
                 urls = file_urls(value)
                 if urls:
                     return "\n".join(urls)
-                import json
                 return json.dumps(value, ensure_ascii=False)
             return "" if value is None else str(value)
 
@@ -222,22 +223,43 @@ class ExecutionContext:
         return [m.group(1) for m in VAR_PATTERN.finditer(text or "")]
 
 
+def parse_json_if_embedded(value: Any) -> Any:
+    """字符串值形如 JSON 对象/数组时解析成结构，否则原样返回。
+
+    大模型等文本节点的输出是字符串，结构化输出/JSON 回复很常见；下游按
+    {{大模型.output.data[0].name}} 再次提取时必须先把它当 JSON 解开，
+    否则点路径/下标永远取不到值。
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "{[":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001  非严格 JSON（单引号/尾逗号等）按原文处理
+        return value
+
+
 def _dig(value: Any, path: str) -> Any:
-    """按路径取嵌套值，支持点分 key 与数组下标（方括号/点下标两种写法）：
-    a.b[0].c / a.b.0.c / [0] / items[2].name。
+    """按路径取嵌套值（JSONPath 风格子集），支持点分 key 与数组下标
+    （方括号/点下标/负下标）：a.b[0].c / a.b.0.c / a[-1] / [0] / items[2].name。
+
+    中途遇到 JSON 字符串会先解析再继续下钻（见 parse_json_if_embedded）。
     """
     if value is None:
         return None
-    tokens = [t for t in re.split(r"[.\[\]]+", path or "") if t]
+    tokens = [t for t in re.split(r"[.\[\]]+", (path or "").strip()) if t]
     if not tokens:
         return value
     for part in tokens:
+        value = parse_json_if_embedded(value)
         if isinstance(value, dict):
             value = value.get(part)
         elif isinstance(value, (list, tuple)):
             try:
                 value = value[int(part)]
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, TypeError):
                 return None
         else:
             return None

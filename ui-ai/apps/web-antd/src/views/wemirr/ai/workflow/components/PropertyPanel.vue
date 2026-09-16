@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /**
  * PropertyPanel 组件
- * 属性面板，根据选中节点类型动态渲染配置表单
+ * 节点配置面板，根据选中节点类型动态渲染配置表单
  * 支持所有 工作流节点类型
  * 集成 NodeTracePanel 显示调试信息
  *
+ * BUG10：无选中节点时不再渲染「属性面板」空页，由父层（editor）直接不渲染本组件
  */
 import type { Component } from 'vue';
 
@@ -22,7 +23,6 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   FileTextOutlined,
-  InboxOutlined,
   PlayCircleOutlined,
   RobotOutlined,
   StopOutlined,
@@ -295,7 +295,7 @@ function handleDeleteNode() {
     :data-selected-node-type="selectedNode?.type || ''"
   >
     <div class="property-panel-header">
-      <span class="title">{{ selectedNode ? '节点配置' : '属性面板' }}</span>
+      <span class="title">节点配置</span>
       <div class="header-actions">
         <a-button
           v-if="selectedNode"
@@ -311,13 +311,8 @@ function handleDeleteNode() {
       </div>
     </div>
 
-    <div v-if="!selectedNode" class="empty-state">
-      <InboxOutlined class="empty-icon" />
-      <span class="empty-text">请选择一个节点进行配置</span>
-    </div>
-
     <div
-      v-else
+      v-if="selectedNode"
       class="property-content"
       data-testid="workflow-property-content"
     >
@@ -416,26 +411,6 @@ function handleDeleteNode() {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-}
-
-.empty-state {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 12px;
-  align-items: center;
-  justify-content: center;
-  padding: 40px 20px;
-
-  .empty-icon {
-    font-size: 48px;
-    color: #d9d9d9;
-  }
-
-  .empty-text {
-    font-size: 13px;
-    color: #8c8c8c;
   }
 }
 
@@ -558,16 +533,6 @@ html[class='dark'] {
 
     .title {
       color: var(--ant-color-text);
-    }
-  }
-
-  .empty-state {
-    .empty-icon {
-      color: var(--ant-color-text-quaternary);
-    }
-
-    .empty-text {
-      color: var(--ant-color-text-secondary);
     }
   }
 

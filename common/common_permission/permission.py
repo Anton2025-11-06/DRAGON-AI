@@ -40,6 +40,13 @@ async def get_login_user(request: Request) -> dict:
         raise UnauthorizedException("未登录，禁止操作！")
     return data
 
+async def get_user_id(request: Request) -> int:
+    try:
+        login_user = await get_login_user(request)
+        return int(login_user.get("user_id") or 0)
+    except Exception:  # noqa: BLE001
+        return 0  # 直连/旁路调用（网关未注入用户）时降级为系统用户
+
 
 async def get_token(request: Request) -> str:
     """获取原始 token 字符串"""

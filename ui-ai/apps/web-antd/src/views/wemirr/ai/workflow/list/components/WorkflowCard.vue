@@ -5,14 +5,14 @@
 import type { WorkflowPageResp } from '#/api/ai-workflow/types';
 
 import {
-  ApiOutlined,
   ApartmentOutlined,
+  ApiOutlined,
   AppstoreOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   HistoryOutlined,
-  PlayCircleOutlined,
+  PlusOutlined,
 } from '@ant-design/icons-vue';
 import { Tag, Tooltip } from 'ant-design-vue';
 
@@ -27,7 +27,7 @@ const emit = defineEmits<{
   (e: 'remove', item: WorkflowPageResp): void;
   (e: 'copy', item: WorkflowPageResp): void;
   (e: 'history', item: WorkflowPageResp): void;
-  (e: 'execute', item: WorkflowPageResp): void;
+  (e: 'chat', item: WorkflowPageResp): void;
   (e: 'api', item: WorkflowPageResp): void;
   (e: 'template', item: WorkflowPageResp): void;
 }>();
@@ -84,8 +84,10 @@ function formatTime(time: string) {
     </div>
 
     <div class="card-footer">
-      <span class="update-time">{{ formatTime(item.updateTime) }}</span>
-      <div class="card-actions">
+      <div class="footer-line">
+        <span class="update-time">{{ formatTime(item.updateTime) }}</span>
+      </div>
+      <div class="footer-line card-actions">
         <Tooltip title="编辑">
           <a-button
             data-testid="workflow-card-edit"
@@ -96,15 +98,16 @@ function formatTime(time: string) {
             <template #icon><EditOutlined /></template>
           </a-button>
         </Tooltip>
-        <!-- 执行按钮常显：未发布时点击由列表页提示先发布（需求 2.1） -->
-        <Tooltip title="执行">
+        <!-- 去对话：原「执行」入口已下线，改由列表页校验 api-key 后打开对话窗口 -->
+        <Tooltip title="去对话">
           <a-button
-            data-testid="workflow-card-execute"
+            data-testid="workflow-card-chat"
             type="text"
             size="small"
-            @click="emit('execute', item)"
+            @click="emit('chat', item)"
           >
-            <template #icon><PlayCircleOutlined /></template>
+            <template #icon><PlusOutlined /></template>
+            去对话
           </a-button>
         </Tooltip>
         <!-- 发布已迁移至工作流编辑页（保存按钮右侧），需求：列表页不再提供发布入口 -->
@@ -254,10 +257,19 @@ function formatTime(time: string) {
 
   .card-footer {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
     padding-top: 12px;
     border-top: 1px solid #f0f0f0;
+
+    // 时间独占一行靠左，操作按钮放在时间的下一行靠左
+    .footer-line {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      justify-content: flex-start;
+    }
 
     .update-time {
       font-size: 12px;
@@ -265,11 +277,8 @@ function formatTime(time: string) {
     }
 
     .card-actions {
-      display: flex;
       gap: 2px;
       flex-wrap: wrap;
-      justify-content: flex-end;
-      max-width: 60%;
     }
   }
 }

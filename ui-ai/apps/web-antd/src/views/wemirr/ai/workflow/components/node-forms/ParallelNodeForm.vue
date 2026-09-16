@@ -18,14 +18,32 @@
       </div>
     </a-form-item>
 
+    <!-- BUG14：「任一完成」策略下可配等待时限，写入 node.data.timeout 传到后台 -->
+    <a-form-item
+      v-if="formData.waitStrategy === 'ANY'"
+      label="等待超时（毫秒）"
+    >
+      <a-input-number
+        v-model:value="formData.timeout"
+        :min="0"
+        :step="1000"
+        placeholder="0 表示不限制"
+        style="width: 100%"
+        @change="handleChange"
+      />
+      <div class="form-hint">
+        等待任一分支完成的最长时间；到时仍无分支完成则不等待，直接带已完成的结果继续
+      </div>
+    </a-form-item>
+
     <a-alert type="info" show-icon class="parallel-help">
       <template #message>并行节点说明</template>
       <template #description>
         <ul class="help-list">
           <li>并行节点可以同时执行多个分支</li>
-          <li>从并行节点的多个输出端口连接不同的节点</li>
-          <li>每个输出端口代表一个并行分支</li>
-          <li>所有分支的输出会合并到一个对象中</li>
+          <li>从并行节点的出口连出多条线，每一条线就是一个并行分支</li>
+          <li>等待全部完成时，所有分支的输出会合并到 branches 中</li>
+          <li>任一完成时，只有先完成的那一路往下游传递</li>
         </ul>
       </template>
     </a-alert>
@@ -57,6 +75,7 @@ const emit = defineEmits<{
 // 表单数据
 const formData = reactive<ParallelNodeConfig>({
   waitStrategy: 'ALL',
+  timeout: 0,
 });
 
 // 监听配置变化
@@ -64,12 +83,17 @@ watch(
   () => props.config,
   (config) => {
     formData.waitStrategy = config.waitStrategy || 'ALL';
+    formData.timeout = config.timeout ?? 0;
   },
   { immediate: true, deep: true },
 );
 
 // 处理配置变更
 function handleChange() {
+  // 非「任一完成」策略不使用等待超时，清零避免残留配置干扰
+  if (formData.waitStrategy !== 'ANY') {
+    formData.timeout = 0;
+  }
   emit('update:config', { ...formData });
 }
 </script>

@@ -1,7 +1,7 @@
 <script lang="ts" setup name="WorkflowEditorPage">
 /**
  * 工作流编辑器页面
- * 集成画布、节点面板、属性面板、执行监控等组件
+ * 集成画布、节点面板、节点配置面板、执行监控等组件
  */
 import type { NodeType } from '#/api/ai-workflow/types';
 
@@ -133,7 +133,7 @@ const inputVariables = computed(() => {
       return fields.map((field: any) => ({
         name: field.name,
         label: field.label || field.name,
-        type: field.type || 'SHORT_TEXT',
+        type: field.type || 'TEXT',
         defaultValue: field.defaultValue,
         description: field.description || field.label,
         required: field.required || false,
@@ -165,7 +165,7 @@ const inputVariables = computed(() => {
   return fields.map((field: any) => ({
     name: field.name,
     label: field.label || field.name,
-    type: field.type || 'SHORT_TEXT',
+    type: field.type || 'TEXT',
     defaultValue: field.defaultValue,
     description: field.description || field.label,
     required: field.required || false,
@@ -323,9 +323,14 @@ async function handleGraphReady() {
 
 /**
  * 处理节点点击
+ *
+ * BUG9：调试面板是盖在右侧配置区上方的无遮罩抽屉，面板开着时点画布节点，
+ * 选中的节点配置表单被压在抽屉后面看不见。这里点节点即收起调试抽屉，让位给
+ * 节点配置页（调试面板自身的节点跳转走 handleDebugNodeClick，不受影响）。
  */
 function handleNodeClick(_node: any) {
   // 节点选中由 VueFlowCanvas 和 store 处理
+  showDebugPanel.value = false;
 }
 
 /**
@@ -401,21 +406,32 @@ function handleExpandAll() {
 
 /**
  * 切换调试模式
+ *
+ * BUG4：原来以 workflowStore.isDebugMode 作为开关来源，但调试抽屉能被它自己的
+ * 关闭按钮直接关掉（只把 showDebugPanel 置 false），两个状态一旦分歧，下一次
+ * 点击就变成 true -> false，面板不出现，必须点两次。现在 showDebugPanel 是唯一
+ * 事实来源，isDebugMode 只作为它的派生状态（见下方 watch）。
  */
 function toggleDebugMode() {
-  workflowStore.isDebugMode = !workflowStore.isDebugMode;
-  showDebugPanel.value = workflowStore.isDebugMode;
-
-  // 如果开启调试模式，设置节点名称解析器
-  if (workflowStore.isDebugMode) {
-    debugStore.setNodeNameResolver(getNodeFriendlyName);
-  }
-
-  // 如果关闭调试模式，重置调试状态
-  if (!workflowStore.isDebugMode) {
-    debugStore.clearExecutionState();
-  }
+  showDebugPanel.value = !showDebugPanel.value;
 }
+
+// 面板显隐统一联动：store 状态、节点名称解析器、调试数据清理
+watch(showDebugPanel, async (visible) => {
+  workflowStore.isDebugMode = visible;
+
+  if (!visible) {
+    debugStore.clearExecutionState();
+    return;
+  }
+
+  debugStore.setNodeNameResolver(getNodeFriendlyName);
+  // BUG5：每次打开调试面板都不缓存上一次的调试数据（输入 / 输出 / 追踪详情 / 变量）
+  debugStore.clearExecutionState();
+  workflowStore.resetNodeHighlights();
+  await nextTick();
+  debugPanelRef.value?.resetPanel();
+});
 
 /**
  * 停止调试执行
@@ -604,9 +620,10 @@ onMounted(() => {
       runPreview: () => debugPanelRef.value?.runPreview(),
       setInputValues: async (values: Record<string, any>) => {
         if (!showDebugPanel.value) {
-          workflowStore.isDebugMode = true;
+          // isDebugMode 由 showDebugPanel 的 watch 派生，这里只翻面板开关
           showDebugPanel.value = true;
-          debugStore.setNodeNameResolver(getNodeFriendlyName);
+          // 面板 watch 会在 nextTick 后重置输入区，故多等一拍再写入，避免被清掉
+          await nextTick();
           await nextTick();
         }
         debugPanelRef.value?.setRunnerInputValues(values);
@@ -848,8 +865,8 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <!-- 右侧属性面板 -->
-        <div class="right-panel">
+        <!-- 右侧节点配置面板（BUG10：未选中节点时不再展示「属性面板」空页，直接隐藏） -->
+        <div v-if="workflowStore.selectedNode" class="right-panel">
           <PropertyPanel
             :selected-node="workflowStore.selectedNode"
             @delete-node="handleDeleteNode"
@@ -941,7 +958,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   width: 100%;
-  height: 100vh;
+
+  /* 锚定布局可用内容高（vben 通过 ResizeObserver 注入 --vben-content-height）。
+     写死 100vh 会比内容区实际高度高出一个页头/标签栏，导致整页可滚动、
+     顶部工具栏随滚轮移出视口 */
+  height: var(--vben-content-height, 100vh);
   overflow: hidden;
   background-color: #f5f5f5;
 
@@ -950,6 +971,7 @@ onBeforeUnmount(() => {
     top: 0;
     left: 0;
     z-index: 1000;
+    height: 100vh;
   }
 
   // 确保 Spin 组件不影响布局
@@ -970,6 +992,10 @@ onBeforeUnmount(() => {
 
 .editor-header {
   display: flex;
+  flex: 0 0 56px;
+
+  /* 工具栏不参与 flex 压缩并固定在顶部：画布/面板区域自己内部滚动 */
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   height: 56px;

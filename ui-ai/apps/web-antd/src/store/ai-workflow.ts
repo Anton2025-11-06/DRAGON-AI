@@ -38,9 +38,11 @@ import {
 } from '#/views/wemirr/ai/workflow/domain/ports';
 
 type CanvasNodeExecutionStatus =
+  | 'cancelled'
   | 'completed'
   | 'failed'
   | 'running'
+  | 'timeout'
   | 'waiting'
   | null;
 
@@ -65,7 +67,14 @@ export interface VueFlowCanvasRef {
  */
 export interface NodeExecutionState {
   /** 执行状态 */
-  status: 'completed' | 'failed' | 'pending' | 'running' | 'skipped';
+  status:
+    | 'cancelled'
+    | 'completed'
+    | 'failed'
+    | 'pending'
+    | 'running'
+    | 'skipped'
+    | 'timeout';
   /** 输入数据 */
   input?: any;
   /** 输出数据 */
@@ -203,6 +212,26 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         nodeState.error = data.error;
       }
       highlightNode(data.nodeId, 'failed');
+    },
+    onNodeTimeout: (data) => {
+      if (!executionState.value) return;
+      const nodeState = executionState.value.nodeStates.get(data.nodeId);
+      if (nodeState) {
+        nodeState.status = 'timeout';
+        nodeState.error = data.error;
+        nodeState.duration = data.duration;
+      }
+      highlightNode(data.nodeId, 'timeout', data.duration);
+    },
+    onNodeCancelled: (data) => {
+      if (!executionState.value) return;
+      const nodeState = executionState.value.nodeStates.get(data.nodeId);
+      if (nodeState) {
+        nodeState.status = 'cancelled';
+        nodeState.error = data.error;
+        nodeState.duration = data.duration;
+      }
+      highlightNode(data.nodeId, 'cancelled', data.duration);
     },
     onStreamToken: (data) => {
       if (!executionState.value) return;
@@ -752,7 +781,8 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       collectRefs(node.data, refs);
       for (const ref of refs) {
         if (ref.startsWith('inputs.')) {
-          const inputName = ref.slice('inputs.'.length).split('.')[0];
+          // 取首个路径段作为输入字段名：items / items[0] / items.list 都归到 items
+          const inputName = ref.slice('inputs.'.length).split(/[.[]/)[0];
           if (!inputName || !inputNames.has(inputName)) {
             addIssue(
               'ERROR',
@@ -994,7 +1024,13 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
    */
   function highlightNode(
     nodeId: string,
-    status: 'completed' | 'failed' | 'paused' | 'running',
+    status:
+      | 'cancelled'
+      | 'completed'
+      | 'failed'
+      | 'paused'
+      | 'running'
+      | 'timeout',
     duration?: number | null,
   ) {
     if (!canvasRef.value) return;
@@ -1004,6 +1040,9 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       completed: 'completed',
       failed: 'failed',
       paused: 'waiting',
+      // 并行分支超时/取消：画布黄色告警态 / 置灰态，不再停在蓝色执行中
+      timeout: 'timeout',
+      cancelled: 'cancelled',
     };
     canvasRef.value.updateNodeData(nodeId, {
       executionStatus: statusMap[status] || null,

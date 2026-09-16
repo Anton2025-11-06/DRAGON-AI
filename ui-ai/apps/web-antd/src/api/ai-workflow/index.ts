@@ -305,6 +305,30 @@ export function getExecutionSubscribeUrl(
   );
 }
 
+// ==================== WebSocket 同步执行 ====================
+
+/**
+ * 同步执行 WebSocket 地址（预览运行专用）：建立连接后即触发执行，
+ * 事件流（node.started / node.delta / workflow.completed 等）经该 WS 实时回推，
+ * 替代原「execute-async + SSE 订阅 Redis」链路。
+ * @param workflowId 工作流ID
+ * @param baseUrl 基础地址（如 VITE_GLOB_API_URL=/api）
+ */
+export function getWorkflowExecuteSyncWsUrl(
+  workflowId: number | string,
+  baseUrl = '',
+): string {
+  const path = resolveApiUrl(
+    `${BASE_URL}/workflow-executions/workflows/${workflowId}/execute-sync`,
+    baseUrl,
+  );
+  // 绝对 http(s) → ws(s)；相对路径按当前站点协议 + host 补全
+  if (/^https:\/\//i.test(path)) return path.replace(/^https:/i, 'wss:');
+  if (/^http:\/\//i.test(path)) return path.replace(/^http:/i, 'ws:');
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${window.location.host}${path}`;
+}
+
 // ==================== 工作流模板 API ====================
 
 /**

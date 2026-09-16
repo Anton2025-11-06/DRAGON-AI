@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 from typing import Any, Optional
 
@@ -35,12 +36,19 @@ from common.common_httpx.httpx import httpx_pool
 MAX_PARALLEL_BRANCHES = 50  # 单执行并行分支上限(防画布错配导致的任务爆炸)
 NODE_TIMEOUT_DEFAULT = 600  # 单节点执行超时(秒):防外部/工具节点永久挂起(MaxKB 无此保护)
 
+# BUG15：当前任务所属的并行分支 id。asyncio.Task 创建时会复制当时的 contextvars，
+# 所以在分支协程里派生的所有子孙节点任务都自动带上分支标记，兄弟分支看不到 ——
+# 这是「按分支收敛等待 / 按分支取消」能成立的前提。
+_CURRENT_BRANCH: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "workflow_parallel_branch", default=None)
+
 # ---------- 执行/节点状态常量(与 tb_workflow_execution.status 及前端展示一致,禁止写裸字符串) ----------
 STATUS_PENDING = "PENDING"  # 初始状态(执行未调度 / 节点未开始)
 STATUS_RUNNING = "RUNNING"  # 执行中 / 节点运行中
 STATUS_PAUSED = "PAUSED"  # 暂停(仅执行记录与运行时使用)
 STATUS_COMPLETED = "COMPLETED"  # 成功完成
 STATUS_CANCELLED = "CANCELLED"  # 取消(仅执行记录与运行时使用)
+STATUS_TIMEOUT = "TIMEOUT"  # 超时(并行分支等待时限到点,节点被停止等待)
 STATUS_FAILED = "FAILED"  # 失败
 
 
@@ -131,6 +139,17 @@ class WorkflowRuntime:
         self._completed_with_branch: dict[str, Optional[str]] = {}  # node_id -> 活跃出边端口
         self._running_tasks: set[asyncio.Task] = set()
         self._pending_nodes: list[str] = []  # 暂停时未调度的节点
+        # BUG15：并行分支短路所需的登记
+        # _branch_tasks/_branch_wrappers: 分支派生的节点任务与分支协程，用于精确取消
+        # _cancelled_nodes: 被「任一完成」短路掉的分支节点（视为不可达，不再执行）
+        # _blocked_targets: 因 AND 闸门未就绪而被推迟的汇合节点，闸门变化后重放
+        # _scheduled_nodes: 已派生过调度任务的节点（防汇合重放导致重复执行）
+        self._branch_tasks: dict[str, dict[asyncio.Task, str]] = {}
+        self._branch_wrappers: dict[str, asyncio.Task] = {}
+        self._branch_entries: dict[str, list[str]] = {}
+        self._cancelled_nodes: set[str] = set()
+        self._blocked_targets: dict[str, Any] = {}
+        self._scheduled_nodes: set[str] = set()
         self.outputs: dict = {}
         self.error: Optional[str] = None
         self.duration_ms: int = 0
@@ -192,13 +211,21 @@ class WorkflowRuntime:
                 # 暂停:run() 正常结束(暂停快照与 workflow.paused 事件已由
                 # _checkpoint → _enter_paused 完成),等待 resume 任务恢复。
                 return self.outputs
-            if self.status == STATUS_RUNNING:
-                # 全图执行完毕 → 收集 END 节点输出(无 END 则为空)
-                self.status = STATUS_COMPLETED
-                self.duration_ms = int((time.monotonic() - start) * 1000)
-                self.outputs = self._collect_outputs()
-                asyncio.create_task(self._persist_state())
-                await self.emit("workflow.completed", outputs=self.outputs, duration=self.duration_ms)
+            # 终态兜底:节点失败会把工作流状态置 FAILED,而该异常在并行多目标下
+            # 会被 _route_next 的 gather 兜住不上抛。此处若仍只在 RUNNING 分支
+            # 收尾,就出现「节点全跑完但既不落库也不发终态事件」——SSE 订阅端靠
+            # DB 状态兜底会一直读到 RUNNING,对话页永远停在「执行中」。
+            # 按当前状态补走对应收尾(异常由下面的 except 统一 emit 终态事件)。
+            if self.status == STATUS_FAILED:
+                raise NodeExecutionError(self.error or "工作流执行失败")
+            if self.status == STATUS_CANCELLED:
+                raise WorkflowCancelled()
+            # 全图执行完毕 → 收集 END 节点输出(无 END 则为空)
+            self.status = STATUS_COMPLETED
+            self.duration_ms = int((time.monotonic() - start) * 1000)
+            self.outputs = self._collect_outputs()
+            asyncio.create_task(self._persist_state())
+            await self.emit("workflow.completed", outputs=self.outputs, duration=self.duration_ms)
             return self.outputs
         except WorkflowCancelled:
             self.status = STATUS_CANCELLED
@@ -252,6 +279,13 @@ class WorkflowRuntime:
             return
         if node_id in {n for n in self.node_states if self.node_states[n].status == STATUS_COMPLETED}:
             return  # 已执行(LOOP 回边场景)
+        if node_id in self._cancelled_nodes:
+            # BUG15：并行「任一完成」已短路掉的未命中分支节点，不再执行
+            return
+        if node_id in self._scheduled_nodes:
+            # BUG15：同一节点的调度任务已派生过（并行汇合节点重放等场景），防重复执行
+            return
+        self._scheduled_nodes.add(node_id)
 
         # 状态检查点(需求 5):每个节点执行前查一次 DB 状态。
         # CANCELLED → 抛 WorkflowCancelled;PAUSED → 落库暂停快照后,
@@ -277,6 +311,11 @@ class WorkflowRuntime:
         # 分支失败且无异常分支 → 终止
         if result is None:
             return
+
+        # BUG15：并行节点「任一完成」短路取消未命中分支后，重新放行当时被 AND 闸门
+        # 挡下的汇合节点（放在本节点输出已写入之后，下游引用才安全）。
+        if self._blocked_targets:
+            await self._release_blocked()
 
         await self._route_next(node, result)
 
@@ -370,12 +409,43 @@ class WorkflowRuntime:
         return result
 
     def _node_input_view(self, node) -> dict:
-        """节点输入视图（调试展示用）：该节点入边来源节点的输出摘要。"""
-        view: dict = {}
-        for e in self.graph.get_in_edges(node.id):
+        """节点输入视图（调试展示用）：该节点入边来源节点的输出摘要。
+
+        BUG16：并行多路汇聚时，同类型节点的默认名称是一样的（并行开两个大模型，
+        两个节点都叫「大模型」），旧实现直接拿名称做 key → 后一路覆盖前一路，
+        下游输入里看起来只剩一路输出。现在：
+        - 同一批入边里重名的来源，统一用「名称#节点id」，每一路都看得到；
+        - 同一来源的多条入边（如 IF_ELSE 两个出口连同一节点）只展示一次；
+        - 未真正跑出结果的来源（并行「任一完成」被短路取消的分支）不占输入位，
+          避免拿一路 null 冒充分支结果。
+
+        并行分支入口特殊处理：PARALLEL 要等所有分支汇合才 COMPLETED，分支里的节点
+        （如并行节点后直接接的大模型）执行时它还是 RUNNING，只按 COMPLETED 取会整块空
+        → 退而取执行器提前写入 ctx 的透传快照。
+        """
+        sources: list = []
+        seen: set[str] = set()
+        for e in self.graph.get_in_edges(node.id) or []:
+            if e.source in seen:
+                continue
+            seen.add(e.source)
             src = self.graph.get_node(e.source)
-            if src and e.source in self.node_states:
-                view[src.label or src.id] = self.node_states[e.source].output
+            state = self.node_states.get(e.source)
+            if src is None or state is None:
+                continue
+            if state.status in (STATUS_COMPLETED, STATUS_FAILED):
+                sources.append((src, state.output))
+                continue
+            if state.status == STATUS_RUNNING:
+                interim = self.ctx.get_node_output(src.id)
+                if interim:
+                    sources.append((src, interim))
+        names = [src.label or src.id for src, _ in sources]
+        duplicated = {name for name in names if names.count(name) > 1}
+        view: dict = {}
+        for src, output in sources:
+            key = src.label or src.id
+            view[f"{key}#{src.id}" if key in duplicated else key] = output
         return view
 
     async def _route_next(self, node, result: NodeResult) -> None:
@@ -389,22 +459,147 @@ class WorkflowRuntime:
         next_pairs = self.graph.get_next_nodes(node.id, result.branch_id)
         ready = []
         for target, edge in next_pairs:
+            if target.id in self._scheduled_nodes or target.id in self._cancelled_nodes:
+                continue  # 已在执行/已短路，不重复派生
             if self._barrier_ready(target.id):
                 ready.append(target)
+            else:
+                # BUG15：记下来，闸门条件变化后（如并行未命中分支被取消）重放
+                self._blocked_targets[target.id] = target
         if not ready:
             return
         ready.sort(key=lambda n: n.y)
         if len(ready) == 1:
-            task = asyncio.create_task(self._schedule(ready[0].id))
+            self._spawn(ready[0].id, owned_by_branch=not self._is_convergence(ready[0].id))
         else:
             if len(ready) > MAX_PARALLEL_BRANCHES:
                 raise NodeExecutionError(f"节点「{node.label}」并行分支过多: {len(ready)}")
-            task = asyncio.gather(*[self._schedule(t.id) for t in ready],
-                                  return_exceptions=True)
-            # gather 返回 Future，包装为 task 统一管理
-            task = asyncio.ensure_future(task)
+            inner = [self._spawn(t.id, owned_by_branch=not self._is_convergence(t.id))
+                     for t in ready]
+            # gather 兜住多目标：任一目标失败不影响其余目标继续跑完；但失败不能吞，
+            # 全部跑完后仍需上抛第一个异常（见 _await_targets）
+            wrapper = asyncio.ensure_future(self._await_targets(inner))
+            self._running_tasks.add(wrapper)
+            wrapper.add_done_callback(self._running_tasks.discard)
+
+    async def _await_targets(self, tasks: list) -> None:
+        """等全部并行目标自然结束，再上抛第一个非取消异常。
+
+        与 run_branches 里「分支内节点失败不可静默吞掉（否则并行节点会假成功）」
+        同一口径：吞掉异常会让 run() 收尾误判状态、丢掉 workflow.failed 事件。
+        WorkflowCancelled 是并行短路砍分支的正常信号，不算失败，跳过。
+        """
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception) and not isinstance(res, WorkflowCancelled):
+                raise res
+
+    def _spawn(self, node_id: str, owned_by_branch: bool = True) -> asyncio.Task:
+        """派生一个节点调度任务，并在并行分支上下文中登记归属。
+
+        owned_by_branch=False：目标是多入边汇合节点，它不属于任何单个并行分支，
+        必须脱离分支上下文创建 —— 否则所在分支被「任一完成」短路取消时，会被连累
+        一起砍掉（汇合节点正等着所有分支，取消它等于取消整条下游）。
+        """
+        branch = _CURRENT_BRANCH.get() if owned_by_branch else None
+        if branch is None:
+            token = _CURRENT_BRANCH.set(None)
+            try:
+                task = asyncio.create_task(self._schedule(node_id))
+            finally:
+                _CURRENT_BRANCH.reset(token)
+        else:
+            task = asyncio.create_task(self._schedule(node_id))
+            bucket = self._branch_tasks.setdefault(branch, {})
+            bucket[task] = node_id
+            task.add_done_callback(lambda t, b=bucket: b.pop(t, None))
         self._running_tasks.add(task)
         task.add_done_callback(self._running_tasks.discard)
+        return task
+
+    def _is_convergence(self, node_id: str) -> bool:
+        """多入边汇合节点（AND 汇聚语义）。"""
+        return len(self.graph.get_in_edges(node_id) or []) > 1
+
+    def _cancel_branch(self, bid: str) -> tuple[list[asyncio.Task], set[str]]:
+        """取消一个未完成的并行分支：分支协程 + 它派生的全部节点任务。
+
+        只 cancel 分支协程不够 —— 子节点是以独立 task 跑在 _running_tasks 里的，
+        不一起取消就会出现「并行节点已返回继续，未命中分支还在后台跑完」的悬挂执行。
+
+        返回 (被取消的 task, 被砍掉的节点 id)：task 交调用方 await 落地，节点 id
+        用于终态收敛与事件广播（见 _settle_branch_nodes）。
+        """
+        cancelled: list[asyncio.Task] = []
+        nodes: set[str] = set()
+        wrapper = self._branch_wrappers.get(bid)
+        if wrapper is not None and not wrapper.done():
+            wrapper.cancel()
+            cancelled.append(wrapper)
+        for task, nid in list(self._branch_tasks.get(bid, {}).items()):
+            if not task.done():
+                task.cancel()
+                cancelled.append(task)
+            nodes.add(nid)
+        nodes.update(self._branch_entries.get(bid, []))
+        self._cancelled_nodes.update(nodes)
+        return cancelled, nodes
+
+    async def _settle_branch_nodes(self, stranded: dict[str, set[str]], *, timed_out: bool,
+                                   barrier, timeout_ms: int = 0) -> None:
+        """并行分支被砍后：节点终态收敛 + 广播终态事件。
+
+        旧实现只改内存状态、一个事件都不发 —— 分支里的节点收到过 node.started
+        之后再没有终态，画布与节点追踪就一直停在蓝色「执行中」（并行「任一完成」
+        + 等待超时最容易看到的观感）。按砍掉的原因分两类：
+        - timed_out：等待时限到点仍没跑完 → STATUS_TIMEOUT + node.timeout
+          （页面黄色「已超时」）；
+        - 非 timed_out：同组其他分支先完成被短路 → STATUS_CANCELLED + node.cancelled
+          （页面灰色「已取消」）。
+        只处理仍停在 RUNNING 的节点，已完成/已失败的终态不被覆盖。
+        """
+        status = STATUS_TIMEOUT if timed_out else STATUS_CANCELLED
+        event_type = "node.timeout" if timed_out else "node.cancelled"
+        reason = (f"并行分支「{barrier.label}」等待超时（>{timeout_ms}ms），已停止等待"
+                  if timed_out else
+                  f"并行分支「{barrier.label}」其他分支先完成，本分支已取消")
+        settled: list[str] = []
+        for bid, node_ids in stranded.items():
+            for nid in sorted(node_ids):
+                state = self.node_states.get(nid)
+                if state is None or state.status != STATUS_RUNNING:
+                    continue
+                state.status = status
+                state.duration = int((time.monotonic() - state.started_at) * 1000)
+                state.error = reason
+                settled.append(nid)
+                target = self.graph.get_node(nid)
+                if target is not None and self.node_persist_hook:
+                    # 状态同步落库，否则执行详情里这条节点永远停在 RUNNING
+                    try:
+                        asyncio.create_task(self.node_persist_hook(self, target, state))
+                    except Exception:  # noqa: BLE001
+                        pass
+                await self.emit(event_type, nodeId=nid, branchId=bid,
+                                duration=state.duration, error=reason)
+        if settled:
+            log.warning("parallel branch nodes settled exec={} barrier={} timeout={} nodes={}",
+                        self.execution_id, barrier.label, timed_out, settled)
+
+    async def _release_blocked(self) -> None:
+        """重新放行此前被 AND 闸门挡下的下游节点。
+
+        BUG15：分支取消发生在「先完成分支已经路由过一次」之后 —— 汇合节点当时因
+        未命中分支仍在执行而没有放行，取消完分支后没人再触发它，下游就永久漏跑了。
+        """
+        waiting, self._blocked_targets = self._blocked_targets, {}
+        for nid in list(waiting):
+            if nid in self._scheduled_nodes or nid in self._cancelled_nodes:
+                continue
+            if self._barrier_ready(nid):
+                self._spawn(nid, owned_by_branch=False)
+            else:
+                self._blocked_targets[nid] = waiting[nid]
 
     def _is_reachable(self, node_id: str, visiting: Optional[set] = None) -> bool:
         """节点在「已执行的决策」下是否仍可达（用于汇合门放行不可达分支）。
@@ -418,6 +613,10 @@ class WorkflowRuntime:
             visiting = set()
         if node_id in visiting:
             return True
+        if node_id in self._cancelled_nodes:
+            # BUG15：并行「任一完成」已短路掉的分支节点不会再执行 → 视为不可达，
+            # 否则下游汇合节点会一直等一个永远不会完成的来源（闸门死锁）
+            return False
         visiting.add(node_id)
         try:
             start = self.graph.find_start_node()
@@ -469,6 +668,24 @@ class WorkflowRuntime:
             continue
         return True
 
+    def _barrier_ready_except(self, node_id: str, skip_source: str) -> bool:
+        """AND 汇聚判断，但忽略来自 skip_source 的那条入边。
+
+        并行分支入口节点的入边之一就是并行节点自己 —— 它此刻正在执行分支，不可能有
+        「已完成 + 活跃端口」记录，直接用 _barrier_ready 判断会永远不放行（ANY 又退化
+        成等全部），所以只校验外部前置来源是否还在跑。
+        """
+        for e in self.graph.get_in_edges(node_id) or []:
+            if e.source == skip_source:
+                continue
+            src_state = self.node_states.get(e.source)
+            if src_state is not None and src_state.status in (
+                    STATUS_COMPLETED, STATUS_FAILED):
+                continue  # 外部来源已终结，不会再执行
+            if self._is_reachable(e.source):
+                return False
+        return True
+
     # ==================== 子图执行（LOOP/ITERATION/PARALLEL 用） ====================
 
     async def run_subgraph(self, entry_node_id: str, exit_node_id: Optional[str] = None,
@@ -508,8 +725,11 @@ class WorkflowRuntime:
             if scope_vars:
                 self.ctx.pop_scope()
 
-    def _collect_new_outputs(self, entry_node_id: str, order_before: int) -> dict:
+    def _collect_new_outputs(self, entry_node_id, order_before: int) -> dict:
         """收集入口可达子图内「本轮（order>order_before）新增执行完成」节点的最新输出。
+
+        entry_node_id 可以是单个入口 id，也可以是入口 id 列表（并行分支按 output
+        端口多出口时，一个分支可能对应多个入口节点）。
 
         与旧实现（executed 集合差）的区别：
         - LOOP/ITERATION body 节点每轮重复执行且 id 相同，集合差会把第二轮及以后的
@@ -518,7 +738,9 @@ class WorkflowRuntime:
           误收进本分支结果；按入口可达闭包过滤只收本分支子图的节点
         """
         reachable: set[str] = set()
-        stack = [entry_node_id]
+        entries = ([entry_node_id] if isinstance(entry_node_id, str)
+                   else list(entry_node_id or []))
+        stack = list(entries)
         while stack:
             nid = stack.pop()
             if nid in reachable or nid is None:
@@ -541,6 +763,9 @@ class WorkflowRuntime:
             seen.add(nid)
             self.node_states.pop(nid, None)
             self._completed_with_branch.pop(nid, None)
+            # 子图重跑前释放调度登记，否则 _schedule 的「已派生过」守卫会让
+            # LOOP/ITERATION 第二轮起整个循环体直接空跑
+            self._scheduled_nodes.discard(nid)
             if nid == exit_node_id:
                 continue  # exit 节点不被执行，不继续向下传播
             for e in self.graph.get_out_edges(nid):
@@ -548,59 +773,121 @@ class WorkflowRuntime:
 
     async def run_branches(self, node, branch_ids: list[str],
                            wait_strategy: str = "ALL",
-                           timeout_ms: int = 0) -> dict[str, dict]:
-        """并行执行节点的多个 branch:{id} 分支子图，返回 {branch_id: 输出聚合}。
+                           timeout_ms: int = 0,
+                           entries: Optional[dict[str, list[str]]] = None
+                           ) -> dict[str, dict]:
+        """并行执行节点的多个分支子图，返回 {branch_id: 输出聚合}。
 
         wait_strategy: ALL 全部等待 / ANY 任一完成 / FIRST 第一个完成（语义同 ANY，按 y 序）
+        timeout_ms: 等待时限（毫秒），0 表示不限制
+        entries: 分支入口 {branch_id: [node_id]}；缺省按 branch:{id} 端口出边解析
+
+        BUG15 的两处收敛修正：
+        1. 每个分支只等自己派生的任务（按 contextvars 分支标记登记），不再用
+           「_running_tasks 快照差集」—— 那个写法会把兄弟分支的任务也算进自己的
+           等待集合，分支互等，ANY 事实上退化成 ALL；
+        2. ANY 的等待时限用节点配置值，不再硬编码 3 秒；且短路时连分支派生的
+           子节点 task 一起取消，不是只砍分支协程。
+
+        超时/短路的收口（node.timeout / node.cancelled）：未完成的分支被砍掉后，
+        分支里正在跑的节点必须拿到一个终态事件，否则页面永远显示蓝色「执行中」。
         """
         results: dict[str, dict] = {}
+        if not branch_ids:
+            return results
+
+        def _branch_entries(bid: str) -> list[str]:
+            explicit = (entries or {}).get(bid)
+            if explicit:
+                return [str(nid) for nid in explicit]
+            return [t.id for t, _e in self.graph.get_next_nodes(node.id, bid)]
 
         async def _run_branch(bid: str) -> str:
-            pairs = self.graph.get_next_nodes(node.id, bid)
-            if not pairs:
+            # 本 task 的 context 独立：设了分支标记后，由它派生的子孙节点 task 都会
+            # 继承并登记到本分支，兄弟分支看不到 → 等待与取消都能按分支精确收敛
+            _CURRENT_BRANCH.set(bid)
+            entry_ids = _branch_entries(bid)
+            if not entry_ids:
                 results[bid] = {}
                 return bid
-            entry = pairs[0][0]
-            # 分支子图终点 = node 的所有其他入边来源或无出边；简化：执行到自然结束
-            # 等待方式与 run_subgraph 相同：快照进入前已存在的任务，只等本分支衍生的任务。
-            # 不可用 exclude={当前task}：_execute_node 会把 executor 包成 wait_for 内层
-            # task，current_task 拿到的是内层 task，而 _running_tasks 里是外层 _schedule
-            # task，排除不完全 → 分支等外层、外层等分支 → 自死锁。
-            preexisting = set(self._running_tasks)
+            self._branch_entries[bid] = entry_ids
+            bucket = self._branch_tasks.setdefault(bid, {})
             order_before = self._order_counter
-            await self._schedule(entry.id)
+            for eid in entry_ids:
+                if not self._barrier_ready_except(eid, node.id):
+                    # 分支入口同时也是外部连线的汇合点：挂进等待名单，等另一个来源
+                    # 跑完后由 _release_blocked 放行，不能抢在它的前置节点之前执行
+                    self._blocked_targets[eid] = self.graph.get_node(eid)
+                    continue
+                await self._schedule(eid)
             deadline = time.monotonic() + 3600
             while time.monotonic() < deadline:
-                pending = [t for t in self._running_tasks if t not in preexisting]
+                pending = [t for t in bucket if not t.done()]
                 if not pending:
                     break
                 await asyncio.wait(pending, timeout=0.2,
                                    return_when=asyncio.FIRST_COMPLETED)
-            results[bid] = self._collect_new_outputs(entry.id, order_before)
+            # 分支内节点失败不可静默吞掉（否则并行节点会「假成功」）
+            for task in list(bucket):
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None and not isinstance(exc, WorkflowCancelled):
+                    raise exc
+            results[bid] = self._collect_new_outputs(entry_ids, order_before)
             return bid
 
-        tasks = [asyncio.create_task(_run_branch(b)) for b in branch_ids]
+        tasks: dict[str, asyncio.Task] = {}
+        for bid in branch_ids:
+            task = asyncio.create_task(_run_branch(bid))
+            tasks[bid] = task
+            self._branch_wrappers[bid] = task
+        # 等待是否因时限到点而结束：True → 未完成的分支算「超时」(node.timeout)，
+        # False → 算「被其他分支先完成短路取消」(node.cancelled)，页面配色文案不同
+        wait_expired = False
+        stranded: dict[str, set[str]] = {}  # branch_id -> 被砍掉的节点 id
         try:
             if wait_strategy in ("ANY", "FIRST"):
-                done, pending = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED,
-                    timeout=timeout_ms / 1000 if timeout_ms else None)
-                for p in pending:
-                    p.cancel()
+                # 只等到「第一个分支完成」为止，其余分支下面统一取消
+                done, _pending = await asyncio.wait(
+                    list(tasks.values()), return_when=asyncio.FIRST_COMPLETED,
+                    timeout=(timeout_ms / 1000) if timeout_ms else None)
+                if not done and timeout_ms:
+                    # 到时仍无分支完成：不继续等待，带已完成（空）结果往下走
+                    wait_expired = True
+                    log.warning("parallel branch wait timeout exec={} node={} ms={}",
+                                self.execution_id, node.label, timeout_ms)
+                for task in done:
+                    if task.cancelled():
+                        continue
+                    exc = task.exception()
+                    if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                        raise exc
             elif timeout_ms:
-                done, pending = await asyncio.wait(tasks, timeout=timeout_ms / 1000)
-                for p in pending:
-                    p.cancel()
+                done, _pending = await asyncio.wait(
+                    list(tasks.values()), timeout=timeout_ms / 1000)
+                if len(done) < len(tasks):
+                    wait_expired = True
+                    log.warning("parallel branches not all finished in {}ms exec={}",
+                                timeout_ms, self.execution_id)
             else:
-                gathered = await asyncio.gather(*tasks, return_exceptions=True)
-                # 分支内节点失败不可静默吞掉（否则并行节点会「假成功」）
-                for g in gathered:
-                    if isinstance(g, BaseException) and not isinstance(g, asyncio.CancelledError):
-                        raise g
+                await asyncio.wait(list(tasks.values()))
         finally:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
+            # 短路：取消尚未完成的分支（分支协程 + 其派生的全部节点任务）。
+            # 收口放 finally 而不是 try 末尾：分支协程抛异常时同样要让被砍的节点
+            # 拿到终态，否则那些节点一直停在 RUNNING（页面蓝色「执行中」不消失）
+            killed: list[asyncio.Task] = []
+            for bid, task in tasks.items():
+                if not task.done():
+                    branch_killed, nodes = self._cancel_branch(bid)
+                    killed.extend(branch_killed)
+                    stranded[bid] = nodes
+                self._branch_wrappers.pop(bid, None)
+            if killed:
+                await asyncio.wait(killed, timeout=5)
+            if stranded:
+                await self._settle_branch_nodes(stranded, timed_out=wait_expired,
+                                                barrier=node, timeout_ms=timeout_ms)
         return results
 
     # ==================== 状态检查(需求 5:DB 状态驱动控制) ====================

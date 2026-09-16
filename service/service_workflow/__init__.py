@@ -1,5 +1,7 @@
 from common.common_app.bootstrap import create_app
 from common.common_constants.constant import SERVICE_WORKFLOW, SERVICE_WORKFLOW_PORT
+from common.common_entity.response_schema import ApiResponse
+from common.common_log.log_init import log
 from fastapi import Depends
 
 from service.service_workflow.routers.mcp_router import router as mcp_router
@@ -8,14 +10,14 @@ from service.service_workflow.routers.skill_router import router as skill_router
 from service.service_workflow.routers.tool_router import router as tool_router
 from service.service_workflow.routers.workflow_router import (
     router as workflow_router,
-    template_router,
     support_router,
 )
 from service.service_workflow.routers.workflow_execution_router import (
     api_key_router,
-    file_router,
     router as execution_router,
 )
+from service.service_workflow.routers.workflow_file_router import file_router
+from service.service_workflow.routers.workflow_template_router import template_router
 from service.service_workflow.services.workflow_service import ensure_initialized
 
 # service_workflow：智能体编排域

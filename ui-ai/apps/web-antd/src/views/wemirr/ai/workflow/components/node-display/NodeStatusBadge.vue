@@ -2,11 +2,13 @@
 import { computed } from 'vue';
 
 export type NodeStatus =
+  | 'cancelled'
   | 'completed'
   | 'failed'
   | 'pending'
   | 'running'
   | 'skipped'
+  | 'timeout'
   | 'waiting'
   | null;
 
@@ -18,32 +20,43 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  duration: undefined,
   english: true,
 });
 
 const statusText = computed(() => {
   const labelsEN: Record<string, string> = {
+    cancelled: 'Cancelled',
     pending: 'Waiting',
     waiting: 'Waiting',
     running: 'Running',
     completed: 'Completed',
     failed: 'Failed',
     skipped: 'Skipped',
+    timeout: 'Timeout',
   };
   const labelsCN: Record<string, string> = {
+    cancelled: '已取消',
     pending: '等待中',
     waiting: '等待中',
     running: '执行中',
     completed: '已完成',
     failed: '失败',
     skipped: '已跳过',
+    timeout: '已超时',
   };
   const labels = props.english ? labelsEN : labelsCN;
   return props.status ? labels[props.status] || '' : '';
 });
 
 const durationText = computed(() => {
-  if (props.duration === undefined || props.status !== 'completed') return '';
+  // 超时/取消的分支也带真实耗时，一并展示便于判断卡在哪个分支
+  if (
+    props.duration === undefined ||
+    !['cancelled', 'completed', 'timeout'].includes(props.status || '')
+  ) {
+    return '';
+  }
   return props.duration < 1000
     ? `${Math.round(props.duration)}ms`
     : `${(props.duration / 1000).toFixed(1)}s`;
@@ -130,6 +143,26 @@ const durationText = computed(() => {
     color: #8c8c8c;
     .status-dot {
       background: #8c8c8c;
+    }
+  }
+
+  // 并行分支等待超时：黄色告警态，区别于蓝色执行中
+  &.timeout {
+    background: #fffbe6;
+    border: 1px solid #ffe58f;
+    color: #faad14;
+    .status-dot {
+      background: #faad14;
+    }
+  }
+
+  // 并行分支被其他分支先完成短路
+  &.cancelled {
+    background: #f5f5f5;
+    border: 1px dashed #d9d9d9;
+    color: #8c8c8c;
+    .status-dot {
+      background: #bfbfbf;
     }
   }
 }

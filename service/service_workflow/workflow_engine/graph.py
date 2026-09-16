@@ -17,6 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from common.common_exception.custom_exception import WorkflowGraphError
+from common.common_entity.graph_error_entity import GraphIssue
+
 INPUT_HANDLE = "input"
 OUTPUT_HANDLE = "output"
 BRANCH_HANDLE_PREFIX = "branch:"
@@ -33,34 +36,6 @@ def branch_id_of(handle: Optional[str]) -> Optional[str]:
     return None
 
 
-class WorkflowGraphError(Exception):
-    """图结构非法（保存/发布时校验用）"""
-
-    def __init__(self, issues: list["GraphIssue"]):
-        self.issues = issues
-        super().__init__("; ".join(f"[{i.severity}] {i.code}: {i.message}" for i in issues))
-
-
-@dataclass
-class GraphIssue:
-    code: str
-    severity: str  # ERROR / WARNING / SUGGESTION
-    message: str
-    node_id: Optional[str] = None
-    node_label: Optional[str] = None
-    node_type: Optional[str] = None
-    suggestion: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "nodeId": self.node_id,
-            "nodeLabel": self.node_label,
-            "nodeType": self.node_type,
-            "suggestion": self.suggestion,
-        }
 
 
 @dataclass
@@ -240,10 +215,16 @@ class WorkflowGraph:
         for n in self.nodes:
             in_edges = self.get_in_edges(n.id)
             if len(in_edges) > 1:
-                # 多入边 = AND 汇聚，正常；但同一源节点多分支连到同一目标属配置错误
-                sources = [e.source for e in in_edges]
-                if len(sources) != len(set(sources)):
-                    add("MERGE_DUP_SOURCE", "ERROR", f"节点「{n.label}」存在来自同一节点的多条入边", n)
+                # 多入边 = AND 汇聚，正常。同一源节点连多条入边也允许：
+                # 只要它们挂在不同的出口端口上（如 IF_ELSE 的 if / else 两个分支
+                # 连到同一个下游节点），运行时未命中分支的边按「不激活」跳过，
+                # 不会让目标节点重复执行或卡死。只有同一出口端口重复连多条边
+                # 才是真正冗余的配置错误。
+                keyed = {(e.source, e.source_handle or "") for e in in_edges}
+                if len(keyed) != len(in_edges):
+                    add("MERGE_DUP_SOURCE", "ERROR",
+                        f"节点「{n.label}」存在来自同一出口端口的重复入边", n,
+                        suggestion="同一出口的重复连线请只保留一条；不同分支出口连到同一节点是允许的")
 
         # 7. 类型级校验（由节点注册表补充）
         from service.service_workflow.workflow_engine.nodes import NODE_REGISTRY

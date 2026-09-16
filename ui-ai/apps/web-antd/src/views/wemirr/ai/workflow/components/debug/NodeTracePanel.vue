@@ -81,6 +81,13 @@ const hasHttpDetails = computed(() => props.trace?.httpDetails !== undefined);
 /** 是否有错误信息 */
 const hasError = computed(() => props.trace?.error !== undefined);
 
+/** 超时/取消不是执行失败，详情里用黄色告警而非红色错误 */
+const errorAlertType = computed<'error' | 'info' | 'warning'>(() => {
+  if (props.trace?.status === 'timeout') return 'warning';
+  if (props.trace?.status === 'cancelled') return 'info';
+  return 'error';
+});
+
 /** 是否有流式输出 */
 const hasStreamingContent = computed(() => !!props.trace?.streamingContent);
 
@@ -132,6 +139,9 @@ function getStatusColor(status: string): string {
     completed: 'success',
     failed: 'error',
     skipped: 'default',
+    // 并行分支超时：黄色告警；被其他分支短路：置灰
+    timeout: 'warning',
+    cancelled: 'default',
   };
   return colorMap[status] || 'default';
 }
@@ -144,6 +154,8 @@ function getStatusIcon(status: string) {
     completed: CheckCircleOutlined,
     failed: CloseCircleOutlined,
     skipped: MinusCircleOutlined,
+    timeout: ExclamationCircleOutlined,
+    cancelled: MinusCircleOutlined,
   };
   return iconMap[status] || ClockCircleOutlined;
 }
@@ -156,6 +168,8 @@ function getStatusText(status: string): string {
     completed: '已完成',
     failed: '失败',
     skipped: '已跳过',
+    timeout: '已超时',
+    cancelled: '已取消',
   };
   return textMap[status] || status;
 }
@@ -584,7 +598,7 @@ function decreaseDepth() {
         <!-- 错误信息 -->
         <CollapsePanel v-if="hasError" key="error" header="错误信息">
           <div class="error-content">
-            <Alert type="error" show-icon>
+            <Alert :type="errorAlertType" show-icon>
               <template #icon>
                 <ExclamationCircleOutlined />
               </template>

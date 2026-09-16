@@ -521,6 +521,10 @@ export const WORKFLOW_RUNTIME_EVENT_TYPES = [
   'node.delta',
   'node.completed',
   'node.failed',
+  // 并行屏障被砍分支的终态：超时(node.timeout)/短路取消(node.cancelled)，
+  // 收到前节点只有 node.started，页面会一直停在蓝色「执行中」
+  'node.timeout',
+  'node.cancelled',
   'workflow.paused',
   'workflow.completed',
   'workflow.failed',
@@ -593,6 +597,36 @@ export interface NodeErrorEvent extends ExecutionEvent {
 }
 
 /**
+ * 节点超时事件（并行分支等待时限到点，后端停止等待并砍掉该分支）
+ */
+export interface NodeTimeoutEvent extends ExecutionEvent {
+  type: 'node.timeout';
+  /** 节点ID */
+  nodeId: string;
+  /** 所属并行分支 id（画布单出口时为 node:<目标节点id>） */
+  branchId?: string;
+  /** 砍掉前已执行的耗时(毫秒) */
+  duration?: number;
+  /** 超时说明 */
+  error?: string;
+}
+
+/**
+ * 节点取消事件（并行「任一完成」下未命中分支被短路取消）
+ */
+export interface NodeCancelledEvent extends ExecutionEvent {
+  type: 'node.cancelled';
+  /** 节点ID */
+  nodeId: string;
+  /** 所属并行分支 id */
+  branchId?: string;
+  /** 取消前已执行的耗时(毫秒) */
+  duration?: number;
+  /** 取消说明 */
+  error?: string;
+}
+
+/**
  * 流式Token事件
  */
 export interface StreamTokenEvent extends ExecutionEvent {
@@ -643,13 +677,16 @@ export interface BreakpointHitEvent extends ExecutionEvent {
  * 输入字段类型 (START 节点)
  */
 export type InputFieldType =
-  | 'CHECKBOX' // 复选框
+  | 'CHECKBOX' // 开关（UI 为 switch；历史名“复选框”，存储值不变以兼容旧图）
   | 'FILE_LIST' // 多文件
   | 'NUMBER' // 数字
+  /** @deprecated 已与 SHORT_TEXT 合并为 TEXT，仅旧图兼容读取 */
   | 'PARAGRAPH' // 长文本（无限制）
   | 'SELECT' // 下拉选择
+  /** @deprecated 已与 PARAGRAPH 合并为 TEXT，仅旧图兼容读取 */
   | 'SHORT_TEXT' // 短文本（256字符）
-  | 'SINGLE_FILE'; // 单文件
+  | 'SINGLE_FILE' // 单文件
+  | 'TEXT'; // 文本（短文本 + 长文本合并后的统一类型）
 
 /**
  * 输入字段定义
@@ -752,7 +789,7 @@ export type VariableType = 'array' | 'boolean' | 'number' | 'object' | 'string';
  * 变量赋值定义
  */
 export interface Assignment {
-  /** 目标变量名 */
+  /** 目标变量名（自定义名字，或上游变量引用 {{nodes.xx.output}}：运行时取其值作为变量名） */
   variableName: string;
   /** 赋值类型 */
   type: AssignmentType;
@@ -1161,6 +1198,8 @@ export type AggregationStrategy =
  * 聚合组定义
  */
 export interface AggregationGroup {
+  /** 前端拖拽/渲染用稳定 key（不持久化语义） */
+  id?: string;
   /** 输出变量名 */
   outputVariable: string;
   /** 源变量列表（来自不同分支，支持变量引用格式: {{nodeName.variableName}}） */

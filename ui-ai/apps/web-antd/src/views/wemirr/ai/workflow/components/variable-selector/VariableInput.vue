@@ -20,6 +20,7 @@
       <VariableSelector
         :current-node-id="currentNodeId"
         :filter-types="filterTypes"
+        :enable-path="enablePath"
         button-text=""
         @select="handleVariableSelect"
       >
@@ -70,6 +71,8 @@ interface Props {
   disabled?: boolean;
   /** 过滤变量类型 */
   filterTypes?: ExtendedVariableType[];
+  /** 是否允许选中变量后再填 JSON 路径/下标（如 .data.list[0]） */
+  enablePath?: boolean;
   /** 是否多行 */
   multiline?: boolean;
   /** 最大行数（多行模式） */
@@ -82,6 +85,7 @@ const props = withDefaults(defineProps<Props>(), {
   currentNodeId: '',
   disabled: false,
   filterTypes: () => [],
+  enablePath: false,
   multiline: false,
   maxRows: 5,
 });

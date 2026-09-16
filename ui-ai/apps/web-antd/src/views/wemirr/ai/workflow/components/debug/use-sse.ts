@@ -102,6 +102,17 @@ export interface NodeErrorEventData {
 }
 
 /**
+ * 节点中止事件数据（并行分支：node.timeout / node.cancelled）
+ */
+export interface NodeAbortedEventData {
+  nodeId: string;
+  /** 所属并行分支 id */
+  branchId?: string;
+  duration?: number;
+  error?: string;
+}
+
+/**
  * 流式 Token 事件数据
  */
 export interface StreamTokenEventData {
@@ -148,6 +159,10 @@ export interface SSEEventCallbacks {
   onNodeStarted?: (data: NodeStartedEventData) => void;
   onNodeCompleted?: (data: NodeCompletedEventData) => void;
   onNodeError?: (data: NodeErrorEventData) => void;
+  /** 并行分支等待超时被停止的节点 */
+  onNodeTimeout?: (data: NodeAbortedEventData) => void;
+  /** 并行分支被其他分支先完成短路的节点 */
+  onNodeCancelled?: (data: NodeAbortedEventData) => void;
   onStreamToken?: (data: StreamTokenEventData) => void;
   onBreakpointHit?: (data: BreakpointHitEventData) => void;
   onExecutionCompleted?: (data: ExecutionCompletedEventData) => void;
@@ -412,6 +427,36 @@ export function useSSE(
           stackTrace: data.stackTrace,
         });
         callbacks?.onNodeError?.(data);
+      }
+    });
+
+    // 并行分支超时事件（节点被停止等待，非失败）
+    addEventListener('node.timeout', (e) => {
+      const data = parseEventData<NodeAbortedEventData>(e);
+      if (data) {
+        debugStore.handleNodeTimeout({
+          type: 'node.timeout',
+          nodeId: data.nodeId,
+          branchId: data.branchId,
+          duration: data.duration,
+          error: data.error,
+        });
+        callbacks?.onNodeTimeout?.(data);
+      }
+    });
+
+    // 并行分支取消事件（其他分支先完成短路本分支）
+    addEventListener('node.cancelled', (e) => {
+      const data = parseEventData<NodeAbortedEventData>(e);
+      if (data) {
+        debugStore.handleNodeCancelled({
+          type: 'node.cancelled',
+          nodeId: data.nodeId,
+          branchId: data.branchId,
+          duration: data.duration,
+          error: data.error,
+        });
+        callbacks?.onNodeCancelled?.(data);
       }
     });
 

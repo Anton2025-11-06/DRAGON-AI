@@ -13,15 +13,17 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import datetime
+from functools import partial
 from typing import Optional
 
 from sqlalchemy import func, select
+from fastapi import WebSocket
 
 from common.common_arq.queue import enqueue_job, next_split_number
+from common.common_exception.custom_exception import WorkflowGraphError
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from service.service_workflow.models.workflow_entity import (
@@ -32,10 +34,10 @@ from service.service_workflow.services.event_pubsub import (
 )
 from service.service_workflow.workflow_engine.engine import (
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_PAUSED,
-    STATUS_RUNNING, WorkflowRuntime,
+    STATUS_RUNNING, STATUS_TIMEOUT, WorkflowRuntime,
 )
 from service.service_workflow.workflow_engine.events import EventBus
-from service.service_workflow.workflow_engine.graph import WorkflowGraph, WorkflowGraphError
+from service.service_workflow.workflow_engine.graph import WorkflowGraph
 from service.service_workflow.workflow_engine.model_client import (
     ModelConfigProvider,
 )
@@ -72,7 +74,7 @@ class WorkflowExecutionService:
 
     @staticmethod
     async def execute_async(workflow_id: int, req, user_id: int = 0,
-                            trigger_type: str = "DEBUG") -> str:
+                            trigger_type: str = "API") -> str:
         """异步执行(需求 4:统一队列模式,不再有同步 execute)。
 
         流程:创建执行记录(RUNNING)→ 投递 arq 任务(job_id=execution_id 防重复)→
@@ -96,6 +98,18 @@ class WorkflowExecutionService:
                     await session.commit()
             raise Exception("任务投递失败")
         return execution_id
+
+    @staticmethod
+    async def execute_sync(websocket: WebSocket, workflow_id: int, req, user_id: int = 0,
+                           trigger_type: str = "DEBUG"):
+        """异步执行(需求 4:统一队列模式,不再有同步 execute)。
+
+        流程:创建执行记录(RUNNING)→ 投递 arq 任务(job_id=execution_id 防重复)→
+        返回 execution_id;前端凭 execution_id 调 subscribe SSE 接口订阅执行事件。
+        """
+        execution_id = await WorkflowExecutionService._prepare_execution(
+            workflow_id, req, user_id, trigger_type)
+        await WorkflowExecutionService.run_in_worker(execution_id=execution_id, websocket=websocket)
 
     @staticmethod
     async def _prepare_execution(workflow_id: int, req, user_id: int,
@@ -143,13 +157,13 @@ class WorkflowExecutionService:
     # ==================== 执行入口(arq worker 进程:重建运行时 + 驱动) ====================
 
     @staticmethod
-    async def run_in_worker(execution_id: str) -> None:
+    async def run_in_worker(execution_id: str, websocket: Optional[WebSocket] = None) -> None:
         """执行工作流(execute_workflow 任务入口,运行在 arq worker 进程)。
 
         从 DB 执行记录重建运行时并驱动引擎;执行中每节点前由
         status_check_hook 查 DB 状态(取消/暂停即时生效)。
         """
-        runtime = await WorkflowExecutionService._build_runtime(execution_id)
+        runtime = await WorkflowExecutionService._build_runtime(execution_id=execution_id, websocket=websocket)
         if runtime is None:
             log.warning("workflow run skipped: exec={} not found", execution_id)
             return
@@ -181,7 +195,8 @@ class WorkflowExecutionService:
 
     @staticmethod
     async def _build_runtime(execution_id: str,
-                             snapshot: Optional[dict] = None) -> Optional[WorkflowRuntime]:
+                             snapshot: Optional[dict] = None,
+                             websocket: Optional[WebSocket] = None) -> Optional[WorkflowRuntime]:
         """从 DB 执行记录重建运行时(arq worker 进程内调用)。
 
         :param snapshot: 恢复用快照(优先级高于行内 variables 字段);
@@ -219,9 +234,11 @@ class WorkflowExecutionService:
             breakpoints=list(row.breakpoints or []),
             model_provider=get_model_provider(),
             http_client=get_shared_http(),
-            # 事件总线:节点事件(含 node.delta)经 pub hook 实时 PUBLISH 到 Redis 频道,
-            # 供其他进程的 SSE 订阅者跨进程实时消费
-            event_bus=EventBus(execution_id, publish_hook=publish_event_hook),
+            # 事件总线:
+            # API执行：节点事件(含 node.delta)经 pub hook 实时 PUBLISH 到 Redis 频道，供其他进程的 SSE 订阅者跨进程实时消费
+            # DEBUG 执行：节点事件(含 node.delta)经 websocket 传输
+            event_bus=EventBus(execution_id, publish_hook=(partial(publish_event_hook, websocket=websocket)
+                                                           if websocket is not None else publish_event_hook)),
             trigger_type=trigger_type,
             user_id=user_id,
             workflow_id=workflow_id,
@@ -399,12 +416,12 @@ class WorkflowExecutionService:
             return await WorkflowExecutionService._row_to_resp(session, row)
 
     @staticmethod
-    async def page_executions(current: int = 1, size: int = 10, workflow_id: str = None,
+    async def page_executions(current: int = 1, size: int = 10, execution_id: str = None,
                               status: str = None, user_id: int = None):
         async with mysql_client.get_session() as session:
             stmt = select(WorkflowExecution)
-            if workflow_id:
-                stmt = stmt.where(WorkflowExecution.workflow_id == int(workflow_id))
+            if execution_id:
+                stmt = stmt.where(WorkflowExecution.id == execution_id)
             if status:
                 stmt = stmt.where(WorkflowExecution.status == status)
             if user_id is not None:
@@ -462,7 +479,19 @@ class WorkflowExecutionService:
             yield WorkflowExecutionService._sse(
                 "node.started", {"executionId": execution_id, "nodeId": nid,
                                  "nodeType": st.get("nodeType", "")})
-            if st.get("error"):
+            # 并行分支被砍的节点终态：跟实时流一致，补发 node.timeout /
+            # node.cancelled（当成 failed 会误标红，当成 completed 会误标绿）
+            if st.get("status") == STATUS_TIMEOUT:
+                yield WorkflowExecutionService._sse(
+                    "node.timeout", {"executionId": execution_id, "nodeId": nid,
+                                     "duration": st.get("duration", 0),
+                                     "error": st.get("error") or "并行分支等待超时"})
+            elif st.get("status") == STATUS_CANCELLED:
+                yield WorkflowExecutionService._sse(
+                    "node.cancelled", {"executionId": execution_id, "nodeId": nid,
+                                       "duration": st.get("duration", 0),
+                                       "error": st.get("error") or "并行分支已取消"})
+            elif st.get("error"):
                 yield WorkflowExecutionService._sse(
                     "node.failed", {"executionId": execution_id, "nodeId": nid,
                                     "error": st["error"]})

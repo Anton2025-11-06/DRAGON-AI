@@ -7,6 +7,8 @@
     node.delta
     node.completed
     node.failed
+    node.timeout
+    node.cancelled
     workflow.completed
     workflow.failed
     workflow.cancelled
@@ -14,6 +16,11 @@
     workflow.resumed
 
 SSE 帧格式：event: {type}\ndata: {json}\n\n（前端 runtime-events.ts 按行解析）。
+
+node.timeout / node.cancelled 由并行屏障补发（见 engine._settle_branch_nodes）：
+「任一完成 + 等待超时」下被砍分支里的节点只有 node.started、没有终态时，
+前端会一直显示蓝色「执行中」，这两个事件把它们收敛为黄色「已超时」/
+灰色「已取消」。
 
 事件通道（全部走 Redis Pub/Sub，无进程内缓冲/注册表）：
 - 引擎每次 emit 立即交给 service 注入的 publish_hook，实时 PUBLISH 到

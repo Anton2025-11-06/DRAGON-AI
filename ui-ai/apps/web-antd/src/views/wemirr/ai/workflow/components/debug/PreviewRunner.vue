@@ -19,15 +19,11 @@ import {
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
-import {
-  cancelExecution,
-  executeWorkflowAsync,
-  resumeExecution,
-} from '#/api/ai-workflow';
+import { cancelExecution, resumeExecution } from '#/api/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
 import DynamicInputForm from './DynamicInputForm.vue';
-import { useSSE } from './use-sse';
+import { useWorkflowWs } from './use-ws';
 
 // ==================== Props ====================
 
@@ -75,13 +71,13 @@ const debugStore = useDebugStore();
 // ==================== SSE Composable ====================
 
 /**
- * SSE 事件处理
+ * WebSocket 事件处理（预览运行：连接即执行，事件经 WS 回推）
  */
 const {
   connectionState,
-  connect: connectSSE,
-  disconnect: disconnectSSE,
-} = useSSE(props.sseBaseUrl, {
+  connect: connectWs,
+  disconnect: disconnectWs,
+} = useWorkflowWs(props.sseBaseUrl, {
   onNodeStarted: (data) => {
     emit('nodeStarted', data.nodeId);
   },
@@ -138,8 +134,8 @@ const hasInputValues = computed(() => {
 // ==================== Lifecycle ====================
 
 onBeforeUnmount(() => {
-  // 断开 SSE 连接
-  disconnectSSE();
+  // 断开 WebSocket 连接
+  disconnectWs();
 });
 
 // ==================== Methods ====================
@@ -167,20 +163,17 @@ async function handleRun() {
       ),
     );
 
-    // 调用异步执行 API
-    const executionId = await executeWorkflowAsync(props.workflowId, {
+    // 启动调试状态（executionId 待首个事件 workflow.started 回填到 debugStore）
+    debugStore.startPreviewRun('');
+
+    // 建立 WebSocket 并发送执行入参：连接即触发同步执行，事件经该连接实时回推
+    connectWs(props.workflowId, {
       inputs,
       breakpoints: breakpointIds,
     });
 
-    // 启动调试状态
-    debugStore.startPreviewRun(executionId);
-
-    // 连接后端 SSE 端点。
-    connectSSE(executionId);
-
     // 触发事件
-    emit('workflowStarted', executionId);
+    emit('workflowStarted', debugStore.executionId || '');
 
     message.success('开始执行');
   } catch (error: any) {
@@ -191,19 +184,28 @@ async function handleRun() {
 
 /**
  * 停止执行
+ *
+ * 预览运行走 execute-sync（本进程执行），HTTP /cancel 无法中断本进程的
+ * runtime.run()，真正的停止是断开 WS（下一次 send_text 失败即中断执行）。
+ * 故：先断连接 + 复位本地状态（保证按钮一定有反馈），再在 executionId
+ * 已回填时补一发 HTTP cancel（兼容 worker 异步链路，失败也不影响本地停止）。
  */
 async function handleStop() {
-  if (!debugStore.executionId) return;
+  // 先断开 WebSocket 并复位调试状态：无论 executionId 是否已回填都能立即停止
+  disconnectWs();
+  debugStore.cancelExecution();
 
-  try {
-    await cancelExecution(debugStore.executionId);
-    debugStore.cancelExecution();
-    // 断开 SSE 连接
-    disconnectSSE();
-    message.info('已停止执行');
-  } catch (error: any) {
-    message.error(error.message || '停止失败');
+  // executionId 由首个 workflow.started 事件回填；存在时再请求后端取消
+  const execId = debugStore.executionId;
+  if (execId) {
+    try {
+      await cancelExecution(execId);
+    } catch (error: any) {
+      // 取消接口失败不阻断本地停止（WS 已断开，执行已中断）
+      message.warning(error.message || '停止请求发送失败');
+    }
   }
+  message.info('已停止执行');
 }
 
 /**
@@ -247,6 +249,14 @@ defineExpose({
   getExecutionResult: () => debugStore.result,
   /** 获取节点追踪 */
   getNodeTraces: () => [...debugStore.nodeTraces.values()],
+  /**
+   * 重置（BUG5）：每次打开调试面板时调用，断开上一次的 WS 连接并清空输入表单，
+   * 不缓存上次的调试数据
+   */
+  reset: () => {
+    disconnectWs();
+    handleClearInputs();
+  },
   /** SSE 连接状态 */
   connectionState,
 });

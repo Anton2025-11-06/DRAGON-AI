@@ -43,7 +43,14 @@ interface NodeData {
   nodeType: NodeType;
   label: string;
   config: Record<string, any>;
-  executionStatus?: 'completed' | 'failed' | 'pending' | 'running' | null;
+  executionStatus?:
+    | 'cancelled'
+    | 'completed'
+    | 'failed'
+    | 'pending'
+    | 'running'
+    | 'timeout'
+    | null;
   executionDuration?: null | number;
 }
 
@@ -263,6 +270,8 @@ function getBranchHandleY(index: number): number {
       {
         'is-selected': selected,
         'has-branches': hasBranches,
+        'status-timeout': data.executionStatus === 'timeout',
+        'status-cancelled': data.executionStatus === 'cancelled',
       },
     ]"
     :data-node-id="id"
@@ -424,6 +433,30 @@ function getBranchHandleY(index: number): number {
   &.is-selected {
     border-color: #1890ff;
     box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
+  }
+
+  // 并行分支等待超时：整节点黄色告警背景，不再用蓝色执行中样式
+  &.status-timeout {
+    background: #fffbe6;
+    border-color: #ffe58f;
+    box-shadow: 0 2px 8px rgba(250, 173, 20, 0.2);
+
+    .node-header {
+      background: linear-gradient(135deg, #fff1b8 0%, #fffbe6 100%);
+      border-bottom-color: #ffe58f;
+    }
+  }
+
+  // 并行分支被其他分支先完成短路：置灰
+  &.status-cancelled {
+    background: #fafafa;
+    border-color: #d9d9d9;
+    opacity: 0.8;
+
+    .node-header {
+      background: #f5f5f5;
+      border-bottom-color: #e8e8e8;
+    }
   }
 
   &:hover {

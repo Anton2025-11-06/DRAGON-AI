@@ -109,6 +109,9 @@ class IfElseNodeExecutor(BaseNodeExecutor):
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         branches = self.cfg("branches") or []
+        # BUG12：先把入边上游的输出透传进本节点输出（铺底），再写分支路由字段，
+        # 否则节点追踪里只能看到 branch/branchLabel，看不到输入数据被传递下去
+        passthrough = self.input_pass_through(ctx)
         matched: Optional[dict] = None
         for br in branches:
             btype = (br.get("type") or "IF").upper()
@@ -126,9 +129,13 @@ class IfElseNodeExecutor(BaseNodeExecutor):
                 matched = br
                 break
         if matched is None:
-            return NodeResult(output={"branch": None}, branch_id=None)
+            return NodeResult(output={**passthrough, "branch": None}, branch_id=None)
         return NodeResult(
-            output={"branch": matched.get("id"), "branchLabel": matched.get("label")},
+            output={
+                **passthrough,
+                "branch": matched.get("id"),
+                "branchLabel": matched.get("label"),
+            },
             branch_id=str(matched.get("id", "")),
         )
 
@@ -164,6 +171,8 @@ class VariableAssignerNodeExecutor(BaseNodeExecutor):
             name = a.get("variableName")
             if not name:
                 continue
+            # 目标变量名支持两种写法：字面量名字，或整串单一 {{引用}}（取上游变量的值作为名字）
+            name = self._resolve_target_name(ctx, str(name))
             atype = (a.get("type") or "LITERAL").upper()
             value = a.get("value")
             if atype == "VARIABLE":
@@ -176,6 +185,15 @@ class VariableAssignerNodeExecutor(BaseNodeExecutor):
                 ctx.global_vars[name] = value
             output[name] = value
         return NodeResult(output=output)
+
+    @staticmethod
+    def _resolve_target_name(ctx: ExecutionContext, raw: str) -> str:
+        """解析目标变量名：非引用写法原样返回；引用解析不到时保留原写法（便于排查配置）。"""
+        m = re.fullmatch(r"\s*\{\{\s*([^{}]+?)\s*\}\}\s*", raw)
+        if not m:
+            return raw
+        value = ctx.resolve(m.group(1))
+        return str(value) if value is not None and str(value) != "" else raw
 
     def _safe_transform(self, ctx: ExecutionContext, value, expression: Optional[str]):
         base = ctx.resolve(str(value or "")) if isinstance(value, str) and "{{" not in str(value) \
@@ -256,6 +274,9 @@ class VariableAggregatorNodeExecutor(BaseNodeExecutor):
         output = {}
         for g in self.cfg("groups") or []:
             var_name = g.get("outputVariable")
+            if not var_name:
+                # 前端允许保存未填写的空聚合组（新增待配置状态），执行时跳过
+                continue
             sources = g.get("sourceVariables") or []
             strategy = (g.get("strategy") or "FIRST_NON_NULL").upper()
             values = []
@@ -278,3 +299,18 @@ class VariableAggregatorNodeExecutor(BaseNodeExecutor):
             else:
                 output[var_name] = values[0] if values else None
         return NodeResult(output=output)
+
+    @staticmethod
+    def validate_node(node, graph) -> list:
+        issues = []
+        groups = (node.data or {}).get("groups") or []
+        if not groups:
+            issues.append(issue("AGG_NO_GROUP", "WARNING", "变量聚合节点未配置聚合组", node))
+        names = [str(g.get("outputVariable") or "").strip() for g in groups]
+        if "" in names:
+            issues.append(issue("AGG_EMPTY_OUTPUT", "ERROR", "存在未填写输出变量名的聚合组", node))
+        filled = [n for n in names if n]
+        if len(filled) != len(set(filled)):
+            issues.append(issue("AGG_DUP_OUTPUT", "ERROR", "多个聚合组的输出变量名重复", node,
+                                suggestion="聚合输出变量名必须唯一，否则下游只能引用到最后一个组的值"))
+        return issues

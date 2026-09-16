@@ -4,7 +4,11 @@
  * 采用可调整大小的分栏布局，集成 PreviewRunner、NodeTracePanel、VariableInspector、CheckpointManager
  */
 import type { InputField } from '#/api/ai-workflow/types';
-import type { NodeTrace, VariableGroup } from '#/store/debug-store';
+import type {
+  NodeExecutionStatus,
+  NodeTrace,
+  VariableGroup,
+} from '#/store/debug-store';
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
@@ -126,6 +130,22 @@ const isHorizontalLayout = computed(() => props.layoutMode === 'bottom');
 /** 节点详情子面板仅在「节点追踪」Tab 显示，其他 Tab 占满整栏 */
 const showNodeDetail = computed(() => activeTab.value === 'trace');
 
+/** 需要同步到画布的节点终态（timeout/cancelled 为并行分支被砍后的结果） */
+type CanvasSyncStatus =
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'running'
+  | 'timeout';
+
+const CANVAS_SYNC_STATUSES = new Set<string>([
+  'cancelled',
+  'completed',
+  'failed',
+  'running',
+  'timeout',
+]);
+
 // ==================== Lifecycle ====================
 
 onMounted(() => {
@@ -173,14 +193,10 @@ watch(
   nodeTraces,
   (traces) => {
     traces.forEach((trace) => {
-      if (
-        trace.status === 'completed' ||
-        trace.status === 'failed' ||
-        trace.status === 'running'
-      ) {
+      if (CANVAS_SYNC_STATUSES.has(trace.status)) {
         workflowStore.highlightNode(
           trace.nodeId,
-          trace.status,
+          trace.status as CanvasSyncStatus,
           trace.duration ?? undefined,
         );
       }
@@ -322,6 +338,32 @@ function handleNodeClick(nodeId: string) {
   emit('node-click', nodeId);
 }
 
+/** 追踪状态中文标签（timeout=已超时、cancelled=已取消） */
+function traceStatusText(status: NodeExecutionStatus): string {
+  const labels: Record<string, string> = {
+    cancelled: '已取消',
+    completed: '已完成',
+    failed: '失败',
+    pending: '等待中',
+    running: '执行中',
+    skipped: '已跳过',
+    timeout: '已超时',
+  };
+  return labels[status] || status;
+}
+
+/** 追踪状态 Tag 颜色（timeout 用黄色告警，区别于蓝色执行中） */
+function traceStatusColor(status: NodeExecutionStatus): string {
+  const colors: Record<string, string> = {
+    cancelled: 'default',
+    completed: 'success',
+    failed: 'error',
+    running: 'processing',
+    timeout: 'warning',
+  };
+  return colors[status] || 'default';
+}
+
 /**
  * 切换检查点启用状态
  */
@@ -442,6 +484,15 @@ defineExpose({
   switchTab: (tab: 'breakpoints' | 'runner' | 'trace' | 'variables') => {
     activeTab.value = tab;
   },
+  /**
+   * 重置面板（BUG5）：回到「预览运行」页并清空上一次的输入，
+   * 执行结果/节点追踪/变量等状态由 debugStore.clearExecutionState() 负责清除
+   */
+  resetPanel: () => {
+    selectedTrace.value = null;
+    activeTab.value = 'runner';
+    previewRunnerRef.value?.reset();
+  },
 });
 </script>
 
@@ -549,24 +600,18 @@ defineExpose({
                     running: trace.status === 'running',
                     completed: trace.status === 'completed',
                     failed: trace.status === 'failed',
+                    timeout: trace.status === 'timeout',
+                    cancelled: trace.status === 'cancelled',
                   }"
                   @click="handleSelectTrace(trace)"
                 >
                   <div class="trace-item-header">
                     <span class="trace-name">{{ trace.nodeName }}</span>
                     <a-tag
-                      :color="
-                        trace.status === 'completed'
-                          ? 'success'
-                          : trace.status === 'failed'
-                            ? 'error'
-                            : trace.status === 'running'
-                              ? 'processing'
-                              : 'default'
-                      "
+                      :color="traceStatusColor(trace.status)"
                       size="small"
                     >
-                      {{ trace.status }}
+                      {{ traceStatusText(trace.status) }}
                     </a-tag>
                   </div>
                   <!-- 0ms 也是有效耗时（轻量节点常 sub-ms），只排除尚未执行的 null -->
@@ -945,6 +990,18 @@ defineExpose({
 
   &.failed {
     border-left: 3px solid var(--ant-color-error);
+  }
+
+  // 并行分支等待超时：黄色背景告警
+  &.timeout {
+    background-color: #fffbe6;
+    border-left: 3px solid #faad14;
+  }
+
+  // 并行分支被其他分支先完成短路：置灰
+  &.cancelled {
+    border-left: 3px solid #d9d9d9;
+    opacity: 0.7;
   }
 
   .trace-item-header {

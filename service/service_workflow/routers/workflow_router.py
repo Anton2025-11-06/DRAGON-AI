@@ -8,28 +8,19 @@
 """
 from __future__ import annotations
 
-import json
-from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request
 
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import get_login_user, has_permission
+from common.common_permission.permission import get_user_id, has_permission
 from service.service_workflow.schemas.workflow_schema import (
-    TemplateSaveReq, WorkflowSaveReq,
+     WorkflowSaveReq,
 )
 from service.service_workflow.services.workflow_service import WorkflowService
 
 router = APIRouter(prefix="/workflows", tags=["工作流编排"])
 
-
-async def _user_id(request: Request) -> int:
-    try:
-        login_user = await get_login_user(request)
-        return int(login_user.get("user_id") or 0)
-    except Exception:  # noqa: BLE001
-        return 0  # 直连/旁路调用（网关未注入用户）时降级为系统用户
 
 
 # ==================== 固定路径（先声明） ====================
@@ -51,7 +42,7 @@ async def node_definitions(request: Request):
 @has_permission("workflow:workflow:add")
 async def create_workflow(request: Request, body: WorkflowSaveReq):
     try:
-        new_id = await WorkflowService.create(body, user_id=await _user_id(request))
+        new_id = await WorkflowService.create(body, user_id=await get_user_id(request))
         return ApiResponse.success(data=new_id, message="创建成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -64,7 +55,7 @@ async def create_from_template(request: Request, template_id: int,
                                description: str = Query(None, max_length=500)):
     try:
         new_id = await WorkflowService.create_from_template(
-            template_id, name, description, user_id=await _user_id(request))
+            template_id, name, description, user_id=await get_user_id(request))
         return ApiResponse.success(data=new_id, message="创建成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -84,7 +75,7 @@ async def workflow_detail(request: Request, workflow_id: int):
 @router.put("/{workflow_id}", summary="更新工作流（草稿保存）")
 @has_permission("workflow:workflow:edit")
 async def update_workflow(request: Request, workflow_id: int, body: WorkflowSaveReq):
-    ok = await WorkflowService.update(workflow_id, body, user_id=await _user_id(request))
+    ok = await WorkflowService.update(workflow_id, body, user_id=await get_user_id(request))
     if not ok:
         return ApiResponse.error(400, "工作流不存在")
     return ApiResponse.success(message="保存成功")
@@ -105,7 +96,7 @@ async def publish_workflow(request: Request, workflow_id: int, body: dict = None
     try:
         change_log = (body or {}).get("changeLog") if isinstance(body, dict) else None
         result = await WorkflowService.publish(
-            workflow_id, change_log=change_log, user_id=await _user_id(request))
+            workflow_id, change_log=change_log, user_id=await get_user_id(request))
         return ApiResponse.success(data=result, message=f"发布成功，当前版本 v{result['version']}")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -118,7 +109,7 @@ async def publish_workflow(request: Request, workflow_id: int, body: dict = None
 async def copy_workflow(request: Request, workflow_id: int,
                         name: str = Query(None, max_length=128)):
     try:
-        new_id = await WorkflowService.copy(workflow_id, name, user_id=await _user_id(request))
+        new_id = await WorkflowService.copy(workflow_id, name, user_id=await get_user_id(request))
         return ApiResponse.success(data=new_id, message="复制成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -155,7 +146,7 @@ async def workflow_version_detail(request: Request, workflow_id: int, version: i
 async def rollback_workflow(request: Request, workflow_id: int, version: int):
     try:
         await WorkflowService.rollback(
-            workflow_id, version, user_id=await _user_id(request))
+            workflow_id, version, user_id=await get_user_id(request))
         return ApiResponse.success(message=f"已恢复 v{version}，发布请手动触发")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -171,7 +162,7 @@ async def list_models(request: Request, type: str = MODEL_TYPE_TEXT):
     try:
         # 只返回当前用户审批通过(status=1)的模型；未登录时 user_id=0 → 空列表
         return ApiResponse.success(
-            data=await WorkflowService.list_models(type, await _user_id(request)))
+            data=await WorkflowService.list_models(type, await get_user_id(request)))
     except Exception as e:  # noqa: BLE001
         return ApiResponse.success(data=[])  # 下拉失败不阻断画布加载
 
@@ -186,109 +177,8 @@ async def list_knowledge_bases(request: Request):
 
 @support_router.get("/chat-agents/mine", summary="我的智能体下拉")
 async def list_chat_agents(request: Request):
-    user_id = await _user_id(request)
+    user_id = await get_user_id(request)
     if not user_id:
         return ApiResponse.success(data=[])
     return ApiResponse.success(data=await WorkflowService.list_chat_agents(user_id))
 
-
-# ==================== 模板 ====================
-# 前端契约前缀 /workflow-templates（不在 /workflows 之下，独立 router）
-
-template_router = APIRouter(prefix="/workflow-templates", tags=["工作流模板"])
-
-
-@template_router.get("/page", summary="分页查询模板")
-async def page_templates(request: Request, current: int = 1, size: int = 10,
-                         name: str = None, category: str = None,
-                         builtInOnly: bool = False):
-    data = await WorkflowService.template_page(current=current, size=size, name=name,
-                                               category=category, built_in_only=builtInOnly)
-    return ApiResponse.success(data=data)
-
-
-@template_router.get("/built-in", summary="内置模板列表")
-async def builtin_templates(request: Request):
-    return ApiResponse.success(data=await WorkflowService.builtin_templates())
-
-
-@template_router.get("/category/{category}", summary="按分类查询模板")
-async def templates_by_category(request: Request, category: str):
-    return ApiResponse.success(data=await WorkflowService.templates_by_category(category))
-
-
-@template_router.post("", summary="创建模板")
-@has_permission("workflow:template:add")
-async def create_template(request: Request, body: TemplateSaveReq):
-    new_id = await WorkflowService.create_template(body, user_id=await _user_id(request))
-    return ApiResponse.success(data=new_id, message="创建成功")
-
-
-@template_router.post("/from-workflow/{workflow_id}", summary="从工作流创建模板")
-@has_permission("workflow:template:add")
-async def create_template_from_workflow(request: Request, workflow_id: int,
-                                        name: str = Query(..., max_length=128),
-                                        category: str = Query("CUSTOM", max_length=32),
-                                        description: str = Query(None, max_length=500)):
-    try:
-        new_id = await WorkflowService.template_from_workflow(
-            workflow_id, name, category, description, user_id=await _user_id(request))
-        return ApiResponse.success(data=new_id, message="创建成功")
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-
-
-@template_router.post("/import", summary="导入模板（JSON 字符串）")
-@has_permission("workflow:template:add")
-async def import_template(request: Request, body: Any = None):
-    # 前端以 application/json 提交模板 JSON 字符串：可能被序列为 JSON string，
-    # 也可能直接是模板对象本身，两种形态都兼容
-    json_str = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
-    try:
-        new_id = await WorkflowService.import_template(json_str, user_id=await _user_id(request))
-        return ApiResponse.success(data=new_id, message="导入成功")
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-
-
-@template_router.get("/{template_id}", summary="模板详情")
-async def template_detail(request: Request, template_id: int):
-    data = await WorkflowService.template_detail(template_id)
-    if data is None:
-        return ApiResponse.error(400, "模板不存在")
-    return ApiResponse.success(data=data)
-
-
-@template_router.put("/{template_id}", summary="更新模板")
-@has_permission("workflow:template:edit")
-async def update_template(request: Request, template_id: int, body: TemplateSaveReq):
-    try:
-        ok = await WorkflowService.update_template(template_id, body)
-        if not ok:
-            return ApiResponse.error(400, "模板不存在")
-        return ApiResponse.success(message="保存成功")
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-
-
-@template_router.delete("/{template_id}", summary="删除模板")
-@has_permission("workflow:template:delete")
-async def delete_template(request: Request, template_id: int):
-    try:
-        ok = await WorkflowService.delete_template(template_id)
-        if not ok:
-            return ApiResponse.error(400, "模板不存在")
-        return ApiResponse.success(message="删除成功")
-    except ValueError as e:
-        return ApiResponse.error(400, str(e))
-
-
-@template_router.get("/{template_id}/export", summary="导出模板（JSON 字符串）")
-async def export_template(request: Request, template_id: int):
-    data = await WorkflowService.template_detail(template_id)
-    if data is None:
-        return ApiResponse.error(400, "模板不存在")
-    payload = {"name": data.get("name"), "description": data.get("description"),
-               "category": data.get("category"), "icon": data.get("icon"),
-               "graph": data.get("graph")}
-    return ApiResponse.success(data=json.dumps(payload, ensure_ascii=False, indent=2))

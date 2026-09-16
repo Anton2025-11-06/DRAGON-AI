@@ -18,13 +18,16 @@ import { WorkflowDebugErrorType } from '#/views/wemirr/ai/workflow/domain/debug-
 
 /**
  * 节点执行状态
+ * cancelled / timeout 为并行分支被砍后的终态（后端 node.cancelled / node.timeout）
  */
 export type NodeExecutionStatus =
+  | 'cancelled'
   | 'completed'
   | 'failed'
   | 'pending'
   | 'running'
-  | 'skipped';
+  | 'skipped'
+  | 'timeout';
 
 /**
  * 节点追踪数据
@@ -199,6 +202,8 @@ export interface DebugSSEEvent {
     statusCode: number;
     url: string;
   };
+  /** node.timeout / node.cancelled：节点所属的并行分支 id */
+  branchId?: string;
 }
 
 /**
@@ -668,6 +673,50 @@ export const useDebugStore = defineStore('debug', () => {
   }
 
   /**
+   * 节点中止收敛（node.timeout / node.cancelled 共用）
+   *
+   * 并行屏障「任一完成 + 等待超时」下被砍的分支节点，后端在 node.started 之后
+   * 会补发一个终态事件；不接这个终态，画布与节点追踪会一直停在蓝色「执行中」。
+   * timeout=黄色「已超时」（时限到点），cancelled=灰色「已取消」（其他分支先完成）。
+   */
+  function markNodeAborted(event: DebugSSEEvent, status: NodeExecutionStatus) {
+    const { nodeId, duration, error } = event;
+    if (!nodeId) return;
+
+    const trace = nodeTraces.value.get(nodeId);
+    // 已出终态（跑完了/失败了）的节点不被后到的中止事件覆盖
+    if (!trace || trace.status === 'completed' || trace.status === 'failed') {
+      return;
+    }
+
+    trace.status = status;
+    trace.endTime = new Date();
+    trace.duration = duration ?? null;
+    trace.error = {
+      type: status === 'timeout' ? 'TIMEOUT' : 'CANCELLED',
+      message:
+        error ||
+        (status === 'timeout' ? '并行分支等待超时，已停止等待' : '并行分支已取消'),
+    };
+
+    updateTimelineItem(nodeId, status, duration ?? 0);
+  }
+
+  /**
+   * 处理节点超时事件（并行分支等待时限到点）
+   */
+  function handleNodeTimeout(event: DebugSSEEvent) {
+    markNodeAborted(event, 'timeout');
+  }
+
+  /**
+   * 处理节点取消事件（并行分支被其他先完成的分支短路）
+   */
+  function handleNodeCancelled(event: DebugSSEEvent) {
+    markNodeAborted(event, 'cancelled');
+  }
+
+  /**
    * 处理流式 Token 事件
    */
   function handleStreamingToken(event: DebugSSEEvent) {
@@ -1045,6 +1094,10 @@ export const useDebugStore = defineStore('debug', () => {
    */
   function handleSSEEvent(event: DebugSSEEvent) {
     switch (event.type) {
+      case 'node.cancelled': {
+        handleNodeCancelled(event);
+        break;
+      }
       case 'node.completed': {
         handleNodeComplete(event);
         break;
@@ -1059,6 +1112,10 @@ export const useDebugStore = defineStore('debug', () => {
       }
       case 'node.started': {
         handleNodeStart(event);
+        break;
+      }
+      case 'node.timeout': {
+        handleNodeTimeout(event);
         break;
       }
       case 'workflow.cancelled': {
@@ -1157,6 +1214,8 @@ export const useDebugStore = defineStore('debug', () => {
     handleNodeStart,
     handleNodeComplete,
     handleNodeError,
+    handleNodeTimeout,
+    handleNodeCancelled,
     handleStreamingToken,
     handleBreakpointHit,
     getNodeTrace,

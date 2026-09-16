@@ -3,7 +3,8 @@ import type { UploadFile } from 'ant-design-vue';
 /**
  * DynamicInputForm 动态输入表单组件
  * 根据 START 节点的字段定义动态生成表单
- * 支持 SHORT_TEXT、PARAGRAPH、NUMBER、SELECT、CHECKBOX、SINGLE_FILE、FILE_LIST 类型
+ * 支持 TEXT（文本）、NUMBER、SELECT、CHECKBOX（开关）、SINGLE_FILE、FILE_LIST 类型；
+ * 旧图的 SHORT_TEXT / PARAGRAPH 经 normalizeInputFieldType 归一为 TEXT
  *
  */
 import type { FormInstance, Rule } from 'ant-design-vue/es/form';
@@ -19,9 +20,16 @@ import {
   LoadingOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue';
-import { message } from 'ant-design-vue';
+import { message, Upload } from 'ant-design-vue';
 
 import { uploadWorkflowFile } from '#/api/ai-workflow';
+
+import {
+  getMaxFileCount,
+  getTextMaxLength,
+  isTextInputType,
+  normalizeInputFieldType,
+} from '../../domain/input-field-type';
 
 // ==================== Props ====================
 
@@ -57,6 +65,15 @@ const fileListCache = reactive<Record<string, UploadFile[]>>({});
 /** 正在上传的字段 */
 const uploadingFields = ref<Record<string, boolean>>({});
 
+/**
+ * 上传名额预占计数（字段名 -> 进行中的上传数）
+ *
+ * BUG6：一次选择多个文件时 ant-design-vue 会并发触发多个 custom-request，
+ * 若只按“已上传数量”判断上限，所有文件都会放行，导致开始节点配置的
+ * 「最多文件数量」不生效，故在上传开始前同步预占名额。
+ */
+const reservedUploads = reactive<Record<string, number>>({});
+
 // ==================== Computed ====================
 
 /**
@@ -77,11 +94,8 @@ const formRules = computed(() => {
       });
     }
 
-    // 文本类型的正则验证
-    if (
-      (field.type === 'SHORT_TEXT' || field.type === 'PARAGRAPH') &&
-      field.pattern
-    ) {
+    // 文本类型的正则验证（短/长文本已合并为 TEXT）
+    if (isTextInputType(field.type) && field.pattern) {
       fieldRules.push({
         pattern: new RegExp(field.pattern),
         message: field.patternMessage || '格式不正确',
@@ -220,6 +234,78 @@ function getAcceptTypes(field: InputField): string {
   return '*';
 }
 
+/** 字节数转可读大小（用于校验提示） */
+function formatFileSize(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(2)}MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)}KB`;
+  return `${size}B`;
+}
+
+/**
+ * 上传前校验：开始节点配置的文件类型白名单与单文件大小上限。
+ *
+ * 后端只做存储，不按节点配置校验类型/大小，因此限制只能在这里兑现；
+ * 不合规时返回 LIST_IGNORE（既不发请求，也不把被拒文件留在列表里）。
+ */
+function handleBeforeUpload(file: File, field: InputField): boolean | string {
+  const types = (field.allowedFileTypes || [])
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean);
+  if (types.length > 0) {
+    const name = (file.name || '').toLowerCase();
+    const mime = (file.type || '').toLowerCase();
+    const matched = types.some((item) => {
+      if (item === '*' || item === '*/*') return true;
+      if (item.startsWith('.')) return name.endsWith(item);
+      if (item.includes('/')) return mime === item;
+      return name.endsWith(`.${item}`) || mime === item;
+    });
+    if (!matched) {
+      message.warning(
+        `「${field.label || field.name}」仅支持 ${types.join(' / ')} 类型的文件`,
+      );
+      return Upload.LIST_IGNORE;
+    }
+  }
+
+  const maxSize = Number(field.maxFileSize);
+  if (Number.isFinite(maxSize) && maxSize > 0 && file.size > maxSize) {
+    message.warning(
+      `「${field.label || field.name}」单个文件不能超过 ${formatFileSize(maxSize)}`,
+    );
+    return Upload.LIST_IGNORE;
+  }
+  return true;
+}
+
+/** 字段限制说明（类型 / 大小 / 数量），与上传校验同一口径 */
+function getFileLimitsText(field: InputField): string {
+  const parts: string[] = [];
+  const types = (field.allowedFileTypes || []).filter(Boolean);
+  if (types.length > 0) parts.push(`类型 ${types.join(' / ')}`);
+  const maxSize = Number(field.maxFileSize);
+  if (Number.isFinite(maxSize) && maxSize > 0) {
+    parts.push(`单个≤${formatFileSize(maxSize)}`);
+  }
+  return parts.join('，');
+}
+
+/**
+ * 当前字段已占用（已上传 + 上传中）的文件数
+ */
+function countOccupiedFiles(fieldName: string, isMultiple: boolean): number {
+  const value = formValues.value[fieldName];
+  let uploaded = 0;
+  if (Array.isArray(value)) {
+    uploaded = value.length;
+  } else if (isMultiple) {
+    uploaded = 0;
+  } else if (value !== undefined && value !== null && value !== '') {
+    uploaded = 1;
+  }
+  return uploaded + (reservedUploads[fieldName] || 0);
+}
+
 /**
  * 处理文件上传
  */
@@ -233,6 +319,17 @@ async function handleFileUpload(
   isMultiple: boolean,
 ) {
   const { file, onSuccess, onError } = options;
+  const field = props.fields.find((item) => item.name === fieldName);
+  const limit = isMultiple && field ? getMaxFileCount(field) : 1;
+
+  // 同步预占名额：超出「最多文件数量」直接拒绝，不发起上传
+  if (countOccupiedFiles(fieldName, isMultiple) >= limit) {
+    const error = new Error(`最多上传 ${limit} 个文件`);
+    onError(error);
+    message.warning(`「${field?.label || fieldName}」最多上传 ${limit} 个文件`);
+    return;
+  }
+  reservedUploads[fieldName] = (reservedUploads[fieldName] || 0) + 1;
 
   uploadingFields.value[fieldName] = true;
 
@@ -275,6 +372,10 @@ async function handleFileUpload(
     message.error(`文件上传失败: ${error.message || '未知错误'}`);
   } finally {
     uploadingFields.value[fieldName] = false;
+    reservedUploads[fieldName] = Math.max(
+      0,
+      (reservedUploads[fieldName] || 0) - 1,
+    );
   }
 }
 
@@ -300,8 +401,19 @@ function handleFileRemove(
           (f: { fileName: string }) => f.fileName !== file.uid,
         )
       : undefined;
+  // 单文件场景取掉后重置上传中标记，保证重新选择仍能通过名额校验
+  if (!isMultiple) {
+    reservedUploads[fieldName] = 0;
+  }
 
   return true;
+}
+
+/**
+ * 字段渲染类型（旧图的 SHORT_TEXT / PARAGRAPH 归一为 TEXT）
+ */
+function fieldType(field: InputField) {
+  return normalizeInputFieldType(field.type);
 }
 
 /**
@@ -346,6 +458,14 @@ function clearValidate(names?: string[]) {
   formRef.value?.clearValidate(names);
 }
 
+/**
+ * 是否还有文件在上传中：外层提交前拦一道，
+ * 否则可选的文件字段会静默丢掉最后一个还没传完的文件。
+ */
+function hasUploading(): boolean {
+  return Object.values(uploadingFields.value).some(Boolean);
+}
+
 // ==================== Expose ====================
 
 defineExpose({
@@ -354,6 +474,7 @@ defineExpose({
   getValues,
   setValues,
   clearValidate,
+  hasUploading,
 });
 </script>
 
@@ -378,24 +499,29 @@ defineExpose({
         <span v-if="field.description" class="field-description">
           {{ field.description }}
         </span>
+        <span
+          v-if="
+            fieldType(field) === 'FILE_LIST' ||
+            fieldType(field) === 'SINGLE_FILE'
+          "
+          class="field-description"
+        >
+          <template v-if="fieldType(field) === 'FILE_LIST'">
+            最多上传 {{ getMaxFileCount(field) }} 个文件
+          </template>
+          <template v-if="getFileLimitsText(field)">
+            {{ fieldType(field) === 'FILE_LIST' ? '，' : ''
+            }}{{ getFileLimitsText(field) }}
+          </template>
+        </span>
       </template>
 
-      <!-- 短文本 SHORT_TEXT -->
-      <a-input
-        v-if="field.type === 'SHORT_TEXT'"
-        v-model:value="formValues[field.name]"
-        :maxlength="field.maxLength || 256"
-        :placeholder="field.description || `请输入${field.label}`"
-        allow-clear
-        show-count
-      />
-
-      <!-- 长文本 PARAGRAPH -->
+      <!-- 文本 TEXT（短文本 + 长文本已合并） -->
       <a-textarea
-        v-else-if="field.type === 'PARAGRAPH'"
+        v-if="fieldType(field) === 'TEXT'"
         v-model:value="formValues[field.name]"
-        :rows="4"
-        :maxlength="field.maxLength || 100000"
+        :rows="3"
+        :maxlength="getTextMaxLength(field)"
         :placeholder="field.description || `请输入${field.label}`"
         show-count
         allow-clear
@@ -403,7 +529,7 @@ defineExpose({
 
       <!-- 数字 NUMBER -->
       <a-input-number
-        v-else-if="field.type === 'NUMBER'"
+        v-else-if="fieldType(field) === 'NUMBER'"
         v-model:value="formValues[field.name]"
         :min="field.minValue"
         :max="field.maxValue"
@@ -413,7 +539,7 @@ defineExpose({
 
       <!-- 下拉选择 SELECT -->
       <a-select
-        v-else-if="field.type === 'SELECT'"
+        v-else-if="fieldType(field) === 'SELECT'"
         v-model:value="formValues[field.name]"
         :placeholder="field.description || `请选择${field.label}`"
         allow-clear
@@ -423,20 +549,21 @@ defineExpose({
         </a-select-option>
       </a-select>
 
-      <!-- 复选框 CHECKBOX -->
-      <a-checkbox
-        v-else-if="field.type === 'CHECKBOX'"
+      <!-- 开关 CHECKBOX（历史类型名，UI 设成开关） -->
+      <a-switch
+        v-else-if="fieldType(field) === 'CHECKBOX'"
         v-model:checked="formValues[field.name]"
-      >
-        {{ field.description || field.label }}
-      </a-checkbox>
+        checked-children="开"
+        un-checked-children="关"
+      />
 
       <!-- 单文件上传 SINGLE_FILE -->
       <a-upload
-        v-else-if="field.type === 'SINGLE_FILE'"
+        v-else-if="fieldType(field) === 'SINGLE_FILE'"
         v-model:file-list="fileListCache[field.name]"
         :max-count="1"
         :accept="getAcceptTypes(field)"
+        :before-upload="(file: any) => handleBeforeUpload(file, field)"
         :custom-request="
           (options: any) => handleFileUpload(field.name, options, false)
         "
@@ -467,10 +594,11 @@ defineExpose({
 
       <!-- 多文件上传 FILE_LIST -->
       <a-upload
-        v-else-if="field.type === 'FILE_LIST'"
+        v-else-if="fieldType(field) === 'FILE_LIST'"
         v-model:file-list="fileListCache[field.name]"
-        :max-count="field.maxFileCount || 5"
+        :max-count="getMaxFileCount(field)"
         :accept="getAcceptTypes(field)"
+        :before-upload="(file: any) => handleBeforeUpload(file, field)"
         :custom-request="
           (options: any) => handleFileUpload(field.name, options, true)
         "
@@ -550,7 +678,7 @@ defineExpose({
     width: 100%;
   }
 
-  :deep(.ant-checkbox-wrapper) {
+  :deep(.ant-switch) {
     font-size: 13px;
   }
 }

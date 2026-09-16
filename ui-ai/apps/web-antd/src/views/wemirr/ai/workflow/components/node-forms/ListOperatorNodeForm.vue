@@ -249,11 +249,14 @@ function handleChange() {
         v-model="formData.inputVariable"
         :current-node-id="nodeId"
         :placeholder="'{{nodeName.arrayVariable}}'"
-        :filter-types="['array']"
+        enable-path
         @change="handleChange"
       />
       <div class="form-hint">
-        输入要操作的数组变量引用，如 <code v-pre>{{ start.items }}</code>
+        可引用全部上游节点的输出变量（不限数组）；支持再次提取子字段与下标，如
+        <code v-pre>{{ 大模型.output.data }}</code>
+        <code v-pre>{{ 大模型.output[0] }}</code>
+        （上游为 JSON 文本时会自动解析后取值）
       </div>
     </a-form-item>
 

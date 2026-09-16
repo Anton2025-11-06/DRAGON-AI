@@ -12,7 +12,9 @@ from functools import reduce
 from typing import Any, Callable, Optional
 
 from service.service_workflow.utils.file_utils import FileUtils
-from service.service_workflow.workflow_engine.context import ExecutionContext, _dig
+from service.service_workflow.workflow_engine.context import (
+    ExecutionContext, _dig, parse_json_if_embedded,
+)
 from service.service_workflow.workflow_engine.nodes.base import (
     BaseNodeExecutor, NodeResult, file_url, issue,
 )
@@ -30,6 +32,18 @@ class TemplateNodeExecutor(BaseNodeExecutor):
             raise ValueError("模板节点内容为空")
         engine = (cfg.get("engine") or "SIMPLE").upper()
 
+        # 「输入变量」表：变量名 -> 引用解析值（解析不到时回落默认值）。
+        # 两种引擎都要用上：此前只有 JINJA2 读这张表，SIMPLE 只按执行上下文
+        # 解析 {{ref}}，导致 {{name}} 这类声明变量永远替换不上。
+        variables: dict[str, Any] = {}
+        for v in cfg.get("variables") or []:
+            name = v.get("name")
+            if not name:
+                continue
+            reference = v.get("reference")
+            value = ctx.resolve(str(reference)) if reference else None
+            variables[str(name)] = value if value is not None else v.get("defaultValue")
+
         if engine == "JINJA2":
             from jinja2 import Environment, StrictUndefined, Undefined
             env = Environment(
@@ -37,28 +51,34 @@ class TemplateNodeExecutor(BaseNodeExecutor):
                 autoescape=bool(cfg.get("escapeHtml")),
                 trim_blocks=bool(cfg.get("trimWhitespace")),
             )
-            # 变量集：声明变量 + 全部节点输出扁平化
-            variables: dict[str, Any] = {}
-            for v in cfg.get("variables") or []:
-                name = v.get("name")
-                if not name:
-                    continue
-                value = ctx.resolve(str(v.get("reference") or "")) if v.get("reference") \
-                    else v.get("defaultValue")
-                variables[name] = value if value is not None else v.get("defaultValue")
-            variables.setdefault("global", ctx.global_vars)
+            jinja_vars = {**variables, "global": ctx.global_vars}
             try:
-                rendered = env.from_string(template).render(**variables)
+                rendered = env.from_string(template).render(**jinja_vars)
             except Exception as e:  # noqa: BLE001
                 if cfg.get("strictMode"):
                     raise ValueError(f"模板渲染失败: {e}") from e
-                rendered = ctx.render(template)  # 降级 SIMPLE
+                rendered = self._render_simple(ctx, template, variables, cfg)
         else:
-            rendered = ctx.render(template, strict=bool(cfg.get("strictMode")))
+            rendered = self._render_simple(ctx, template, variables, cfg)
 
         output_var = cfg.get("outputVariable") or "output"
         # 只输出 outputVariable 一个键（与 REPLY 对齐，去掉冗余的 text 别名键）
         return NodeResult(output={output_var: rendered})
+
+    @staticmethod
+    def _render_simple(
+        ctx: ExecutionContext, template: str, variables: dict[str, Any], cfg: dict
+    ) -> Any:
+        """SIMPLE 渲染：把声明的「输入变量」作为最高优先级作用域压入上下文。
+
+        复用 ExecutionContext.render（统一处理嵌套路径/文件变量/严格模式），
+        仅额外让 {{变量名}} 先命中本节点声明的变量表。
+        """
+        ctx.push_scope(variables)
+        try:
+            return ctx.render(template, strict=bool(cfg.get("strictMode")))
+        finally:
+            ctx.pop_scope()
 
 
 class ReplyNodeExecutor(BaseNodeExecutor):
@@ -310,16 +330,24 @@ class ListOperatorNodeExecutor(BaseNodeExecutor):
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
         ref = cfg.get("inputVariable")
-        arr = ctx.resolve(str(ref or ""))
+        # 引用本身支持 JSONPath 风格子路径/下标再次提取（{{大模型.output.data[0]}}）；
+        # 解析出来的值是大模型常见的 JSON 文本时先解开，再判断是否数组。
+        # 不做类型预检（前端已放开“只能选数组”的限制），取不到数组时直接报错提示写法。
+        arr = parse_json_if_embedded(ctx.resolve(str(ref or "")))
         if arr is None:
-            raise ValueError(f"输入数组变量无法解析: {ref}")
+            raise ValueError(f"输入数组变量无法解析: {ref or '(空)'}")
+        if isinstance(arr, tuple):
+            arr = list(arr)
         if not isinstance(arr, list):
-            raise ValueError(f"输入变量不是数组: {ref} ({type(arr).__name__})")
+            raise ValueError(
+                f"输入变量不是数组: {ref}（实际类型 {type(arr).__name__}）——"
+                f"可在引用后追加字段路径或下标取到数组，如 "
+                f"{{{{...输出.data}}}} / {{{{...输出[0].list}}}}")
 
         op = (cfg.get("operationType") or "FIRST").upper()
         result = self._apply(op, arr, cfg, ctx)
         output_var = cfg.get("outputVariable") or "output"
-        return NodeResult(output={output_var: result, "count": len(arr) if isinstance(arr, list) else 0})
+        return NodeResult(output={output_var: result, "count": len(arr)})
 
     def _apply(self, op: str, arr: list, cfg: dict, ctx: ExecutionContext) -> Any:
         from service.service_workflow.workflow_engine.comparators import compare
@@ -387,7 +415,7 @@ class ListOperatorNodeExecutor(BaseNodeExecutor):
             cc = cfg.get("concatConfig") or {}
             merged = list(arr)
             for other_ref in cc.get("otherArrays") or []:
-                other = ctx.resolve(str(other_ref))
+                other = parse_json_if_embedded(ctx.resolve(str(other_ref)))
                 if isinstance(other, list):
                     merged.extend(other)
             if cc.get("removeDuplicates"):

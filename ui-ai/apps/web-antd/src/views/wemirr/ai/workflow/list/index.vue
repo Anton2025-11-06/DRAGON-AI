@@ -3,6 +3,7 @@
  * 工作流列表页面
  * 卡片式展示工作流列表，支持新增、编辑、删除、发布、复制等操作
  */
+import type { ApiKeyListResp } from '#/api/ai-workflow';
 import type {
   WorkflowPageResp,
   WorkflowTemplateResp,
@@ -19,11 +20,14 @@ import {
   copyWorkflow,
   createWorkflowFromTemplate,
   deleteWorkflow,
+  listApiKeys,
 } from '#/api/ai-workflow';
 
-import TemplateSelectModal from '../templates/components/TemplateSelectModal.vue';
-import SaveAsTemplateModal from '../templates/components/SaveAsTemplateModal.vue';
 import ApiKeyManager from '../components/ApiKeyManager.vue';
+import WorkflowChatModal from '../components/chat/WorkflowChatModal.vue';
+import SaveAsTemplateModal from '../templates/components/SaveAsTemplateModal.vue';
+import TemplateSelectModal from '../templates/components/TemplateSelectModal.vue';
+import ApiKeySelectModal from './components/ApiKeySelectModal.vue';
 import WorkflowCard from './components/WorkflowCard.vue';
 import createCrudOptions from './crud';
 
@@ -39,18 +43,25 @@ const { crudBinding, crudRef, crudExpose } = useFs({
 // 复制对话框
 const copyModalVisible = ref(false);
 const copyWorkflowName = ref('');
-const copyingWorkflow = ref<WorkflowPageResp | null>(null);
+const copyingWorkflow = ref<null | WorkflowPageResp>(null);
 
 // 模板选择弹窗
 const templateSelectVisible = ref(false);
 
 // API 访问抽屉（需求 4.2：从编辑页迁移到列表页）
 const apiDrawerVisible = ref(false);
-const apiDrawerItem = ref<WorkflowPageResp | null>(null);
+const apiDrawerItem = ref<null | WorkflowPageResp>(null);
 
 // 保存为模块弹窗（需求 4.2）
 const templateModalVisible = ref(false);
-const templateModalItem = ref<WorkflowPageResp | null>(null);
+const templateModalItem = ref<null | WorkflowPageResp>(null);
+
+// 去对话：先选启用中的 api-key，再开对话窗口
+const keySelectVisible = ref(false);
+const keySelectList = ref<ApiKeyListResp[]>([]);
+const chatVisible = ref(false);
+const chatWorkflow = ref<null | WorkflowPageResp>(null);
+const chatApiKey = ref<ApiKeyListResp | null>(null);
 
 // 捕获并忽略卡片模式下的 scrollTo 错误
 onErrorCaptured((err) => {
@@ -87,7 +98,7 @@ function handleCreate() {
 }
 
 /** 处理模板选择 */
-async function handleTemplateSelect(template: WorkflowTemplateResp | null) {
+async function handleTemplateSelect(template: null | WorkflowTemplateResp) {
   if (template) {
     // 使用模板创建工作流
     try {
@@ -155,19 +166,47 @@ function handleHistory(item: WorkflowPageResp) {
   router.push(`/agent/workflow/history/${item.id}`);
 }
 
-/** 执行工作流（未发布时提示进入编辑页发布，需求 2.1；进入后不自动弹调试面板） */
-function handleExecute(item: WorkflowPageResp) {
-  if (item.status !== 'PUBLISHED') {
-    message.warning(`工作流「${item.name}」尚未发布，请进入编辑页发布后再执行`);
-    return;
-  }
-  router.push(`/agent/workflow/editor/${item.id}`);
-}
-
 /** 打开 API 访问抽屉（需求 4.2） */
 function handleApi(item: WorkflowPageResp) {
   apiDrawerItem.value = item;
   apiDrawerVisible.value = true;
+}
+
+/**
+ * 去对话：对话走的是已发布版本的执行入口，前置条件是三件事同时成立——
+ * 工作流已发布、已创建 api-key、api-key 处于启用状态，缺一不可，
+ * 因此这里只按「有没有可用 key」判定，不满足就一次性提示到位。
+ */
+async function handleChat(item: WorkflowPageResp) {
+  let keys: ApiKeyListResp[] = [];
+  try {
+    keys = await listApiKeys(item.id);
+  } catch {
+    message.error('查询 API Key 失败');
+    return;
+  }
+  const usable = (keys || []).filter(
+    (key) =>
+      key.status === 'ACTIVE' &&
+      (!key.expireTime || new Date(key.expireTime).getTime() > Date.now()),
+  );
+  if (usable.length === 0) {
+    Modal.warning({
+      title: '暂时无法对话',
+      content: '请确认工作流已发布，已创建api-key，api-key处于启用状态。',
+      okText: '知道了',
+    });
+    return;
+  }
+  chatWorkflow.value = item;
+  keySelectList.value = usable;
+  keySelectVisible.value = true;
+}
+
+/** 选定 key 后打开对话窗口 */
+function handleKeySelected(key: ApiKeyListResp) {
+  chatApiKey.value = key;
+  chatVisible.value = true;
 }
 
 /** 打开保存为模块弹窗（需求 4.2） */
@@ -205,7 +244,7 @@ function handleTemplateSaved() {
             @remove="handleRemove"
             @copy="handleCopy"
             @history="handleHistory"
-            @execute="handleExecute"
+            @chat="handleChat"
             @api="handleApi"
             @template="handleSaveAsTemplate"
           />
@@ -255,10 +294,7 @@ function handleTemplateSaved() {
       placement="right"
       :width="720"
     >
-      <ApiKeyManager
-        v-if="apiDrawerItem"
-        :workflow-id="apiDrawerItem.id"
-      />
+      <ApiKeyManager v-if="apiDrawerItem" :workflow-id="apiDrawerItem.id" />
     </a-drawer>
 
     <!-- 保存为模块弹窗（需求 4.2） -->
@@ -267,6 +303,20 @@ function handleTemplateSaved() {
       :workflow-id="templateModalItem?.id || ''"
       :workflow-name="templateModalItem?.name"
       @success="handleTemplateSaved"
+    />
+
+    <!-- 去对话：选择启用中的 api-key -->
+    <ApiKeySelectModal
+      v-model:open="keySelectVisible"
+      :keys="keySelectList"
+      @select="handleKeySelected"
+    />
+
+    <!-- 去对话：对话窗口 -->
+    <WorkflowChatModal
+      v-model:open="chatVisible"
+      :api-key="chatApiKey"
+      :workflow="chatWorkflow"
     />
   </fs-page>
 </template>
