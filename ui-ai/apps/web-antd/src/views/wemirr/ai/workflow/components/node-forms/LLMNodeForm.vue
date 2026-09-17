@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { LLMNodeConfig, StructuredOutput } from '#/api/ai-workflow/types';
+
 /**
  * LLM 节点配置表单（对齐 common_model 12 能力类型）
  * 依据所选模型登记的能力类型（category）+ 模型管理的能力位（supports_stream/supports_thinking）
@@ -15,6 +17,14 @@
 import { computed, reactive, ref, watch } from 'vue';
 
 import {
+  DeleteOutlined,
+  PlusOutlined,
+  QuestionCircleOutlined,
+} from '@ant-design/icons-vue';
+import { message } from 'ant-design-vue';
+
+import {
+  LLM_TYPE_OPTIONS,
   MODEL_TYPES_STREAMABLE,
   MT_AUDIO_TO_TEXT,
   MT_IMAGE_EMBEDDING,
@@ -29,22 +39,12 @@ import {
   MT_TEXT_TO_TEXT,
   MT_TEXT_TO_VIDEO,
   MT_VIDEO_UNDERSTAND,
-  LLM_TYPE_OPTIONS,
 } from '#/api/ai-workflow/const';
-import type { LLMNodeConfig, StructuredOutput } from '#/api/ai-workflow/types';
-
-import {
-  DeleteOutlined,
-  PlusOutlined,
-  QuestionCircleOutlined,
-} from '@ant-design/icons-vue';
-import { message } from 'ant-design-vue';
-
-import { ModelSelect } from '../model-select';
-import { VariableInput, VariableSelector } from '../variable-selector';
 
 import * as modelApi from '../../../model-plaza/api';
 import ModelTryPanel from '../../../model-plaza/components/ModelTryPanel.vue';
+import { ModelSelect } from '../model-select';
+import { VariableInput, VariableSelector } from '../variable-selector';
 
 // Props
 interface Props {
@@ -122,11 +122,7 @@ function removeParam(idx: number) {
 /** 切换参数类型时归一默认值，避免残留不匹配类型的旧值 */
 function onParamTypeChange(p: ParamRow) {
   p.value =
-    p.type === 'boolean'
-      ? false
-      : p.type === 'object'
-        ? '{}'
-        : undefined;
+    p.type === 'boolean' ? false : (p.type === 'object' ? '{}' : undefined);
   handleChange();
 }
 /** 按类型转换值（object 解析 JSON，数字转 number）；后端仅合并不再二次转型 */
@@ -252,7 +248,10 @@ watch(
       }));
     }
     // 尚未发起过该模型详情拉取（首次渲染 / 外部改了模型）：拉能力位，节点无已存参数时顺带预置
-    if (formData.modelId && capsRequestedFor.value !== Number(formData.modelId)) {
+    if (
+      formData.modelId &&
+      capsRequestedFor.value !== Number(formData.modelId)
+    ) {
       loadModelMeta(incoming.length === 0);
     }
   },
@@ -266,14 +265,14 @@ const isChat = computed(() => cat.value === MT_TEXT_TO_TEXT);
 // 提示词输入：文生文/图片理解/视频理解/OCR/文生图/文生视频/图生视频/文生音频
 const showPrompt = computed(() =>
   [
-    MT_TEXT_TO_TEXT,
-    MT_IMAGE_UNDERSTAND,
-    MT_VIDEO_UNDERSTAND,
-    MT_OCR,
-    MT_TEXT_TO_IMAGE,
-    MT_TEXT_TO_VIDEO,
     MT_IMAGE_TO_VIDEO,
+    MT_IMAGE_UNDERSTAND,
+    MT_OCR,
     MT_TEXT_TO_AUDIO,
+    MT_TEXT_TO_IMAGE,
+    MT_TEXT_TO_TEXT,
+    MT_TEXT_TO_VIDEO,
+    MT_VIDEO_UNDERSTAND,
   ].includes(cat.value),
 );
 // 流式/深度思考：能力类型支持 且 模型管理开启对应能力位，才展示、才下发
@@ -289,24 +288,24 @@ const showThinking = computed(
 const showVision = computed(() => isChat.value);
 const showStructured = computed(() => isChat.value);
 const showInput = computed(() =>
-  [MT_TEXT_EMBEDDING, MT_MULTIMODAL_EMBEDDING].includes(cat.value),
+  [MT_MULTIMODAL_EMBEDDING, MT_TEXT_EMBEDDING].includes(cat.value),
 );
 const showImageVar = computed(() =>
   [
-    MT_IMAGE_UNDERSTAND,
-    MT_OCR,
     MT_IMAGE_EMBEDDING,
-    MT_MULTIMODAL_EMBEDDING,
     MT_IMAGE_TO_VIDEO,
+    MT_IMAGE_UNDERSTAND,
+    MT_MULTIMODAL_EMBEDDING,
+    MT_OCR,
   ].includes(cat.value),
 );
 const showVideoVar = computed(() =>
-  [MT_VIDEO_UNDERSTAND, MT_MULTIMODAL_EMBEDDING].includes(cat.value),
+  [MT_MULTIMODAL_EMBEDDING, MT_VIDEO_UNDERSTAND].includes(cat.value),
 );
 const showAudioVar = computed(() => cat.value === MT_AUDIO_TO_TEXT);
 const showRerank = computed(() => cat.value === MT_TEXT_RERANK);
 const showSize = computed(() =>
-  [MT_TEXT_TO_IMAGE, MT_TEXT_TO_VIDEO, MT_IMAGE_TO_VIDEO].includes(cat.value),
+  [MT_IMAGE_TO_VIDEO, MT_TEXT_TO_IMAGE, MT_TEXT_TO_VIDEO].includes(cat.value),
 );
 const showImageN = computed(() => cat.value === MT_TEXT_TO_IMAGE);
 const showVoice = computed(() => cat.value === MT_TEXT_TO_AUDIO);
@@ -315,7 +314,7 @@ const showVoice = computed(() => cat.value === MT_TEXT_TO_AUDIO);
 const testOpen = ref(false);
 const testLoading = ref(false);
 const testRunning = ref(false);
-const testDetail = ref<null | modelApi.ModelDetailRep>(null);
+const testDetail = ref<modelApi.ModelDetailRep | null>(null);
 const testResult = ref<modelApi.ModelTestRep | null>(null);
 const testError = ref<null | string>(null);
 const getTestContainer = () =>
@@ -334,8 +333,8 @@ async function openModelTest() {
   try {
     testDetail.value = await modelApi.GetDetail(id);
     testOpen.value = true;
-  } catch (e: any) {
-    message.error(e?.message || '模型详情加载失败');
+  } catch (error: any) {
+    message.error(error?.message || '模型详情加载失败');
   } finally {
     testLoading.value = false;
   }
@@ -383,9 +382,9 @@ async function onTryRun(payload: {
     );
     // 汇总帧覆盖增量态（含 urls/vectors/scores/latency 等完整产出）
     testResult.value = res || null;
-  } catch (e: any) {
+  } catch (error: any) {
     testResult.value = null;
-    testError.value = e?.message || '测试请求失败，请稍后重试';
+    testError.value = error?.message || '测试请求失败，请稍后重试';
   } finally {
     testRunning.value = false;
   }
@@ -469,7 +468,7 @@ async function handleTypeChange() {
       <VariableInput
         v-model="formData.inputVariable"
         :current-node-id="nodeId"
-        :placeholder="'待向量化的文本，如 {{start.text}}'"
+        placeholder="待向量化的文本，如 {{start.text}}"
         @change="handleChange"
       />
       <div class="form-hint">可引用上游变量，或直接填写文本</div>
@@ -481,7 +480,7 @@ async function handleTypeChange() {
         <VariableInput
           v-model="formData.queryVariable"
           :current-node-id="nodeId"
-          :placeholder="'重排查询语句，如 {{start.query}}'"
+          placeholder="重排查询语句，如 {{start.query}}"
           @change="handleChange"
         />
       </a-form-item>
@@ -489,10 +488,12 @@ async function handleTypeChange() {
         <VariableInput
           v-model="formData.documentsVariable"
           :current-node-id="nodeId"
-          :placeholder="'待重排文档数组变量，如 {{retrieval.documents}}'"
+          placeholder="待重排文档数组变量，如 {{retrieval.documents}}"
           @change="handleChange"
         />
-        <div class="form-hint">引用一个字符串数组变量（如知识检索的文档列表）</div>
+        <div class="form-hint">
+          引用一个字符串数组变量（如知识检索的文档列表）
+        </div>
       </a-form-item>
       <a-form-item label="保留数量 Top N">
         <a-input-number
@@ -510,7 +511,7 @@ async function handleTypeChange() {
       <VariableInput
         v-model="formData.imageVariable"
         :current-node-id="nodeId"
-        :placeholder="'图片 URL 或引用，如 {{start.image}}'"
+        placeholder="图片 URL 或引用，如 {{start.image}}"
         @change="handleChange"
       />
     </a-form-item>
@@ -520,7 +521,7 @@ async function handleTypeChange() {
       <VariableInput
         v-model="formData.videoVariable"
         :current-node-id="nodeId"
-        :placeholder="'视频 URL 或引用，如 {{start.video}}'"
+        placeholder="视频 URL 或引用，如 {{start.video}}"
         @change="handleChange"
       />
     </a-form-item>
@@ -530,17 +531,20 @@ async function handleTypeChange() {
       <VariableInput
         v-model="formData.audioVariable"
         :current-node-id="nodeId"
-        :placeholder="'音频 URL 或引用，如 {{start.audio}}'"
+        placeholder="音频 URL 或引用，如 {{start.audio}}"
         @change="handleChange"
       />
     </a-form-item>
 
     <!-- 提示词（含文生文/理解/生成类） -->
-    <a-form-item v-if="showPrompt" :label="isChat ? '用户提示词模板' : '提示词'">
+    <a-form-item
+      v-if="showPrompt"
+      :label="isChat ? '用户提示词模板' : '提示词'"
+    >
       <VariableInput
         v-model="formData.promptTemplate"
         :current-node-id="nodeId"
-        :placeholder="'使用 {{变量名}} 引用上游节点输出'"
+        placeholder="使用 {{变量名}} 引用上游节点输出"
         :multiline="true"
         @change="handleChange"
       />
@@ -604,14 +608,19 @@ async function handleTypeChange() {
           <template #label>
             <span>
               深度思考
-              <a-tooltip title="启用后模型返回推理过程（reasoning），仅模型管理开启思考能力的模型可选">
+              <a-tooltip
+                title="启用后模型返回推理过程（reasoning），仅模型管理开启思考能力的模型可选"
+              >
                 <QuestionCircleOutlined
                   style="margin-left: 4px; color: #8c8c8c"
                 />
               </a-tooltip>
             </span>
           </template>
-          <a-switch v-model:checked="formData.thinking" @change="handleChange" />
+          <a-switch
+            v-model:checked="formData.thinking"
+            @change="handleChange"
+          />
         </a-form-item>
       </a-col>
       <a-col v-if="showVision" :span="8">
@@ -669,9 +678,7 @@ async function handleTypeChange() {
         <template #label>
           <span>
             启用结构化输出
-            <a-tooltip
-              title="启用后 LLM 将按照 JSON Schema 格式输出结构化数据"
-            >
+            <a-tooltip title="启用后 LLM 将按照 JSON Schema 格式输出结构化数据">
               <QuestionCircleOutlined
                 style="margin-left: 4px; color: #8c8c8c"
               />

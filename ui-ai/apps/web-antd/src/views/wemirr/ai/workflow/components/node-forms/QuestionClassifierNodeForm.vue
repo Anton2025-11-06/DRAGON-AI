@@ -1,148 +1,10 @@
-<template>
-  <a-form layout="vertical" :model="formData" class="node-form">
-    <ModelSelect
-      v-model:model-value="formData.modelId"
-      v-model:model-type="formData.modelType"
-      :type-options="CHAT_TYPE_OPTIONS"
-      placeholder="选择用于分类的模型"
-      @change="handleChange"
-    />
-
-    <a-form-item label="输入变量" required>
-      <VariableInput
-        v-model="formData.inputVariable"
-        :current-node-id="nodeId"
-        placeholder="选择要分类的文本变量"
-        :filter-types="['string']"
-        @change="handleChange"
-      />
-    </a-form-item>
-
-    <a-form-item label="分类指导说明">
-      <a-textarea
-        v-model:value="formData.instructions"
-        :rows="3"
-        placeholder="描述分类的目的和标准，帮助模型更准确地分类"
-        @change="handleChange"
-      />
-    </a-form-item>
-
-    <!-- 分类类别管理 -->
-    <a-divider orientation="left" style=" margin: 16px 0 12px;font-size: 12px">
-      分类类别
-    </a-divider>
-
-    <div class="categories-section">
-      <draggable
-        v-model="formData.categories"
-        item-key="id"
-        handle=".drag-handle"
-        @change="handleChange"
-      >
-        <template #item="{ element: category, index }">
-          <div class="category-item">
-            <div class="category-header">
-              <HolderOutlined class="drag-handle" />
-              <span class="category-index">类别 {{ index + 1 }}</span>
-              <a-button
-                type="text"
-                danger
-                size="small"
-                :disabled="formData.categories.length <= 2"
-                @click="removeCategory(index)"
-              >
-                <DeleteOutlined />
-              </a-button>
-            </div>
-            <div class="category-content">
-              <a-row :gutter="8">
-                <a-col :span="8">
-                  <a-input
-                    v-model:value="category.id"
-                    placeholder="类别ID"
-                    size="small"
-                    @change="handleChange"
-                  />
-                </a-col>
-                <a-col :span="16">
-                  <a-input
-                    v-model:value="category.name"
-                    placeholder="类别名称"
-                    size="small"
-                    @change="handleChange"
-                  />
-                </a-col>
-              </a-row>
-              <a-textarea
-                v-model:value="category.description"
-                :rows="2"
-                placeholder="类别描述（帮助模型理解分类标准）"
-                size="small"
-                style="margin-top: 8px"
-                @change="handleChange"
-              />
-            </div>
-          </div>
-        </template>
-      </draggable>
-
-      <a-button type="dashed" size="small" block @click="addCategory">
-        <PlusOutlined /> 添加分类类别
-      </a-button>
-    </div>
-
-    <div class="form-hint" style="margin-top: 8px">
-      每个分类类别将生成一个独立的输出端口，用于连接不同的处理分支
-    </div>
-
-    <!-- 高级模式 -->
-    <a-divider orientation="left" style=" margin: 16px 0 12px;font-size: 12px">
-      高级设置
-    </a-divider>
-
-    <a-form-item>
-      <template #label>
-        <span>
-          高级模式
-          <a-tooltip title="启用后可自定义分类提示词模板">
-            <QuestionCircleOutlined style="margin-left: 4px; color: #8c8c8c" />
-          </a-tooltip>
-        </span>
-      </template>
-      <a-switch
-        v-model:checked="formData.advancedMode"
-        @change="handleChange"
-      />
-    </a-form-item>
-
-    <template v-if="formData.advancedMode">
-      <a-form-item label="自定义提示词模板">
-        <a-textarea
-          v-model:value="formData.customPromptTemplate"
-          :rows="6"
-          :placeholder="'自定义分类提示词模板，使用 {{input}} 引用输入文本，{{categories}} 引用类别列表'"
-          @change="handleChange"
-        />
-        <div class="form-hint">
-          可用变量: <code v-pre>{{ input }}</code> - 输入文本,
-          <code v-pre>{{ categories }}</code> - 类别列表
-        </div>
-      </a-form-item>
-    </template>
-  </a-form>
-</template>
-
 <script setup lang="ts">
-/**
- * 问题分类器节点配置表单
- * 使用 LLM（文生文）对问题进行智能分类，路由到不同的处理分支
- * 【设计对齐 2026-09】模型固定为 text_to_text，「直连/后缀」概念已废弃
- */
-import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
 import type {
   ClassCategory,
   QuestionClassifierConfig,
 } from '#/api/ai-workflow/types';
+
+import { reactive, watch } from 'vue';
 
 import {
   DeleteOutlined,
@@ -150,8 +12,14 @@ import {
   PlusOutlined,
   QuestionCircleOutlined,
 } from '@ant-design/icons-vue';
-import { reactive, watch } from 'vue';
 import draggable from 'vuedraggable';
+
+/**
+ * 问题分类器节点配置表单
+ * 使用 LLM（文生文）对问题进行智能分类，路由到不同的处理分支
+ * 【设计对齐 2026-09】模型固定为 text_to_text，「直连/后缀」概念已废弃
+ */
+import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
 
 import { ModelSelect } from '../model-select';
 import { VariableInput } from '../variable-selector';
@@ -171,7 +39,7 @@ const emit = defineEmits<{
 
 // 生成唯一ID
 function generateId(): string {
-  return `class_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  return `class_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
 // 默认分类类别
@@ -255,6 +123,140 @@ function handleChange() {
   emit('update:config', config);
 }
 </script>
+
+<template>
+  <a-form layout="vertical" :model="formData" class="node-form">
+    <ModelSelect
+      v-model:model-value="formData.modelId"
+      v-model:model-type="formData.modelType"
+      :type-options="CHAT_TYPE_OPTIONS"
+      placeholder="选择用于分类的模型"
+      @change="handleChange"
+    />
+
+    <a-form-item label="输入变量" required>
+      <VariableInput
+        v-model="formData.inputVariable"
+        :current-node-id="nodeId"
+        placeholder="选择要分类的文本变量"
+        :filter-types="['string']"
+        @change="handleChange"
+      />
+    </a-form-item>
+
+    <a-form-item label="分类指导说明">
+      <a-textarea
+        v-model:value="formData.instructions"
+        :rows="3"
+        placeholder="描述分类的目的和标准，帮助模型更准确地分类"
+        @change="handleChange"
+      />
+    </a-form-item>
+
+    <!-- 分类类别管理 -->
+    <a-divider orientation="left" style="margin: 16px 0 12px; font-size: 12px">
+      分类类别
+    </a-divider>
+
+    <div class="categories-section">
+      <draggable
+        v-model="formData.categories"
+        item-key="id"
+        handle=".drag-handle"
+        @change="handleChange"
+      >
+        <template #item="{ element: category, index }">
+          <div class="category-item">
+            <div class="category-header">
+              <HolderOutlined class="drag-handle" />
+              <span class="category-index">类别 {{ index + 1 }}</span>
+              <a-button
+                type="text"
+                danger
+                size="small"
+                :disabled="formData.categories.length <= 2"
+                @click="removeCategory(index)"
+              >
+                <DeleteOutlined />
+              </a-button>
+            </div>
+            <div class="category-content">
+              <a-row :gutter="8">
+                <a-col :span="8">
+                  <a-input
+                    v-model:value="category.id"
+                    placeholder="类别ID"
+                    size="small"
+                    @change="handleChange"
+                  />
+                </a-col>
+                <a-col :span="16">
+                  <a-input
+                    v-model:value="category.name"
+                    placeholder="类别名称"
+                    size="small"
+                    @change="handleChange"
+                  />
+                </a-col>
+              </a-row>
+              <a-textarea
+                v-model:value="category.description"
+                :rows="2"
+                placeholder="类别描述（帮助模型理解分类标准）"
+                size="small"
+                style="margin-top: 8px"
+                @change="handleChange"
+              />
+            </div>
+          </div>
+        </template>
+      </draggable>
+
+      <a-button type="dashed" size="small" block @click="addCategory">
+        <PlusOutlined /> 添加分类类别
+      </a-button>
+    </div>
+
+    <div class="form-hint" style="margin-top: 8px">
+      每个分类类别将生成一个独立的输出端口，用于连接不同的处理分支
+    </div>
+
+    <!-- 高级模式 -->
+    <a-divider orientation="left" style="margin: 16px 0 12px; font-size: 12px">
+      高级设置
+    </a-divider>
+
+    <a-form-item>
+      <template #label>
+        <span>
+          高级模式
+          <a-tooltip title="启用后可自定义分类提示词模板">
+            <QuestionCircleOutlined style="margin-left: 4px; color: #8c8c8c" />
+          </a-tooltip>
+        </span>
+      </template>
+      <a-switch
+        v-model:checked="formData.advancedMode"
+        @change="handleChange"
+      />
+    </a-form-item>
+
+    <template v-if="formData.advancedMode">
+      <a-form-item label="自定义提示词模板">
+        <a-textarea
+          v-model:value="formData.customPromptTemplate"
+          :rows="6"
+          placeholder="自定义分类提示词模板，使用 {{input}} 引用输入文本，{{categories}} 引用类别列表"
+          @change="handleChange"
+        />
+        <div class="form-hint">
+          可用变量: <code v-pre>{{ input }}</code> - 输入文本,
+          <code v-pre>{{ categories }}</code> - 类别列表
+        </div>
+      </a-form-item>
+    </template>
+  </a-form>
+</template>
 <style scoped lang="less">
 .node-form {
   :deep(.ant-form-item) {

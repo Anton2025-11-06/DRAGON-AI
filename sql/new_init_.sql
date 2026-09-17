@@ -347,6 +347,7 @@ CREATE TABLE IF NOT EXISTS `tb_mcp_server` (
     `command` VARCHAR(255) DEFAULT NULL COMMENT 'STDIO 启动命令',
     `args` VARCHAR(1000) DEFAULT NULL COMMENT 'STDIO 启动参数 JSON 数组',
     `env` VARCHAR(1000) DEFAULT NULL COMMENT '环境变量 JSON 对象',
+    `description` VARCHAR(500) DEFAULT NULL COMMENT 'MCP 描述（这个连接是做什么的）',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -360,8 +361,9 @@ CREATE TABLE IF NOT EXISTS `tb_tool` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
     `name` VARCHAR(128) NOT NULL COMMENT '工具名称',
     `description` VARCHAR(500) DEFAULT NULL COMMENT '工具描述',
-    `function_code` TEXT NOT NULL COMMENT 'Python 函数源码',
-    `parameters_schema` VARCHAR(2000) DEFAULT NULL COMMENT '参数说明 JSON（示例/默认值/说明）',
+    `function_code` TEXT NOT NULL COMMENT 'Python 函数源码（import + def，入口 main 优先）',
+    `parameters_schema` TEXT DEFAULT NULL COMMENT '参数定义 JSON（{parameters:[{name,type,required,description,default}]}）',
+    `timeout` INT NOT NULL DEFAULT 10000 COMMENT '执行超时（毫秒），工具节点未配置时取此值',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -370,25 +372,27 @@ CREATE TABLE IF NOT EXISTS `tb_tool` (
     KEY `idx_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='动态 Python 函数工具表';
 
--- 5.3 技能目录表（SKILL.zip 上传解压存储，code 唯一且作为存储目录名）
+-- 5.3 技能目录表（SKILL.zip 原件存入公共存储，code 唯一；预览/编辑按需从存储取回解压）
 CREATE TABLE IF NOT EXISTS `tb_skill` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
     `name` VARCHAR(128) NOT NULL COMMENT '技能名称',
-    `code` VARCHAR(128) NOT NULL COMMENT '技能标识（唯一，同时作为存储目录名）',
+    `code` VARCHAR(128) NOT NULL COMMENT '技能标识（唯一）',
     `description` VARCHAR(500) DEFAULT NULL COMMENT '技能描述',
     `category` VARCHAR(64) DEFAULT NULL COMMENT '分类',
     `icon` VARCHAR(128) DEFAULT NULL COMMENT '图标',
     `tags` VARCHAR(500) DEFAULT NULL COMMENT '标签 JSON 数组',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
-    `skill_path` VARCHAR(500) DEFAULT NULL COMMENT '展示用目录路径（skills/{code}）',
+    `skill_path` VARCHAR(500) DEFAULT NULL COMMENT '展示用逻辑目录路径（skills/{code}）',
     `resource_count` INT NOT NULL DEFAULT 0 COMMENT '资源文件数',
+    `zip_file_name` VARCHAR(255) DEFAULT NULL COMMENT '上传的 zip 包原始文件名',
+    `zip_storage_name` VARCHAR(255) DEFAULT NULL COMMENT 'zip 原件在公共存储中的文件名（下载/删除句柄）',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_code` (`code`),
     KEY `idx_name` (`name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='技能目录表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='技能目录表（zip 原件存储）';
 
 -- =====================================================================================
 -- PART 6  基础种子数据：角色 / 管理员 / 根部门
@@ -454,22 +458,25 @@ UPDATE `tb_menu` SET `component`='views/wemirr/system/auth/menu/index.vue',    `
 UPDATE `tb_menu` SET `component`='views/wemirr/system/org/index.vue',          `icon`='lucide:building-2' WHERE `menu_name`='部门管理' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) t);
 UPDATE `tb_menu` SET `component`='views/wemirr/system/log/opt-log.vue',        `icon`='lucide:file-text'  WHERE `menu_name`='操作日志' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='系统管理' AND parent_id=0) t);
 
--- 7.4 智能体下：工作流编排 / 技能管理 / MCP连接管理 / 工具管理（四个一级菜单）
+-- 7.4 智能体下：工作流编排 / 技能管理 / MCP连接 / 工具管理（四个一级菜单）
 -- 注意：兼容迁移 UPDATE 必须先于种子 INSERT——避免与新版种子重名冲突（uk_parent_name）
 
 -- 兼容旧库一：老菜单改名/清理（智能体下直接挂的阶段）
 UPDATE `tb_menu` SET `menu_name`='工作流编排' WHERE `menu_name`='智能体工作流' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t);
 DELETE FROM `tb_menu` WHERE `menu_name`='自主规划智能体' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t);
--- 旧「工具管理」更名为 MCP连接管理（老库曾直接挂在智能体下）
-UPDATE `tb_menu` SET `menu_name`='MCP连接管理', `path`='mcp', `component`='views/wemirr/ai/agent/mcp/index.vue', `icon`='lucide:wrench', `sort`=3
+-- 旧「工具管理」更名为 MCP连接（老库曾直接挂在智能体下）
+UPDATE `tb_menu` SET `menu_name`='MCP连接', `path`='mcp', `component`='views/wemirr/ai/agent/mcp/index.vue', `icon`='lucide:wrench', `sort`=3
 WHERE `menu_name`='工具管理' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t);
 -- 旧「技能管理」补齐路径与排序（老库曾直接挂在智能体下）
 UPDATE `tb_menu` SET `path`='skill', `sort`=2
 WHERE `menu_name`='技能管理' AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t);
+-- 兼容旧库一点五：上一版种子的「MCP连接管理」统一改名「MCP连接」（必须先于下面的提升，
+-- 否则提升语句按新名匹配不到，菜单会留在已删除的目录里）
+UPDATE `tb_menu` SET `menu_name`='MCP连接' WHERE `menu_name`='MCP连接管理';
 -- 兼容旧库二：上一版种子的「工具目录」目录节点已废弃，其下三个子菜单提升为智能体一级菜单
 UPDATE `tb_menu` SET `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t),
-       `sort`=CASE `menu_name` WHEN '技能管理' THEN 2 WHEN 'MCP连接管理' THEN 3 WHEN '工具管理' THEN 4 ELSE `sort` END
-WHERE `menu_name` IN ('技能管理','MCP连接管理','工具管理')
+       `sort`=CASE `menu_name` WHEN '技能管理' THEN 2 WHEN 'MCP连接' THEN 3 WHEN '工具管理' THEN 4 ELSE `sort` END
+WHERE `menu_name` IN ('技能管理','MCP连接','工具管理')
   AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='工具目录' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) t);
 -- 删除已废弃的「工具目录」目录节点（其下子菜单已全部提升，按 menu_type=1 仅删目录）
 DELETE FROM `tb_menu` WHERE `menu_name`='工具目录' AND `menu_type`=1 AND `parent_id`=(SELECT t.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) t);
@@ -478,7 +485,7 @@ DELETE FROM `tb_menu` WHERE `menu_name`='工具目录' AND `menu_type`=1 AND `pa
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) m), '工作流编排', 2, 'workflow', 'views/wemirr/ai/workflow/list/index.vue', 'lucide:workflow', 1),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) m), '技能管理',   2, 'skill',    'views/wemirr/ai/agent/skill/index.vue',    'lucide:sparkles', 2),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) m), 'MCP连接管理', 2, 'mcp',     'views/wemirr/ai/agent/mcp/index.vue',      'lucide:wrench',    3),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) m), 'MCP连接', 2, 'mcp',     'views/wemirr/ai/agent/mcp/index.vue',      'lucide:wrench',    3),
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0) m), '工具管理',   2, 'tool',    'views/wemirr/ai/agent/tool/index.vue',     'lucide:code',      4);
 
 -- 7.5 知识库下的一级菜单（service_rag）
@@ -582,13 +589,13 @@ UPDATE `tb_menu` SET `perm` = REPLACE(`perm`, 'workflow:model:', 'system:model:'
 WHERE `perm` IN ('workflow:model:list', 'workflow:model:add', 'workflow:model:edit',
                  'workflow:model:delete', 'workflow:model:apply', 'workflow:model:audit');
 
--- 8.9 智能体下按钮权限（service_workflow：MCP 连接管理 / 工具管理）
+-- 8.9 智能体下按钮权限（service_workflow：MCP连接 / 工具管理）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP列表',     3, 'workflow:mcp:list',   1),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP新增',     3, 'workflow:mcp:add',    2),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP修改',     3, 'workflow:mcp:edit',   3),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP删除',     3, 'workflow:mcp:delete', 4),
-((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP测试连接', 3, 'workflow:mcp:test',   5);
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP列表',     3, 'workflow:mcp:list',   1),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP新增',     3, 'workflow:mcp:add',    2),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP修改',     3, 'workflow:mcp:edit',   3),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP删除',     3, 'workflow:mcp:delete', 4),
+((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='MCP连接' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), 'MCP测试连接', 3, 'workflow:mcp:test',   5);
 
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
 ((SELECT m.menu_id FROM (SELECT menu_id FROM tb_menu WHERE menu_name='工具管理' AND parent_id=(SELECT menu_id FROM tb_menu WHERE menu_name='智能体' AND parent_id=0)) m), '工具列表',   3, 'workflow:tool:list',   1),

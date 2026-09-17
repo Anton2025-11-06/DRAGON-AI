@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """本地目录存储后端：开发/单机自测用，生产用 OSS 后端。
 
-文件落在 local_dir 扁平目录下，文件名即存储名（{uuid}_{原始名}），不建子目录、
-不写 sidecar 元信息 —— 展示名从文件名本身反推（base.original_name），MIME 由下载
-接口按扩展名猜。
+文件落在 local_dir 下，文件名即存储名（{uuid}_{原始名}）；name 可带一段安全子目录
+（如 skills/xxx.zip）则懒建到 local_dir/skills/ 下，仍不写 sidecar 元信息 ——
+展示名从文件名本身反推（base.original_name），MIME 由下载接口按扩展名猜。
 
 「匿名可访问 URL」本地盘自己提供不了，只能指向业务模块暴露的下载接口：
     {public_base}/{urlencoded 文件名}
 public_base 优先取 storage.public_base 配置（运维口径，跨域名稳定），缺省用调用方
 按当前请求推导的 base_url（见 service_workflow 的 workflow-files 路由）。
 
-URL 有效期落地：以文件写入时间（mtime）+ url_expires 判定，读取时已过期则顺手删除，
-让本地临时文件自动回收（与 OSS 预签名 URL 过期即不可访问的语义对齐）。
+存储语义：**本地文件一律永久保存**，不再按 mtime 过期回收（与 OSS 对齐——OSS 对象
+本身永久，预签名到期只影响 URL 可访问性、不删对象）。url_expires 仅作为 public_url 的
+返回值保留，不再据此删除文件；因此需要长期留存的资产（如技能 zip）可安全落在本地后端。
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import time
 from typing import Optional
 from urllib.parse import quote
 
@@ -52,22 +52,14 @@ class LocalStorageBackend(StorageBackend):
         await asyncio.to_thread(self._write, path, data)
 
     async def load(self, name: str) -> bytes:
+        """永久保存：只判存在，不再按 mtime 过期回收。"""
         path = self._path(name)
-        if self._expired(path):
-            await asyncio.to_thread(self._remove, path)  # 过期即回收，不留垃圾
-            raise ValueError(f"文件已过期: {name}")
         if not os.path.isfile(path):
             raise ValueError(f"文件不存在: {name}")
         return await asyncio.to_thread(self._read, path)
 
     async def exists(self, name: str) -> bool:
-        path = self._path(name)
-        if not os.path.isfile(path):
-            return False
-        if self._expired(path):  # 过期视为不存在，并就地回收
-            await asyncio.to_thread(self._remove, path)
-            return False
-        return True
+        return await asyncio.to_thread(os.path.isfile, self._path(name))
 
     async def delete(self, name: str) -> bool:
         return await asyncio.to_thread(self._remove, self._path(name))
@@ -83,15 +75,18 @@ class LocalStorageBackend(StorageBackend):
     # ---------- 内部工具 ----------
 
     def _path(self, name: str) -> str:
-        return os.path.join(self._dir, check_name(name))
-
-    def _expired(self, path: str) -> bool:
-        """mtime + 有效期 < 当前时间 即过期（文件不存在时按未过期处理，交由上层报「不存在」）。"""
-        mtime = get_mtime(path)
-        return bool(mtime) and time.time() - mtime > self.url_expires
+        root = self._dir
+        path = os.path.normpath(os.path.join(root, check_name(name)))
+        # 纵深防御：即便校验被绕过，拼接后的绝对路径也必须仍在 root 目录内（防目录穿越）
+        if path != root and not path.startswith(root + os.sep):
+            raise ValueError(f"非法文件名: {name!r}")
+        return path
 
     @staticmethod
     def _write(path: str, data: bytes) -> None:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
 
@@ -107,11 +102,3 @@ class LocalStorageBackend(StorageBackend):
             return True
         except OSError:
             return False
-
-
-def get_mtime(path: str) -> float:
-    """文件修改时间（秒）；不存在返回 0。"""
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0

@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""外部系统节点：HTTP_REQUEST / TOOL。
+"""外部系统节点：HTTP_REQUEST / TOOL（动态函数工具）/ MCP_TOOL（MCP 工具）。
+
+两类工具节点都不再经 runtime 钩子中转：直接调 service 层（函数内延迟 import，
+避开 engine ← nodes ← services 的模块级循环），参数绑定行与「代码执行」节点同构。
 """
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ import json
 import time
 from typing import Optional
 
+from service.service_workflow.workflow_engine import py_sandbox
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.nodes.base import (
     BaseNodeExecutor, NodeResult, issue,
@@ -157,37 +161,83 @@ class HttpRequestNodeExecutor(BaseNodeExecutor):
 
 
 class ToolNodeExecutor(BaseNodeExecutor):
-    """TOOL 工具节点：调用 tb_tool 动态函数工具 / tb_mcp_server MCP 工具。
+    """TOOL 工具节点：调用 tb_tool 登记的动态 Python 函数工具。
 
-    通过 runtime.tool_invoker 钩子注入（workflow_execution_service 注册）：
-    mcpServerId 非空 → McpServerService 官方 SDK 会话调用 tools/call；
-    否则按工具名称执行 tb_tool 动态函数（受限沙箱，10s 超时）。
-    toolParams 值支持 {{变量引用}}。
+    配置：toolId（工具下拉，toolName 仅作展示与旧图兼容）/ inputs（参数绑定行，
+    与 CODE 节点同构：引用上游变量或自定义值）/ timeout（缺省取工具登记的超时）。
+    执行环境复用 workflow_engine.py_sandbox：工具代码与代码节点一份口径，
+    入口 main → run → 最后定义的顶层函数。
+    输出与 CODE 节点一致为 {result: 返回值}，下游用 {{nodeId.result}} 引用。
     """
 
     node_type = "TOOL"
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
+        # 延迟 import：nodes 包由 engine 导入，模块级 import services 会绕成循环
+        from service.service_workflow.services.tool_service import ToolService
+
         cfg = self.config
+        tool_id = cfg.get("toolId")
         tool_name = cfg.get("toolName")
-        if not tool_name:
-            raise ValueError("工具节点未配置工具名称")
-        invoker = getattr(self.runtime, "tool_invoker", None)
-        if not callable(invoker):
-            raise ValueError("工具服务未接入（tool_invoker 未注册）")
-        params = {k: ctx.render(v) if isinstance(v, str) else v
-                  for k, v in (cfg.get("toolParams") or {}).items()}
-        result = await invoker(
-            tool_name=str(tool_name),
-            mcp_server_id=cfg.get("mcpServerId"),
-            params=params,
-        )
-        output_var = cfg.get("outputVariable") or "output"
-        return NodeResult(output={output_var: result, "toolName": tool_name})
+        if not tool_id and not tool_name:
+            raise ValueError(f"节点「{self.node.label}」未选择工具")
+        tool = await ToolService.load_for_node(
+            int(tool_id) if tool_id else None, None if tool_id else str(tool_name))
+        timeout = cfg.get("timeout")
+        result = await ToolService.run_for_node(
+            tool, cfg.get("inputs") or [], ctx.resolve,
+            int(timeout) if timeout else None)
+        output_var = cfg.get("outputVariable") or "result"
+        return NodeResult(output={output_var: ToolService.json_safe(result)})
 
     @staticmethod
     def validate_node(node, graph) -> list:
         issues = []
-        if not (node.data or {}).get("toolName"):
+        data = node.data or {}
+        if not data.get("toolId") and not data.get("toolName"):
             issues.append(issue("TOOL_NO_NAME", "ERROR", "工具节点未选择工具", node))
+        return issues
+
+
+class McpToolNodeExecutor(BaseNodeExecutor):
+    """MCP_TOOL MCP 工具节点：调用 MCP 连接下的某个工具（官方 SDK 会话，现建现用）。
+
+    配置：mcpServerId + toolName（工具下拉来自该连接的 tools/list）、
+    inputs 参数绑定行（同 CODE / TOOL 节点），输出：
+    - result：structuredContent 优先，否则为文本 content（下游最常引用的形态）
+    - content / urls：原始文本与资源链接（图片/音频等）
+    isError 视为节点失败上抛（对齐 Dify/MaxKB：工具报错不静默成正常输出）。
+    """
+
+    node_type = "MCP_TOOL"
+
+    async def execute(self, ctx: ExecutionContext) -> NodeResult:
+        from service.service_workflow.services.mcp_service import McpServerService
+
+        cfg = self.config
+        server_id = cfg.get("mcpServerId")
+        tool_name = cfg.get("toolName")
+        if not server_id or not tool_name:
+            raise ValueError(f"节点「{self.node.label}」未选择 MCP 连接或工具")
+        arguments = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve)
+        result = await McpServerService.call_tool(int(server_id), str(tool_name), arguments)
+        if result.get("isError"):
+            raise ValueError(f"MCP 工具 {tool_name} 调用失败: {result.get('content') or '未知错误'}")
+        content = result.get("content")
+        structured = result.get("structured")
+        output_var = cfg.get("outputVariable") or "result"
+        return NodeResult(output={
+            output_var: structured if structured is not None else content,
+            "content": content,
+            "urls": result.get("urls") or [],
+        })
+
+    @staticmethod
+    def validate_node(node, graph) -> list:
+        issues = []
+        data = node.data or {}
+        if not data.get("mcpServerId"):
+            issues.append(issue("MCP_NO_SERVER", "ERROR", "MCP 节点未选择连接", node))
+        if not data.get("toolName"):
+            issues.append(issue("MCP_NO_TOOL", "ERROR", "MCP 节点未选择工具", node))
         return issues

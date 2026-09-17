@@ -10,7 +10,6 @@ import { h } from 'vue';
 
 import {
   ApiOutlined,
-  ReloadOutlined,
   ToolOutlined,
 } from '@ant-design/icons-vue';
 import { dict } from '@fast-crud/fast-crud';
@@ -98,6 +97,19 @@ export default function createCrudOptions(
             },
           },
           column: { width: 180, ellipsis: true },
+        },
+        description: {
+          title: '描述',
+          type: 'textarea',
+          form: {
+            component: {
+              placeholder: '描述这个 MCP 连接是做什么的',
+              rows: 2,
+            },
+            col: { span: 24 },
+            helper: '用于说明该 MCP 提供的能力，便于其他用户理解',
+          },
+          column: { width: 200, ellipsis: true, show: false },
         },
         type: {
           title: '连接类型',
@@ -273,23 +285,6 @@ export default function createCrudOptions(
               }
             },
             order: 2,
-          },
-          refresh: {
-            text: '刷新',
-            type: 'link',
-            size: 'small',
-            icon: () => h(ReloadOutlined),
-            title: '刷新MCP连接',
-            show: true,
-            click: async ({ row }: any) => {
-              try {
-                await api.RefreshConnection(row.id);
-                message.success('刷新成功');
-              } catch (error: any) {
-                message.error(`刷新失败: ${error.message}`);
-              }
-            },
-            order: 3,
           },
         },
       },

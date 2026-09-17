@@ -3,15 +3,13 @@
 """
 from __future__ import annotations
 
-import ast
-import asyncio
 import json
 import operator
-import re
 from functools import reduce
-from typing import Any, Callable, Optional
+from typing import Any
 
 from service.service_workflow.utils.file_utils import FileUtils
+from service.service_workflow.workflow_engine import py_sandbox
 from service.service_workflow.workflow_engine.context import (
     ExecutionContext, _dig, parse_json_if_embedded,
 )
@@ -139,49 +137,18 @@ class CodeNodeExecutor(BaseNodeExecutor):
       main() 优先，无 main 时回退到代码中最后定义的顶层函数
       （不支持顶层 return 写法，返回值一律在入口方法内 return）
     - 支持 import 导包（受限 builtins 白名单 + 危险模块黑名单拦截）；
-      禁裸 exec/eval/open；超时（默认 10s，线程 join 强杀）
+      禁裸 exec/eval/open；超时（默认 10s，线程内执行 + asyncio 超时）
     - 参数 inputs 配置项：参数名 name / 类型 type / 是否必填 required /
-      来源 sourceType（REFERENCE 引用变量经 ctx.resolve 解析、CONSTANT 自定义值经 _coerce_constant 转换）
+      来源 sourceType（REFERENCE 引用变量经 ctx.resolve 解析、CONSTANT 自定义值经 coerce_constant 转换）
     - 节点输出统一为 {"result": <方法返回值>}，下游用 {{nodeId.result}} 引用
     - 输出限制：字符串 ≤200KB / 数组 ≤100 元素（递归校验）
+    沙箱实现与「动态函数工具」共用一份（workflow_engine/py_sandbox.py），
+    两边能力口径必须一致：能在工作流代码节点里跑的代码，登记成工具后同样能跑。
     注：始终在受限命名空间内执行（无沙箱开关，用户不需要感知）；
     进程内 exec 无法强隔离，二期演进接入隔离容器。
     """
 
     node_type = "CODE"
-
-    _ALLOWED_BUILTINS: dict[str, Any] = {
-        "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict, "divmod": divmod,
-        "enumerate": enumerate, "filter": filter, "float": float, "format": format,
-        "frozenset": frozenset, "int": int, "isinstance": isinstance, "issubclass": issubclass,
-        "len": len, "list": list, "map": map, "max": max, "min": min, "next": next,
-        "object": object, "range": range, "reversed": reversed, "round": round, "set": set,
-        "slice": slice, "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "type": type,
-        "zip": zip, "True": True, "False": False, "None": None,
-    }
-
-    # 危险模块黑名单：可执行系统命令/读写文件/网络/进程/序列化反序列化/反射的模块一律拦截；
-    # 允许 json/math/re/random/collections/functools/itertools 等纯数据处理类标准库。
-    # 注意：进程内 exec 无法做到强隔离，二期接入沙箱服务/隔离容器后放开。
-    _BLOCKED_IMPORTS: frozenset[str] = frozenset({
-        # 系统 / 进程 / IO
-        "os", "sys", "shutil", "pathlib", "glob", "tempfile", "subprocess",
-        "multiprocessing", "threading", "_thread", "ctypes", "signal",
-        "resource", "pwd", "grp", "platform", "gc", "tracemalloc",
-        "faulthandler", "pty", "termios", "tty", "winreg", "msvcrt",
-        # 网络
-        "socket", "http", "urllib", "ftplib", "smtplib", "poplib", "imaplib",
-        "telnetlib", "ssl", "asyncio", "aiohttp", "requests",
-        # 序列化 / 反射 / 动态执行
-        "pickle", "marshal", "shelve", "importlib", "builtins", "runpy",
-        "zipimport", "site", "sysconfig", "code", "codeop", "pdb", "bdb",
-        "cProfile", "profile", "traceback", "inspect", "dis",
-        # 数据库 / 归档 / 标记语言
-        "sqlite3", "dbm", "gdbm", "tarfile", "zipfile", "bz2", "lzma",
-        "xml", "email",
-        # 进程管理 / pip 相关 / GUI
-        "venv", "ensurepip", "distutils", "pip", "tkinter",
-    })
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
@@ -191,127 +158,13 @@ class CodeNodeExecutor(BaseNodeExecutor):
         # 入口函数自动识别：main 优先，无 main 回退最后定义的顶层函数；
         # 兼容旧数据：配置过 entryFunction 时仍优先按该方法名查找
         entry = (cfg.get("entryFunction") or "main").strip() or "main"
-
         # 解析参数：参数名 / 类型 / 是否必填 / 来源（REFERENCE 引用参数 | CONSTANT 自定义值）
-        kwargs: dict[str, Any] = {}
-        for v in cfg.get("inputs") or []:
-            name = v.get("name")
-            if not name:
-                continue
-            source_type = (v.get("sourceType") or "REFERENCE").upper()
-            if source_type == "CONSTANT":
-                value = self._coerce_constant(v.get("value"), v.get("type"))
-            else:
-                ref = v.get("sourceVariable")
-                value = ctx.resolve(str(ref)) if ref else None
-            if value is None and v.get("required"):
-                raise ValueError(f"缺少必填参数: {name}")
-            kwargs[name] = value
-
-        timeout_ms = int(cfg.get("timeout") or 10000)
-        result = await asyncio.wait_for(
-            asyncio.to_thread(self._exec_sandbox, code, kwargs, entry),
-            timeout=timeout_ms / 1000,
-        )
-        self._validate_output(result)
+        kwargs = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve)
+        timeout_ms = int(cfg.get("timeout") or py_sandbox.DEFAULT_TIMEOUT_MS)
+        result = await py_sandbox.run_code(code, kwargs, entry=entry, timeout_ms=timeout_ms)
+        py_sandbox.validate_output(result)
         # 节点输出统一为 {"result": <方法返回值>}，下游任意节点用 {{nodeId.result}} 接收
         return NodeResult(output={"result": result})
-
-    def _exec_sandbox(self, code: str, kwargs: dict, entry: str) -> Any:
-        import builtins
-        # 统一书写规范：import + def 方法，入口方法内 return 返回值
-        namespace: dict[str, Any] = {
-            "__builtins__": self._build_builtins(builtins),
-        }
-        # 代码中定义的顶层函数名（按定义顺序），未指定方法名时回退取最后一个
-        top_funcs = self._top_level_function_names(code)
-        try:
-            exec(compile(code, "<workflow-code>", "exec"), namespace)  # noqa: S102
-        except SyntaxError as e:  # noqa: BLE001
-            raise ValueError(
-                f"代码语法错误: {e}（书写规范：import + def 方法，返回值在入口方法内 return）"
-            ) from e
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(f"代码执行错误: {e}") from e
-        fn = namespace.get(entry)
-        if not callable(fn) and entry == "main":
-            # 没有 main：参照 MaxKB 取最后定义的顶层函数，
-            # 使 def process(...) 这类代码无需填写方法名也能直接运行
-            fallback = next((f for f in reversed(top_funcs) if not f.startswith("_")), None)
-            if fallback:
-                fn = namespace.get(fallback)
-        if not callable(fn):
-            raise ValueError(f"未找到方法 {entry}()，请检查代码定义（默认 main，或最后定义的顶层函数）")
-        try:
-            return fn(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(f"{entry}() 执行错误: {e}") from e
-
-    @staticmethod
-    def _top_level_function_names(code: str) -> list[str]:
-        """提取代码中全部顶层函数名（含辅助函数），供入口方法回退查找。"""
-        try:
-            tree = ast.parse(code, "<workflow-code>")
-        except SyntaxError:
-            return []
-        return [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
-
-    @staticmethod
-    def _build_builtins(builtins_module) -> dict:
-        """构造 exec 命名空间用的 __builtins__：白名单 + 受控 __import__
-        （支持 import 导包但拦截危险模块）——始终开启，无开关。"""
-        allow = dict(CodeNodeExecutor._ALLOWED_BUILTINS)
-        allow["__import__"] = CodeNodeExecutor._safe_import
-        return allow
-
-    @staticmethod
-    def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-        """受控 import：黑名单模块拦截，其余模块放行。"""
-        base = name.split(".")[0]
-        if base in CodeNodeExecutor._BLOCKED_IMPORTS:
-            raise ImportError(f"模块 {base} 被沙箱禁止导入")
-        return __import__(name, globals, locals, fromlist, level)
-
-    @staticmethod
-    def _coerce_constant(value: Any, type_: Any) -> Any:
-        """自定义值转换（字符串 → 目标类型）：
-        number 转 int/float；boolean 转 True/False；array/object 按 JSON 解析；
-        解析失败或本身已是目标类型则原样透传。"""
-        if value is None or isinstance(value, bool):
-            return value
-        t = str(type_ or "string").lower()
-        if t == "number":
-            if isinstance(value, (int, float)):
-                return value
-            s = str(value).strip()
-            try:
-                return int(s) if re.fullmatch(r"[+-]?\d+", s) else float(s)
-            except ValueError:
-                return value
-        if t == "boolean":
-            return str(value).strip().lower() in ("true", "1", "yes", "y", "on")
-        if t in ("array", "object") and isinstance(value, str) and value.strip():
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
-
-    @staticmethod
-    def _validate_output(value: Any) -> None:
-        """递归校验返回值：字符串 ≤200KB / 数组 ≤100 元素。"""
-        def _check(v: Any) -> None:
-            if isinstance(v, str) and len(v.encode("utf-8")) > 200 * 1024:
-                raise ValueError("输出 result 超过 200KB 限制")
-            if isinstance(v, list):
-                if len(v) > 100:
-                    raise ValueError("输出 result 数组超过 100 元素限制")
-                for item in v:
-                    _check(item)
-            elif isinstance(v, dict):
-                for item in v.values():
-                    _check(item)
-        _check(value)
 
     @staticmethod
     def validate_node(node, graph) -> list:

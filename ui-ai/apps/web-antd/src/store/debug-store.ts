@@ -696,7 +696,9 @@ export const useDebugStore = defineStore('debug', () => {
       type: status === 'timeout' ? 'TIMEOUT' : 'CANCELLED',
       message:
         error ||
-        (status === 'timeout' ? '并行分支等待超时，已停止等待' : '并行分支已取消'),
+        (status === 'timeout'
+          ? '并行分支等待超时，已停止等待'
+          : '并行分支已取消'),
     };
 
     updateTimelineItem(nodeId, status, duration ?? 0);
@@ -1009,6 +1011,22 @@ export const useDebugStore = defineStore('debug', () => {
           '检查 LLM 模型配置是否正确',
           '确认 API 密钥是否有效',
           '检查输入提示词是否符合要求',
+        );
+        break;
+      }
+      case 'MCP_TOOL': {
+        suggestions.push(
+          '检查 MCP 连接是否正常（可在「智能体 - MCP」页测试连接）',
+          '确认工具入参已绑定上游变量或自定义值',
+          '查看工具返回内容：MCP 侧报错（isError）会直接判定节点失败',
+        );
+        break;
+      }
+      case 'TOOL': {
+        suggestions.push(
+          '确认工具在「智能体 - 工具」页处于启用状态',
+          '检查参数绑定是否指向已存在的上游变量',
+          '适当加大超时时间，或先到工具页用「测试」跑一次代码',
         );
         break;
       }

@@ -8,6 +8,8 @@
 1. **name 是唯一的文件标识**：形如 {32位hex uuid}_{原始文件名}，由 new_file_name() 生成。
    后端把它落在自己的位置（本地=local_dir 下，OSS=path_prefix 下），业务侧只透传 name，
    不解析、不拼路径 —— 需要原始展示名时用 original_name(name) 反推。
+   name 可携带一段**安全相对目录**（如 skills/{uuid}_x.zip，用于把某类资产归到子目录），
+   但目录段由 check_name 严格校验：禁止绝对路径/反斜杠/`..`/`.` 穿越段/空段/控制字符。
 2. **全异步**：方法一律 async；SDK 只有同步实现时在后端内部用 asyncio.to_thread 包，
    不把同步接口泄漏给业务侧。后端**不提供**「取本地路径」的能力（对象存储要为此把对象
    下到本地缓存，换来缓存失效/磁盘占用/多副本三类新问题）；确实需要文件形态的场景
@@ -102,8 +104,11 @@ def new_file_name(original: str) -> str:
 
 
 def original_name(name: str) -> str:
-    """存储名 → 原始文件名（剥掉 uuid 前缀；不是本工具生成的名字则原样返回）。"""
-    name = name or ""
+    """存储名 → 原始文件名（先取末级文件名、再剥掉 uuid 前缀；非本工具生成的名字原样返回）。
+
+    存储名可含安全相对目录（如 tmp/{uuid}_x.zip），故先取 basename 再解析 uuid 前缀。
+    """
+    name = (name or "").rsplit("/", 1)[-1]
     head, sep, tail = name.partition("_")
     if sep and len(head) == _ID_LEN and all(c in "0123456789abcdef" for c in head.lower()):
         return tail or name
@@ -111,8 +116,19 @@ def original_name(name: str) -> str:
 
 
 def check_name(name: str) -> str:
-    """校验文件名合法性（下载/删除/判存在都以此为准入口，防路径穿越）。"""
-    name = (name or "").strip()
-    if not name or "/" in name or "\\" in name or ".." in name or os.path.basename(name) != name:
+    """校验存储名合法性（上传落盘/下载/删除/判存在的统一入口，防路径穿越）。
+
+    允许「安全相对路径」：可带中间目录段（如 skills/{uuid}_x.zip），但每一段都必须是
+    安全名——禁止绝对路径、反斜杠、`.`/`..` 穿越段、空段、控制字符与 Windows 非法字符。
+    历史扁平名（不含 `/`）原样通过，对既有调用方零影响。
+    """
+    raw = (name or "").strip()
+    if not raw or "\\" in raw or raw.startswith("/") or ":" in raw:
         raise ValueError(f"非法文件名: {name!r}")
-    return name
+    segments = raw.split("/")
+    for seg in segments:
+        if seg in ("", ".", ".."):
+            raise ValueError(f"非法文件名: {name!r}")
+        if any(ord(c) < 32 for c in seg) or any(c in '"<>|?*' for c in seg):
+            raise ValueError(f"非法文件名: {name!r}")
+    return raw

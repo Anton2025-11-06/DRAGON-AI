@@ -95,7 +95,7 @@ class RateLimiter:
           外层 workflow_api_key_qps  field=api_key（活跃索引）
           内层 workflow_api_key_qps:{api_key}  field=qps，value=每秒次数，2 秒后自动过期
         :param api_key: API Key 原文
-        :param qps_limit: 每秒最大请求数（0=不限，调用方保证 >0）
+        :param qps_limit: 60秒最大请求数（0=不限，调用方保证 >0）
         :return: True 放行，False 超限
         """
         redis = client.client
@@ -106,7 +106,7 @@ class RateLimiter:
                 PREFIX_WORKFLOW_API_KEY_QPS + ":" + api_key,
                 api_key,
                 "qps",
-                2,  # 1 秒窗口计数 + 1 秒缓存余量，避免窗口边界丢计数
+                60,  # 60 秒窗口计数 + 1 秒缓存余量，避免窗口边界丢计数
             )
         except Exception as e:  # noqa: BLE001
             # Redis 抖动时降级放行（fail-open），避免限流器故障拖垮 API 执行链路

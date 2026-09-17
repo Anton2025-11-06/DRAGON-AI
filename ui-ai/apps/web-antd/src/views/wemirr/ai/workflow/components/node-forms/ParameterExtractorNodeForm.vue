@@ -1,3 +1,113 @@
+<script setup lang="ts">
+import type {
+  ExtractParameter,
+  ParameterExtractorConfig,
+  ParameterType,
+} from '#/api/ai-workflow/types';
+
+import { reactive, watch } from 'vue';
+
+import {
+  DeleteOutlined,
+  HolderOutlined,
+  PlusOutlined,
+} from '@ant-design/icons-vue';
+import draggable from 'vuedraggable';
+
+/**
+ * 参数提取器节点配置表单
+ * 使用 LLM（文生文）从自然语言文本中提取结构化参数
+ * 【设计对齐 2026-09】模型固定为 text_to_text，「直连/后缀」概念已废弃
+ */
+import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
+
+import { ModelSelect } from '../model-select';
+import { VariableInput } from '../variable-selector';
+
+// Props
+interface Props {
+  config: ParameterExtractorConfig;
+  nodeId: string;
+}
+
+const props = defineProps<Props>();
+
+// Emits
+const emit = defineEmits<{
+  (e: 'update:config', config: ParameterExtractorConfig): void;
+}>();
+
+// 默认参数
+const defaultParameters: ExtractParameter[] = [
+  {
+    name: 'param1',
+    type: 'string' as ParameterType,
+    description: '',
+    required: false,
+  },
+];
+
+// 表单数据
+const formData = reactive<ParameterExtractorConfig>({
+  modelId: undefined,
+  modelType: MT_TEXT_TO_TEXT,
+  inputVariable: '',
+  instructions: '',
+  parameters: [...defaultParameters],
+});
+
+// 监听配置变化
+watch(
+  () => props.config,
+  (config) => {
+    Object.assign(formData, {
+      modelId: config.modelId,
+      modelType: config.modelType || MT_TEXT_TO_TEXT,
+      inputVariable: config.inputVariable || '',
+      instructions: config.instructions || '',
+      parameters:
+        config.parameters && config.parameters.length > 0
+          ? config.parameters.map((p) => ({ ...p }))
+          : [...defaultParameters],
+    });
+  },
+  { immediate: true, deep: true },
+);
+
+// 添加参数
+function addParameter() {
+  formData.parameters = formData.parameters || [];
+  const newIndex = formData.parameters.length + 1;
+  formData.parameters.push({
+    name: `param${newIndex}`,
+    type: 'string' as ParameterType,
+    description: '',
+    required: false,
+  });
+  handleChange();
+}
+
+// 移除参数
+function removeParameter(index: number) {
+  formData.parameters?.splice(index, 1);
+  handleChange();
+}
+
+// 处理配置变更
+function handleChange() {
+  const config: ParameterExtractorConfig = {
+    modelId: formData.modelId,
+    modelType: MT_TEXT_TO_TEXT,
+    inputVariable: formData.inputVariable,
+    instructions: formData.instructions,
+    parameters: formData.parameters?.filter(
+      (p: ExtractParameter) => p.name && p.type,
+    ),
+  };
+  emit('update:config', config);
+}
+</script>
+
 <template>
   <a-form layout="vertical" :model="formData" class="node-form">
     <ModelSelect
@@ -12,7 +122,7 @@
       <VariableInput
         v-model="formData.inputVariable"
         :current-node-id="nodeId"
-        :placeholder="'{{start.text}} 或 {{nodeName.output}}'"
+        placeholder="{{start.text}} 或 {{nodeName.output}}"
         @change="handleChange"
       />
       <div class="form-hint">输入要提取参数的文本变量引用</div>
@@ -31,7 +141,7 @@
     </a-form-item>
 
     <!-- 参数结构定义 -->
-    <a-divider orientation="left" style=" margin: 16px 0 12px;font-size: 12px">
+    <a-divider orientation="left" style="margin: 16px 0 12px; font-size: 12px">
       参数结构定义
     </a-divider>
 
@@ -132,114 +242,6 @@
     </a-alert>
   </a-form>
 </template>
-
-<script setup lang="ts">
-/**
- * 参数提取器节点配置表单
- * 使用 LLM（文生文）从自然语言文本中提取结构化参数
- * 【设计对齐 2026-09】模型固定为 text_to_text，「直连/后缀」概念已废弃
- */
-import { CHAT_TYPE_OPTIONS, MT_TEXT_TO_TEXT } from '#/api/ai-workflow/const';
-import type {
-  ExtractParameter,
-  ParameterExtractorConfig,
-  ParameterType,
-} from '#/api/ai-workflow/types';
-
-import {
-  DeleteOutlined,
-  HolderOutlined,
-  PlusOutlined,
-} from '@ant-design/icons-vue';
-import { reactive, watch } from 'vue';
-import draggable from 'vuedraggable';
-
-import { ModelSelect } from '../model-select';
-import { VariableInput } from '../variable-selector';
-
-// Props
-interface Props {
-  config: ParameterExtractorConfig;
-  nodeId: string;
-}
-
-const props = defineProps<Props>();
-
-// Emits
-const emit = defineEmits<{
-  (e: 'update:config', config: ParameterExtractorConfig): void;
-}>();
-
-// 默认参数
-const defaultParameters: ExtractParameter[] = [
-  {
-    name: 'param1',
-    type: 'string' as ParameterType,
-    description: '',
-    required: false,
-  },
-];
-
-// 表单数据
-const formData = reactive<ParameterExtractorConfig>({
-  modelId: undefined,
-  modelType: MT_TEXT_TO_TEXT,
-  inputVariable: '',
-  instructions: '',
-  parameters: [...defaultParameters],
-});
-
-// 监听配置变化
-watch(
-  () => props.config,
-  (config) => {
-    Object.assign(formData, {
-      modelId: config.modelId,
-      modelType: config.modelType || MT_TEXT_TO_TEXT,
-      inputVariable: config.inputVariable || '',
-      instructions: config.instructions || '',
-      parameters:
-        config.parameters && config.parameters.length > 0
-          ? config.parameters.map((p) => ({ ...p }))
-          : [...defaultParameters],
-    });
-  },
-  { immediate: true, deep: true },
-);
-
-// 添加参数
-function addParameter() {
-  formData.parameters = formData.parameters || [];
-  const newIndex = formData.parameters.length + 1;
-  formData.parameters.push({
-    name: `param${newIndex}`,
-    type: 'string' as ParameterType,
-    description: '',
-    required: false,
-  });
-  handleChange();
-}
-
-// 移除参数
-function removeParameter(index: number) {
-  formData.parameters?.splice(index, 1);
-  handleChange();
-}
-
-// 处理配置变更
-function handleChange() {
-  const config: ParameterExtractorConfig = {
-    modelId: formData.modelId,
-    modelType: MT_TEXT_TO_TEXT,
-    inputVariable: formData.inputVariable,
-    instructions: formData.instructions,
-    parameters: formData.parameters?.filter(
-      (p: ExtractParameter) => p.name && p.type,
-    ),
-  };
-  emit('update:config', config);
-}
-</script>
 
 <style scoped lang="less">
 .node-form {

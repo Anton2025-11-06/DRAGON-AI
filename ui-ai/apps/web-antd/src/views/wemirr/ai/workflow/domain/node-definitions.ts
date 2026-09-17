@@ -21,6 +21,7 @@ export const ALL_NODE_TYPES = [
   'LIST_OPERATOR',
   'HTTP_REQUEST',
   'TOOL',
+  'MCP_TOOL',
 ] as const satisfies readonly NodeType[];
 
 export type WorkflowNodeCategory =

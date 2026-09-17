@@ -20,6 +20,7 @@ export { default as ListOperatorNodeForm } from './ListOperatorNodeForm.vue';
 // 智能体节点
 export { default as LLMNodeForm } from './LLMNodeForm.vue';
 export { default as LoopNodeForm } from './LoopNodeForm.vue';
+export { default as McpNodeForm } from './McpNodeForm.vue';
 export { default as ParallelNodeForm } from './ParallelNodeForm.vue';
 export { default as ParameterExtractorNodeForm } from './ParameterExtractorNodeForm.vue';
 

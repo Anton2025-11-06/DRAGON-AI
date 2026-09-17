@@ -14,6 +14,7 @@ import {
   ApiOutlined,
   BookOutlined,
   BranchesOutlined,
+  CloudServerOutlined,
   CodeOutlined,
   CommentOutlined,
   DatabaseOutlined,
@@ -31,7 +32,6 @@ import { MODEL_CATEGORY_LABELS } from '#/api/ai-workflow/const';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import { outputHandleForBranch } from '../../domain/ports';
-
 import NodeStatusBadge from '../node-display/NodeStatusBadge.vue';
 
 // ==================== Props ====================
@@ -103,6 +103,7 @@ const iconComponent = computed(() => {
     LIST_OPERATOR: DatabaseOutlined,
     HTTP_REQUEST: ApiOutlined,
     TOOL: ToolOutlined,
+    MCP_TOOL: CloudServerOutlined,
     VARIABLE_ASSIGNER: DatabaseOutlined,
   };
   return iconMap[nodeType.value];
@@ -186,14 +187,12 @@ const inputSummary = computed(() => {
     case 'LLM': {
       return config.value.modelId ? '已配置模型' : '未配置';
     }
+    case 'REPLY': {
+      return config.value.replyType === 'VARIABLE' ? '引用参数' : '自定义文本';
+    }
     case 'START': {
       const fields = config.value.fields || [];
       return fields.length > 0 ? `${fields.length} 个输入` : '无输入';
-    }
-    case 'REPLY': {
-      return config.value.replyType === 'VARIABLE'
-        ? '引用参数'
-        : '自定义文本';
     }
     default: {
       return '点击配置';
@@ -212,6 +211,12 @@ const outputSummary = computed(() => {
     }
     case 'LLM': {
       return config.value.outputVariable || 'output';
+    }
+    case 'MCP_TOOL': {
+      return 'MCP 工具结果';
+    }
+    case 'TOOL': {
+      return '工具执行结果';
     }
     default: {
       return '变量输出';
@@ -318,9 +323,9 @@ function getBranchHandleY(index: number): number {
             >
               {{ output.name }}
             </span>
-            <span v-if="endOutputs.length === 0" class="empty-hint"
-              >点击配置</span
-            >
+            <span v-if="endOutputs.length === 0" class="empty-hint">
+              点击配置
+            </span>
           </span>
         </div>
         <div class="config-row">

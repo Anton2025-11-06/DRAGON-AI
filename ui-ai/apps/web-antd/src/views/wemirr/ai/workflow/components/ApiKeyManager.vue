@@ -10,6 +10,8 @@ import { onMounted, reactive, ref } from 'vue';
 import {
   CopyOutlined,
   DeleteOutlined,
+  EditOutlined,
+  EyeOutlined,
   PlusOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
@@ -18,8 +20,11 @@ import {
   createApiKey,
   deleteApiKey,
   listApiKeys,
+  updateApiKey,
   updateApiKeyStatus,
 } from '#/api/ai-workflow';
+
+import ApiKeyUsageModal from './ApiKeyUsageModal.vue';
 
 interface Props {
   workflowId: number | string;
@@ -31,16 +36,48 @@ const loading = ref(false);
 const creating = ref(false);
 const apiKeys = ref<ApiKeyListResp[]>([]);
 const showCreateModal = ref(false);
-const showKeyModal = ref(false);
-const newApiKey = ref('');
-
-const apiBaseUrl = `${window.location.origin}/api/workflow`;
+/** 用法说明弹窗：创建成功后自动打开，列表「查看」随时可再看 */
+const showUsageModal = ref(false);
+const usageApiKey = ref('');
+/** 编辑弹窗（重命名 / 改 QPS / 改过期时间） */
+const showEditModal = ref(false);
+const editing = ref(false);
+const editForm = reactive({
+  expireTime: undefined as string | undefined,
+  id: 0,
+  name: '',
+  rateLimit: 0,
+});
 
 const createForm = reactive({
   name: '',
   rateLimit: 0,
   expireDays: 0,
 });
+
+/** 后端时间串规整到秒（历史数据可能带 T 分隔） */
+function formatTime(time?: null | string): string {
+  return time ? String(time).replace('T', ' ').slice(0, 19) : '';
+}
+
+/** 过期判定：状态已是 EXPIRED，或设了时间但还没被后端刷状态 */
+function isExpired(record: ApiKeyListResp): boolean {
+  if (record.status === 'EXPIRED') return true;
+  return (
+    !!record.expireTime && new Date(record.expireTime).getTime() < Date.now()
+  );
+}
+
+// 过期是系统判定的结果，与用户主动停用分开显示，不能一律当成「禁用」
+function statusText(record: ApiKeyListResp): string {
+  if (record.status === 'ACTIVE') return '启用';
+  return isExpired(record) ? '已过期' : '禁用';
+}
+
+function statusColor(record: ApiKeyListResp): string {
+  if (record.status === 'ACTIVE') return 'green';
+  return isExpired(record) ? 'orange' : 'default';
+}
 
 /** 复制某行 API Key */
 function copyKey(key: string) {
@@ -54,25 +91,23 @@ function copyKey(key: string) {
     });
 }
 
+/**
+ * 列定义：没列“调用次数 / 最后使用”——网关鉴权与限流只读 Redis，
+ * 根本不会回写 total_calls / last_used_time，放出来永远是一片 0 和空。
+ */
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name', width: 120 },
+  { title: '名称', dataIndex: 'name', key: 'name', width: 110 },
   {
     title: 'API Key',
     dataIndex: 'apiKey',
     key: 'apiKey',
-    width: 260,
+    width: 250,
   },
   { title: '状态', key: 'status', width: 80 },
-  { title: 'QPS', key: 'rateLimit', width: 80 },
-  { title: '调用次数', key: 'totalCalls', width: 100 },
-  {
-    title: '最后使用',
-    dataIndex: 'lastUsedTime',
-    key: 'lastUsedTime',
-    width: 160,
-  },
+  { title: 'QPS', key: 'rateLimit', width: 90 },
+  { title: '过期时间', key: 'expireTime', width: 160 },
   { title: '创建时间', dataIndex: 'createTime', key: 'createTime', width: 160 },
-  { title: '操作', key: 'action', width: 140, fixed: 'right' as const },
+  { title: '操作', key: 'action', width: 210, fixed: 'right' as const },
 ];
 
 async function loadApiKeys() {
@@ -100,10 +135,10 @@ async function handleCreate() {
       expireDays: createForm.expireDays || undefined,
     });
 
-    // 显示新建的 key
-    newApiKey.value = resp.apiKey;
+    // 直接把用法说明拉开，省得用户还要回列表找刚建的那行
+    usageApiKey.value = resp.apiKey;
     showCreateModal.value = false;
-    showKeyModal.value = true;
+    showUsageModal.value = true;
 
     // 重置表单
     createForm.name = '';
@@ -140,15 +175,41 @@ async function handleDelete(id: number) {
   }
 }
 
-function handleCopy() {
-  navigator.clipboard
-    .writeText(newApiKey.value)
-    .then(() => {
-      message.success('已复制到剪贴板');
-    })
-    .catch(() => {
-      message.error('复制失败，请手动复制');
+/** 打开某一行的用法说明 */
+function openUsage(record: ApiKeyListResp) {
+  usageApiKey.value = record.apiKey;
+  showUsageModal.value = true;
+}
+
+function openEdit(record: ApiKeyListResp) {
+  editForm.id = record.id;
+  editForm.name = record.name;
+  editForm.rateLimit = record.rateLimit ?? 0;
+  editForm.expireTime = record.expireTime || undefined;
+  showEditModal.value = true;
+}
+
+async function handleEdit() {
+  if (!editForm.name.trim()) {
+    message.warning('请输入备注名称');
+    return;
+  }
+  editing.value = true;
+  try {
+    await updateApiKey(editForm.id, {
+      name: editForm.name.trim(),
+      rateLimit: editForm.rateLimit || 0,
+      // 清空是“改为永不过期”，必须显式传 null；不传后端理解为不改过期时间
+      expireTime: editForm.expireTime || null,
     });
+    message.success('已保存');
+    showEditModal.value = false;
+    await loadApiKeys();
+  } catch {
+    message.error('保存失败');
+  } finally {
+    editing.value = false;
+  }
 }
 
 onMounted(() => {
@@ -166,13 +227,12 @@ onMounted(() => {
       </a-button>
     </div>
 
-    <a-alert type="info" show-icon style="margin-bottom: 16px">
-      <template #message>
-        第三方系统可通过 API Key 执行此工作流（需先发布），请求头添加
-        <code style="word-break: break-all">X-Workflow-Token: {{ newApiKey }}</code>，鉴权与限流由网关统一执行；
-        限流按 API Key 的 QPS 限制，0 表示不限制。
-      </template>
-    </a-alert>
+    <a-alert
+      type="info"
+      show-icon
+      style="margin-bottom: 16px"
+      message="第三方系统可通过 API Key 执行此工作流（需先发布）：请求头添加 X-Workflow-Token，鉴权与限流由网关统一执行；限流按 Key 配置的 QPS，0 表示不限制。完整调用地址与 curl 示例见每行的「查看」。"
+    />
 
     <!-- API Key 列表 -->
     <a-table
@@ -180,6 +240,7 @@ onMounted(() => {
       :data-source="apiKeys"
       :loading="loading"
       :pagination="false"
+      :scroll="{ x: 1060 }"
       row-key="id"
       size="small"
     >
@@ -193,18 +254,35 @@ onMounted(() => {
           </a-space>
         </template>
         <template v-else-if="column.key === 'status'">
-          <a-tag :color="record.status === 'ACTIVE' ? 'green' : 'default'">
-            {{ record.status === 'ACTIVE' ? '启用' : '禁用' }}
+          <a-tag :color="statusColor(record)">
+            {{ statusText(record) }}
           </a-tag>
         </template>
         <template v-else-if="column.key === 'rateLimit'">
           {{ record.rateLimit > 0 ? `${record.rateLimit} QPS` : '不限制' }}
         </template>
-        <template v-else-if="column.key === 'totalCalls'">
-          {{ record.totalCalls.toLocaleString() }}
+        <template v-else-if="column.key === 'expireTime'">
+          <span v-if="!record.expireTime" class="expire-never">永不过期</span>
+          <span v-else :class="{ 'expire-done': isExpired(record) }">
+            {{ formatTime(record.expireTime) }}
+          </span>
+        </template>
+        <template v-else-if="column.key === 'createTime'">
+          {{ formatTime(record.createTime) || '—' }}
         </template>
         <template v-else-if="column.key === 'action'">
-          <a-space>
+          <a-space :size="4">
+            <a-button
+              type="link"
+              size="small"
+              title="查看调用用法说明"
+              @click="openUsage(record)"
+            >
+              <EyeOutlined /> 查看
+            </a-button>
+            <a-button type="link" size="small" @click="openEdit(record)">
+              <EditOutlined /> 编辑
+            </a-button>
             <a-switch
               :checked="record.status === 'ACTIVE'"
               checked-children="启用"
@@ -269,44 +347,49 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <!-- 显示新创建的 API Key 弹窗 -->
+    <!-- 编辑 API Key：重命名 / 改 QPS / 改过期时间 -->
     <a-modal
-      v-model:open="showKeyModal"
-      title="API Key 创建成功"
-      :footer="null"
-      :closable="true"
-      :width="640"
+      v-model:open="showEditModal"
+      :confirm-loading="editing"
+      title="编辑 API Key"
+      @ok="handleEdit"
     >
-      <a-alert
-        type="info"
-        show-icon
-        style="margin-bottom: 16px"
-        message="API Key 已生成，可在列表中随时查看完整内容并复制。"
-      />
-      <div class="key-display">
-        <code class="key-value">{{ newApiKey }}</code>
-        <a-button type="primary" size="small" @click="handleCopy">
-          <CopyOutlined /> 复制
-        </a-button>
-      </div>
-
-      <a-divider style="margin: 16px 0" />
-
-      <h4>调用示例</h4>
-      <div class="code-block">
-        <pre><code># 1. 异步执行工作流（返回 executionId）
-curl -X POST {{ apiBaseUrl }}/workflow-executions/workflows/{{ props.workflowId }}/execute-async \
-  -H "X-Workflow-Token: {{ newApiKey }}" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"query": "你好"}}'
-
-# 2. 订阅执行事件流（SSE 长连接，网关白名单放行，无需携带请求头）
-curl -N {{ apiBaseUrl }}/workflow-executions/&lt;executionId&gt;/subscribe
-
-# 事件类型：node.started / node.completed / node.failed / node.delta
-#          / workflow.paused / workflow.completed / workflow.failed / workflow.cancelled</code></pre>
-      </div>
+      <a-form :model="editForm" layout="vertical">
+        <a-form-item label="备注名称" required>
+          <a-input
+            v-model:value="editForm.name"
+            :maxlength="128"
+            placeholder="例如：生产环境、测试联调"
+          />
+        </a-form-item>
+        <a-form-item label="QPS 限制">
+          <a-input-number
+            v-model:value="editForm.rateLimit"
+            :max="1000"
+            :min="0"
+            placeholder="0 表示不限制"
+            style="width: 100%"
+          />
+        </a-form-item>
+        <a-form-item label="过期时间">
+          <a-date-picker
+            v-model:value="editForm.expireTime"
+            format="YYYY-MM-DD HH:mm:ss"
+            placeholder="留空表示永不过期"
+            show-time
+            style="width: 100%"
+            value-format="YYYY-MM-DD HH:mm:ss"
+          />
+        </a-form-item>
+      </a-form>
     </a-modal>
+
+    <!-- 用法说明：刚创建与列表「查看」共用同一份模板 -->
+    <ApiKeyUsageModal
+      v-model:open="showUsageModal"
+      :api-key="usageApiKey"
+      :workflow-id="props.workflowId"
+    />
   </div>
 </template>
 
@@ -321,44 +404,18 @@ curl -N {{ apiBaseUrl }}/workflow-executions/&lt;executionId&gt;/subscribe
     margin-bottom: 16px;
   }
 
-  .key-display {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    padding: 12px;
-    background: #f5f5f5;
-    border-radius: 6px;
-
-    .key-value {
-      flex: 1;
-      min-width: 0;
-      font-size: 13px;
-      word-break: break-all;
-    }
-  }
-
   .key-cell {
     font-size: 12px;
     word-break: break-all;
   }
 
-  .code-block {
-    padding: 12px;
-    background: #1e1e1e;
-    border-radius: 6px;
-    overflow-x: auto;
+  // 过期时间是“没设”而不是“没数据”，两者语义不一样，不能统一显示 —
+  .expire-never {
+    color: #bfbfbf;
+  }
 
-    pre {
-      margin: 0;
-
-      code {
-        color: #d4d4d4;
-        font-size: 12px;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-    }
+  .expire-done {
+    color: #ff4d4f;
   }
 }
 </style>

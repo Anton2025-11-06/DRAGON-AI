@@ -8,15 +8,18 @@ import * as api from './api';
 import createCrudOptions from './crud';
 
 const TestModal = defineAsyncComponent(() => import('./TestModal.vue'));
+const ToolFormModal = defineAsyncComponent(() => import('./ToolFormModal.vue'));
 
 export default defineComponent({
   name: 'DynamicToolPageList',
   components: {
     TestModal,
+    ToolFormModal,
   },
   setup() {
     const crudRef = ref();
     const crudBinding = ref();
+    const crudExposeRef = ref<any>(null);
 
     // 运行测试弹窗
     const testModalVisible = ref(false);
@@ -25,6 +28,15 @@ export default defineComponent({
     const openTestModal = (tool: any) => {
       selectedTool.value = tool;
       testModalVisible.value = true;
+    };
+
+    // 新增 / 编辑弹窗（自定义表单，排版对齐工作流代码节点）
+    const formModalVisible = ref(false);
+    const editingToolId = ref<null | number>(null);
+
+    const openFormModal = (id: null | number) => {
+      editingToolId.value = id ?? null;
+      formModalVisible.value = true;
     };
 
     const toggleStatus = async (row: any, status: boolean) => {
@@ -43,10 +55,12 @@ export default defineComponent({
         crudRef,
         createCrudOptions,
         context: {
+          openFormModal,
           openTestModal,
           toggleStatus,
         },
       });
+      crudExposeRef.value = crudExpose;
       crudExpose.doRefresh();
     });
 
@@ -55,6 +69,10 @@ export default defineComponent({
       crudRef,
       testModalVisible,
       selectedTool,
+      formModalVisible,
+      editingToolId,
+      // 自定义弹窗保存后刷新列表（新增行不在当前列表里，不刷看不出区别）
+      onFormSaved: () => crudExposeRef.value?.doRefresh(),
     };
   },
 });
@@ -68,6 +86,13 @@ export default defineComponent({
       :visible="testModalVisible"
       @update:visible="testModalVisible = $event"
       :tool="selectedTool"
+    />
+
+    <ToolFormModal
+      :open="formModalVisible"
+      :tool-id="editingToolId"
+      @update:open="formModalVisible = $event"
+      @saved="onFormSaved"
     />
   </fs-page>
 </template>

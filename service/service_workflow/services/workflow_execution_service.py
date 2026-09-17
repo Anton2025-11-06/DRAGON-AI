@@ -247,32 +247,12 @@ class WorkflowExecutionService:
             state_persist_hook=WorkflowExecutionService._persist_state,
             status_check_hook=WorkflowExecutionService._execution_status,
         )
-        # 工具调用钩子（TOOL 节点）：MCP 工具走 mcp_server_id → SDK 调用；
-        # 否则按名称执行 tb_tool 动态函数（复用 ToolService 受限沙箱与超时守卫）
-        runtime.tool_invoker = WorkflowExecutionService._invoke_tool
+        # 工具类节点（TOOL / MCP_TOOL）由执行器直接调 service 层，不再经 runtime 钩子中转
         # 暂停恢复:快照(含 context/pendingNodes/剩余断点)权威高于行字段;
         # 新触发执行 variables 为空,跳过 restore 保留上面传入的真实输入
         if snap:
             runtime.restore(snap)
         return runtime
-
-    # ==================== 工具调用钩子（TOOL 节点 invoker） ====================
-
-    @staticmethod
-    async def _invoke_tool(tool_name: str, mcp_server_id=None, params: dict = None) -> dict:
-        """TOOL 节点真实工具调用：MCP 工具（SDK 会话）或 tb_tool 动态函数（受限沙箱）。"""
-        if mcp_server_id:
-            from service.service_workflow.services.mcp_service import McpServerService
-            result = await McpServerService.call_tool(mcp_server_id, tool_name, params or {})
-            if result.get("isError"):
-                raise ValueError(result.get("content") or f"MCP 工具 {tool_name} 调用失败")
-            return {"content": result.get("content"), "urls": result.get("urls"),
-                    "structured": result.get("structured")}
-        from service.service_workflow.services.tool_service import ToolService
-        result = await ToolService.execute_by_name(tool_name, params or {})
-        if not result.get("success"):
-            raise ValueError(result.get("error") or f"工具 {tool_name} 执行失败")
-        return result.get("result")
 
     @staticmethod
     async def _persist_node(runtime: WorkflowRuntime, node, state) -> None:
@@ -476,9 +456,12 @@ class WorkflowExecutionService:
         yield WorkflowExecutionService._sse(
             "workflow.started", {"executionId": execution_id, "inputs": resp.get("inputs")})
         for nid, st in (resp.get("nodeStates") or {}).items():
+            # input 与实时流对齐：node.started 才带输入视图，回放漏掉的话
+            # 已结束的执行在前端「执行过程」里就没有输入可展开
             yield WorkflowExecutionService._sse(
                 "node.started", {"executionId": execution_id, "nodeId": nid,
-                                 "nodeType": st.get("nodeType", "")})
+                                 "nodeType": st.get("nodeType", ""),
+                                 "input": st.get("input")})
             # 并行分支被砍的节点终态：跟实时流一致，补发 node.timeout /
             # node.cancelled（当成 failed 会误标红，当成 completed 会误标绿）
             if st.get("status") == STATUS_TIMEOUT:

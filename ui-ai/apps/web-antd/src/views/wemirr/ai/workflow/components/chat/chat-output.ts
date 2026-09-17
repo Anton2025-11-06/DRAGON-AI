@@ -7,6 +7,36 @@
  * 避免每加一种节点/模型类型就要改一次对话窗口。
  */
 
+/** 对象里承载正文的常见键名（模型节点会把同一个值重复写到多个键上） */
+export const TEXT_VALUE_KEYS = [
+  'answer',
+  'content',
+  'message',
+  'output',
+  'result',
+  'text',
+];
+
+/**
+ * 递归收集值里的媒体直链（限深 2 层）。
+ * 够覆盖 {urls: [...]}、{data: [{url}]} 这类包装，又不会把整份业务 JSON
+ * 里的外部链接都当成产物铺成播放器。
+ */
+export function collectMediaUrls(value: unknown, depth = 0): string[] {
+  if (depth > 2) return [];
+  if (typeof value === 'string')
+    return getMediaType(value) ? [value.trim()] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectMediaUrls(item, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>).flatMap((item) =>
+      collectMediaUrls(item, depth + 1),
+    );
+  }
+  return [];
+}
+
 /** 值最终采用的渲染形态 */
 export type ChatOutputKind =
   | 'audio'
@@ -122,4 +152,45 @@ export function formatDuration(ms?: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
   return `${(ms / 60_000).toFixed(2)}min`;
+}
+
+/**
+ * 任意值的可复制文本：字符串原样给（正文就是要抄走的内容），
+ * 其余走 JSON 序列化，保证复制结果和屏幕上看到的是同一份数据。
+ */
+export function toCopyText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+/** 写剪贴板（非安全上下文下 clipboard 不可用，退回 execCommand） */
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // 页面不是 https / 用户拒绝了权限时走兜底
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }

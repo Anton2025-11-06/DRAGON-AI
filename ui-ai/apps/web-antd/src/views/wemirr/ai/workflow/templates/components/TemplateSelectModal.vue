@@ -32,7 +32,7 @@ const props = defineProps<Props>();
 
 const emit = defineEmits<{
   (e: 'update:open', value: boolean): void;
-  (e: 'select', template: WorkflowTemplateResp | null): void;
+  (e: 'select', template: null | WorkflowTemplateResp): void;
 }>();
 
 // 模板列表
@@ -160,7 +160,7 @@ onMounted(() => {
         </div>
 
         <!-- 分类标签 -->
-        <Tabs v-model:activeKey="activeCategory" class="category-tabs">
+        <Tabs v-model:active-key="activeCategory" class="category-tabs">
           <a-tab-pane v-for="cat in categories" :key="cat.key">
             <template #tab>
               <span class="tab-label">

@@ -291,6 +291,26 @@ function getFileLimitsText(field: InputField): string {
 }
 
 /**
+ * 字段说明文字。
+ *
+ * 历史口径把 description 回填成了 label（编辑器、对话窗口的入参映射都这么写过），
+ * 标题已经显示过一遍的名字不能再在输入框下面重复一次；跟变量名同名的说明同理滤掉。
+ */
+function fieldHelp(field: InputField): string {
+  const desc = (field.description || '').trim();
+  if (!desc) return '';
+  const label = (field.label || '').trim();
+  const name = (field.name || '').trim();
+  if (desc === label || desc === name) return '';
+  return desc;
+}
+
+/** 占位提示：说明与标题重复时退回「请输入 xx」，不让输入框里再抄一遍标题 */
+function fieldPlaceholder(field: InputField, action = '请输入'): string {
+  return fieldHelp(field) || `${action}${field.label || field.name}`;
+}
+
+/**
  * 当前字段已占用（已上传 + 上传中）的文件数
  */
 function countOccupiedFiles(fieldName: string, isMultiple: boolean): number {
@@ -430,10 +450,22 @@ async function validate(): Promise<boolean> {
 
 /**
  * 重置表单
+ *
+ * 除了字段值（含默认值回填），已上传文件列表与上传中计数也要清掉：
+ * 只清值不清列表的话，输入框空了但文件条目还挂着，下一次发送会带上上一轮的文件。
  */
 function resetFields() {
   formRef.value?.resetFields();
   formValues.value = {};
+  for (const key of Object.keys(fileListCache)) {
+    fileListCache[key] = [];
+  }
+  for (const key of Object.keys(uploadingFields.value)) {
+    uploadingFields.value[key] = false;
+  }
+  for (const key of Object.keys(reservedUploads)) {
+    reservedUploads[key] = 0;
+  }
   initDefaultValues(props.fields);
 }
 
@@ -496,8 +528,8 @@ defineExpose({
       :required="field.required"
     >
       <template #help>
-        <span v-if="field.description" class="field-description">
-          {{ field.description }}
+        <span v-if="fieldHelp(field)" class="field-description">
+          {{ fieldHelp(field) }}
         </span>
         <span
           v-if="
@@ -522,7 +554,7 @@ defineExpose({
         v-model:value="formValues[field.name]"
         :rows="3"
         :maxlength="getTextMaxLength(field)"
-        :placeholder="field.description || `请输入${field.label}`"
+        :placeholder="fieldPlaceholder(field)"
         show-count
         allow-clear
       />
@@ -533,7 +565,7 @@ defineExpose({
         v-model:value="formValues[field.name]"
         :min="field.minValue"
         :max="field.maxValue"
-        :placeholder="field.description || `请输入${field.label}`"
+        :placeholder="fieldPlaceholder(field)"
         style="width: 100%"
       />
 
@@ -541,7 +573,7 @@ defineExpose({
       <a-select
         v-else-if="fieldType(field) === 'SELECT'"
         v-model:value="formValues[field.name]"
-        :placeholder="field.description || `请选择${field.label}`"
+        :placeholder="fieldPlaceholder(field, '请选择')"
         allow-clear
       >
         <a-select-option v-for="opt in field.options" :key="opt" :value="opt">

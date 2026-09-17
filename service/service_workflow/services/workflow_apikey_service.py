@@ -30,6 +30,19 @@ async def _sync_redis_config(api_key: str, config: dict) -> None:
         log.error("sync workflow api key redis failed: {}", e)
 
 
+def _row_config(row: WorkflowApiKey) -> dict:
+    """行 → 网关读取的那份配置（create/update/update_status 共用同一口径）。
+
+    网关是拿 expireTime 字符串按 "%Y-%m-%d %H:%M:%S" 比对的，格式变了会直接判成无效 Key。
+    """
+    return {
+        "workflowId": row.workflow_id,
+        "rateLimit": row.rate_limit,
+        "expireTime": row.expire_time.strftime("%Y-%m-%d %H:%M:%S") if row.expire_time else None,
+        "status": row.status,
+    }
+
+
 class WorkflowApiKeyService:
 
     @staticmethod
@@ -44,11 +57,7 @@ class WorkflowApiKeyService:
             session.add(row)
             await session.commit()
             # 前端 ApiKeyCreateResp：id / apiKey（明文）/ name / workflowId
-            await _sync_redis_config(api_key, {
-                "workflowId": workflow_id, "rateLimit": rate_limit,
-                "expireTime": expire_time.strftime("%Y-%m-%d %H:%M:%S") if expire_time else None,
-                "status": "ACTIVE",
-            })
+            await _sync_redis_config(api_key, _row_config(row))
             return {"id": row.id, "apiKey": api_key, "name": row.name,
                     "workflowId": row.workflow_id}
 
@@ -68,6 +77,34 @@ class WorkflowApiKeyService:
             } for r in rows]
 
     @staticmethod
+    async def update(api_key_id: int, changes: dict) -> bool:
+        """编辑 API Key：备注名 / QPS / 过期时间，只改 changes 里传了的字段。
+
+        QPS 与过期时间都参与网关判定，但网关只读 Redis，所以改完必须同步一份过去，
+        否则会出现“页面改了、第三方调用仍按旧限流跑”。
+        """
+        async with mysql_client.get_session() as session:
+            row = await session.get(WorkflowApiKey, api_key_id)
+            if row is None:
+                return False
+            name = changes.get("name")
+            if name:
+                row.name = name
+            rate_limit = changes.get("rateLimit")
+            if rate_limit is not None:
+                row.rate_limit = int(rate_limit)
+            if "expireTime" in changes:
+                row.expire_time = changes["expireTime"]
+                # EXPIRED 是系统判定的中间态，不是用户主动停用，顺延/改永不过期后自动回可用
+                if row.status == "EXPIRED" and (
+                    row.expire_time is None or row.expire_time > datetime.now()
+                ):
+                    row.status = "ACTIVE"
+            await session.commit()
+            await _sync_redis_config(row.api_key, _row_config(row))
+            return True
+
+    @staticmethod
     async def update_status(api_key_id: int, status: str) -> bool:
         # 兼容旧前端"禁用"语义：DISABLED 归一化为 REVOKED
         if status == "DISABLED":
@@ -80,11 +117,7 @@ class WorkflowApiKeyService:
                 return False
             row.status = status
             await session.commit()
-            await _sync_redis_config(row.api_key, {
-                "workflowId": row.workflow_id, "rateLimit": row.rate_limit,
-                "expireTime": row.expire_time.strftime("%Y-%m-%d %H:%M:%S") if row.expire_time else None,
-                "status": status,
-            })
+            await _sync_redis_config(row.api_key, _row_config(row))
             return True
 
     @staticmethod

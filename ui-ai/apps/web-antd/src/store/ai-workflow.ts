@@ -734,19 +734,12 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         }
       }
       if (node.type === 'TOOL') {
-        if (!node.data?.mcpServerId) {
-          addIssue(
-            'ERROR',
-            'TOOL_SERVER_REQUIRED',
-            `工具节点 ${node.label || node.id} 必须选择 MCP 服务器`,
-            node,
-          );
-        }
-        if (!node.data?.toolName) {
+        // 工具节点改选工具库登记的动态函数工具：toolId 为准，旧图只有 toolName 时也放行
+        if (!node.data?.toolId && !node.data?.toolName) {
           addIssue(
             'ERROR',
             'TOOL_NAME_REQUIRED',
-            `工具节点 ${node.label || node.id} 必须选择具体工具`,
+            `工具节点 ${node.label || node.id} 必须选择工具`,
             node,
           );
         }
@@ -755,6 +748,32 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
             'WARNING',
             'TOOL_OUTPUT_VARIABLE_EMPTY',
             `工具节点 ${node.label || node.id} 未配置输出变量`,
+            node,
+          );
+        }
+      }
+      if (node.type === 'MCP_TOOL') {
+        if (!node.data?.mcpServerId) {
+          addIssue(
+            'ERROR',
+            'MCP_SERVER_REQUIRED',
+            `MCP 工具节点 ${node.label || node.id} 必须选择 MCP 连接`,
+            node,
+          );
+        }
+        if (!node.data?.toolName) {
+          addIssue(
+            'ERROR',
+            'MCP_TOOL_REQUIRED',
+            `MCP 工具节点 ${node.label || node.id} 必须选择具体工具`,
+            node,
+          );
+        }
+        if (!node.data?.outputVariable) {
+          addIssue(
+            'WARNING',
+            'MCP_OUTPUT_VARIABLE_EMPTY',
+            `MCP 工具节点 ${node.label || node.id} 未配置输出变量`,
             node,
           );
         }
@@ -1031,7 +1050,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       | 'paused'
       | 'running'
       | 'timeout',
-    duration?: number | null,
+    duration?: null | number,
   ) {
     if (!canvasRef.value) return;
 

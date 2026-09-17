@@ -21,7 +21,7 @@ from service.service_workflow.workflow_engine.nodes.data_nodes import (
     ListOperatorNodeExecutor, ReplyNodeExecutor, TemplateNodeExecutor,
 )
 from service.service_workflow.workflow_engine.nodes.external_nodes import (
-    HttpRequestNodeExecutor, ToolNodeExecutor,
+    HttpRequestNodeExecutor, McpToolNodeExecutor, ToolNodeExecutor,
 )
 
 NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
@@ -50,12 +50,13 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     # 外部
     HttpRequestNodeExecutor.node_type: HttpRequestNodeExecutor,
     ToolNodeExecutor.node_type: ToolNodeExecutor,
+    McpToolNodeExecutor.node_type: McpToolNodeExecutor,
 }
 
-# 前端 21 种节点类型全集（types.ts NodeType）
+# 前端节点类型全集（types.ts NodeType）
 ALL_NODE_TYPES = [
     "START", "END", "LLM", "AGENT", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
-    "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "KNOWLEDGE_RETRIEVAL",
+    "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "MCP_TOOL", "KNOWLEDGE_RETRIEVAL",
     "PARAMETER_EXTRACTOR", "QUESTION_CLASSIFIER", "LIST_OPERATOR",
     "VARIABLE_AGGREGATOR", "VARIABLE_ASSIGNER", "DOC_EXTRACTOR",
 ]

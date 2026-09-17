@@ -60,7 +60,7 @@ export function useWorkflowWs(
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
       }
-    }, 3_000);
+    }, 3000);
   }
 
   /** 停止心跳 */

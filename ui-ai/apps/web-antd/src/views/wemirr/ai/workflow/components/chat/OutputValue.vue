@@ -4,15 +4,21 @@
  *
  * 输入是「任意 JSON 值」：可能是大模型正文、结构化 JSON、向量数组、重排分数组、
  * 文生图/视频/音频直链、文件对象或它们的数组，也可能是数字/布尔/空值。
- * 按值形态挑渲染方式（媒体 > 文件 > 长数值摘要 > 短键值行 > JSON 树 > 文本），
+ * 按值形态挑渲染方式：空值 > 标量 > 字符串（媒体/JSON/正文）> 数组（文件/媒体/向量）
+ * > 对象（文件/媒体折叠/正文折叠/键值行）> JSON 树兜底，
  * 新增节点类型或模型能力类型时不需要改这里。
  */
 import type { PropType } from 'vue';
 
 import { computed } from 'vue';
+import VueJsonPretty from 'vue-json-pretty';
 import 'vue-json-pretty/lib/styles.css';
 
-import { CopyOutlined } from '@ant-design/icons-vue';
+import {
+  CopyOutlined,
+  LinkOutlined,
+  PaperClipOutlined,
+} from '@ant-design/icons-vue';
 import { message, Tooltip } from 'ant-design-vue';
 
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
@@ -22,9 +28,13 @@ import {
   asFlatObject,
   asNumberArray,
   asUrlArray,
+  collectMediaUrls,
+  copyToClipboard,
   getMediaType,
   isUrlLike,
   parseJsonText,
+  TEXT_VALUE_KEYS,
+  toCopyText,
 } from './chat-output';
 
 interface ResolvedView {
@@ -42,8 +52,12 @@ interface ResolvedView {
     | 'vectors';
   /** kind=media 时的媒体类型 */
   media: 'audio' | 'image' | 'video';
+  /** 被主体（媒体/正文）没吃掉的数据，跟在主体后面继续渲染 */
+  rest?: any;
   /** 长数值数组的摘要文案 */
   summary: string;
+  /** kind=markdown 且值不是字符串时，从对象里提出的正文 */
+  text?: string;
   /** 媒体地址列表 */
   urls: string[];
 }
@@ -53,6 +67,11 @@ const props = defineProps({
   value: { default: undefined, type: Object as PropType<any> },
   /** 变量名（outputs 的 key） */
   label: { default: '', type: String },
+  /**
+   * 是否挂自己的复制按钮。外层已有一块一个复制按钮时传 false，
+   * 否则一个数据块里会出现两个语义不同的复制入口。
+   */
+  showCopy: { default: true, type: Boolean },
 });
 
 /**
@@ -123,6 +142,15 @@ function resolveView(value: any): ResolvedView {
     return { ...base, data: [singleFile], kind: 'files' };
   }
 
+  // 生成类节点会把同一条直链写进 output/url/urls/video_url 等多个键，
+  // 先按值提出媒体地址，不能整块退化成 JSON 树
+  const mediaView = resolveMediaObject(value as Record<string, any>);
+  if (mediaView) return { ...base, ...mediaView };
+
+  // 文本类节点的输出是 {output, text, usage} 这类重复包装，取正文、其余当补充数据
+  const textView = resolveTextObject(value as Record<string, any>);
+  if (textView) return { ...base, ...textView };
+
   // 少量纯标量的对象（如知识检索的 {query, count}）按行展示比 JSON 树易读
   const flat = asFlatObject(value);
   if (flat?.every(([, item]) => typeof item !== 'object' || item === null)) {
@@ -131,11 +159,71 @@ function resolveView(value: any): ResolvedView {
   return base;
 }
 
+/** 空值不参与补充数据：{a: '', b: null} 占行但没有信息 */
+function isMeaningful(item: any): boolean {
+  return item !== null && item !== undefined && item !== '';
+}
+
+/**
+ * 对象里的媒体产物：带直链的键渲染成播放器，其余键只在都是标量时作为补充。
+ * 补充数据里还有数组/对象时不折叠（那是一份独立业务数据，铺成 JSON 树更易读）。
+ */
+function resolveMediaObject(
+  value: Record<string, any>,
+): null | Partial<ResolvedView> {
+  const mediaUrls: string[] = [];
+  const rest: [string, any][] = [];
+  for (const [key, item] of Object.entries(value)) {
+    const found = collectMediaUrls(item);
+    if (found.length > 0) mediaUrls.push(...found);
+    else if (isMeaningful(item)) rest.push([key, item]);
+  }
+  const urls = [...new Set(mediaUrls)];
+  if (urls.length === 0) return null;
+  const media = getMediaType(urls[0]);
+  if (!media || !urls.every((item) => getMediaType(item) === media))
+    return null;
+  if (rest.some(([, item]) => item !== null && typeof item === 'object')) {
+    return null;
+  }
+  return {
+    kind: 'media',
+    media,
+    rest: rest.length > 0 ? Object.fromEntries(rest) : undefined,
+    urls,
+  };
+}
+
+/** 对象里的正文：取第一个命中的常见键名，重复写到的同值键不再铺一遍 */
+function resolveTextObject(
+  value: Record<string, any>,
+): null | Partial<ResolvedView> {
+  let text = '';
+  for (const key of TEXT_VALUE_KEYS) {
+    const item = value[key];
+    if (typeof item === 'string' && item.trim()) {
+      text = item;
+      break;
+    }
+  }
+  if (!text) return null;
+  const rest = Object.entries(value).filter(
+    ([key, item]) =>
+      !(TEXT_VALUE_KEYS.includes(key) && item === text) && isMeaningful(item),
+  );
+  return {
+    data: text,
+    kind: 'markdown',
+    rest: rest.length > 0 ? Object.fromEntries(rest) : undefined,
+    text,
+  };
+}
+
 const view = computed(() => resolveView(props.value));
 
-/** markdown 正文（仅字符串值走富文本） */
+/** markdown 正文（字符串直接用，对象取提出来的正文键） */
 const markdownText = computed(() =>
-  typeof props.value === 'string' ? props.value : '',
+  typeof props.value === 'string' ? props.value : view.value.text || '',
 );
 
 /** 标量转展示文本（布尔/数字/空） */
@@ -145,27 +233,21 @@ function kvText(item: any): string {
 }
 
 async function copyValue() {
-  const text =
-    typeof props.value === 'string'
-      ? props.value
-      : JSON.stringify(props.value, null, 2);
-  try {
-    await navigator.clipboard.writeText(text);
+  if (await copyToClipboard(toCopyText(props.value))) {
     message.success('已复制到剪贴板');
-  } catch {
+  } else {
     message.error('复制失败');
   }
 }
 
-/** 空值没有可复制的内容，不挂复制按钮 */
-const copyable = computed(() => view.value.kind !== 'empty');
+/** 外层包了复制按钮时，本组件不再重复挂头 */
+const copyable = computed(() => props.showCopy && view.value.kind !== 'empty');
 
 async function copyText(text: string) {
   if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
+  if (await copyToClipboard(text)) {
     message.success('已复制地址');
-  } catch {
+  } else {
     message.error('复制失败');
   }
 }
@@ -269,6 +351,11 @@ function urlText(url: string): string {
 
       <div v-else class="value-json">
         <VueJsonPretty :data="view.data" :deep="3" :show-length="true" />
+      </div>
+
+      <!-- 主体（播放器/正文）没吃掉的数据不丢，跟在后面按同一口径渲染 -->
+      <div v-if="view.rest" class="value-rest">
+        <OutputValue :show-copy="false" :value="view.rest" />
       </div>
     </div>
   </div>
@@ -425,6 +512,13 @@ function urlText(url: string): string {
   .value-json {
     max-width: 100%;
     overflow-x: auto;
+  }
+
+  .value-rest {
+    width: 100%;
+    padding-top: 6px;
+    margin-top: 6px;
+    border-top: 1px dashed #f0f0f0;
   }
 }
 </style>

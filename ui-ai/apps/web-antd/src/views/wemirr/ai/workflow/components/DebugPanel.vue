@@ -607,10 +607,7 @@ defineExpose({
                 >
                   <div class="trace-item-header">
                     <span class="trace-name">{{ trace.nodeName }}</span>
-                    <a-tag
-                      :color="traceStatusColor(trace.status)"
-                      size="small"
-                    >
+                    <a-tag :color="traceStatusColor(trace.status)" size="small">
                       {{ traceStatusText(trace.status) }}
                     </a-tag>
                   </div>
@@ -733,9 +730,7 @@ defineExpose({
               <!-- 检查点提示 -->
               <div class="breakpoint-hint">
                 <InfoCircleOutlined />
-                <span
-                  >右键点击节点可添加/移除检查点；当前智能体运行时使用检查点继续执行，不支持旧式单步</span
-                >
+                <span>右键点击节点可添加/移除检查点；当前智能体运行时使用检查点继续执行，不支持旧式单步</span>
               </div>
             </div>
           </a-tab-pane>
@@ -787,7 +782,7 @@ defineExpose({
         <a-form-item label="条件表达式">
           <a-input
             v-model:value="editingCondition"
-            :placeholder="'例如: {{start.input}} === \'test\''"
+            placeholder="例如: {{start.input}} === 'test'"
           />
           <div class="condition-help">
             当条件为 true 时在节点边界暂停执行，支持变量引用语法。

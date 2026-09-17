@@ -13,13 +13,14 @@ import type {
   CodeParameterType,
 } from '#/api/ai-workflow/types';
 
+import { reactive, ref, watch } from 'vue';
+
 import {
   DeleteOutlined,
   FullscreenOutlined,
   HolderOutlined,
   PlusOutlined,
 } from '@ant-design/icons-vue';
-import { reactive, ref, watch } from 'vue';
 import draggable from 'vuedraggable';
 
 import { VariableInput } from '../variable-selector';
@@ -38,7 +39,7 @@ const emit = defineEmits<{
 }>();
 
 // 参数类型选项
-const PARAM_TYPE_OPTIONS: { value: CodeParameterType; label: string }[] = [
+const PARAM_TYPE_OPTIONS: { label: string; value: CodeParameterType }[] = [
   { value: 'string', label: '字符串' },
   { value: 'number', label: '数字' },
   { value: 'boolean', label: '布尔值' },
@@ -50,7 +51,7 @@ const PARAM_TYPE_OPTIONS: { value: CodeParameterType; label: string }[] = [
 const formData = reactive<CodeNodeConfig>({
   code: '',
   inputs: [],
-  timeout: 10000,
+  timeout: 10_000,
 });
 
 // 代码全屏编辑弹窗
@@ -62,8 +63,11 @@ watch(
   (config) => {
     Object.assign(formData, {
       code: config.code || '',
-      inputs: (config.inputs || []).map((p) => ({ ...p, id: p.id || genParamId() })),
-      timeout: config.timeout ?? 10000,
+      inputs: (config.inputs || []).map((p) => ({
+        ...p,
+        id: p.id || genParamId(),
+      })),
+      timeout: config.timeout ?? 10_000,
     });
   },
   { immediate: true, deep: true },
@@ -103,14 +107,18 @@ function removeParameter(index: number) {
 function typeHint(type?: CodeParameterType): string {
   switch (type) {
     case 'array':
-    case 'object':
+    case 'object': {
       return '请输入 JSON 字符串，如 [1,2,3] 或 {"a":1}';
-    case 'number':
-      return '请输入数字，执行时自动转换';
-    case 'boolean':
+    }
+    case 'boolean': {
       return '请输入 true / false';
-    default:
+    }
+    case 'number': {
+      return '请输入数字，执行时自动转换';
+    }
+    default: {
       return '字符串直接输入即可';
+    }
   }
 }
 
@@ -126,11 +134,14 @@ function handleChange() {
       name: p.name || '',
       type: (p.type || 'string') as CodeParameterType,
       required: !!p.required,
-      sourceType: ((p.sourceType === 'CONSTANT' ? 'CONSTANT' : 'REFERENCE') as CodeInputSource),
-      sourceVariable: p.sourceType === 'CONSTANT' ? undefined : (p.sourceVariable || ''),
+      sourceType: (p.sourceType === 'CONSTANT'
+        ? 'CONSTANT'
+        : 'REFERENCE') as CodeInputSource,
+      sourceVariable:
+        p.sourceType === 'CONSTANT' ? undefined : p.sourceVariable || '',
       value: p.sourceType === 'CONSTANT' ? p.value : undefined,
     })),
-    timeout: formData.timeout ?? 10000,
+    timeout: formData.timeout ?? 10_000,
   };
   emit('update:config', config);
 }
@@ -160,7 +171,10 @@ function handleChange() {
           </a-button>
         </a-tooltip>
       </div>
-      <div class="form-hint">直接写 import + def 方法；入口函数自动识别：main 优先，无 main 取最后定义的顶层函数</div>
+      <div class="form-hint">
+        直接写 import + def 方法；入口函数自动识别：main 优先，无 main
+        取最后定义的顶层函数
+      </div>
     </a-form-item>
 
     <!-- 代码全屏编辑 -->
@@ -182,8 +196,10 @@ function handleChange() {
           @change="handleChange"
         />
         <div class="form-hint">
-          入口方法通过 kwargs 接收参数（与下方「参数定义」一一对应）；返回值任意类型，
-          节点输出统一为 <code v-pre>{{nodeId.result}}</code>，下游直接引用
+          入口方法通过 kwargs
+          接收参数（与下方「参数定义」一一对应）；返回值任意类型，
+          节点输出统一为 <code v-pre>{{ nodeId.result }}</code
+          >，下游直接引用
         </div>
       </div>
     </a-modal>
@@ -273,7 +289,7 @@ function handleChange() {
                 <VariableInput
                   v-model="param.sourceVariable"
                   :current-node-id="nodeId"
-                  :placeholder="'{{nodeName.output}}'"
+                  placeholder="{{nodeName.output}}"
                   @change="handleChange"
                 />
               </template>
@@ -308,18 +324,21 @@ function handleChange() {
         <ul class="help-list">
           <li>
             入口方法入参通过 <code>kwargs</code> 注入，与「参数定义」一一对应：
-            <code>def main(**kwargs)</code>（无 main 时自动取最后定义的顶层函数）
+            <code>def main(**kwargs)</code>（无 main
+            时自动取最后定义的顶层函数）
           </li>
           <li>
-            支持 <code>import</code> 导包（如 json/math/re/random/collections 等常用库，
-            危险模块拦截）
+            支持 <code>import</code> 导包（如 json/math/re/random/collections
+            等常用库， 危险模块拦截）
           </li>
           <li>
             返回值类型不限，节点输出统一为 <code>{ result: 返回值 }</code>，
-            下游用 <code v-pre>{{codeNodeId.result}}</code> 引用
+            下游用 <code v-pre>{{ codeNodeId.result }}</code> 引用
           </li>
           <li>仅支持 Python；输出限制：字符串 ≤200KB / 数组 ≤100 元素</li>
-          <li>代码统一书写规范：import + def 方法，返回值在入口方法内 return</li>
+          <li>
+            代码统一书写规范：import + def 方法，返回值在入口方法内 return
+          </li>
         </ul>
       </template>
     </a-alert>

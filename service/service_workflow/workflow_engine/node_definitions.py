@@ -360,15 +360,39 @@ def build_node_definitions() -> list[dict]:
         ],
     ))
     defs.append(_def(
-        "TOOL", "工具", "调用动态函数工具或 MCP 工具", "external", "ToolOutlined", "#d46b08",
+        "TOOL", "工具", "调用工具库登记的动态函数工具（Python，与代码节点同一沙箱）", "external",
+        "ToolOutlined", "#d46b08",
         form_component="ToolNodeForm",
-        required_fields=["toolName"],
-        output_variables=["output"],
+        required_fields=["toolId"],
+        output_variables=["result"],
         fields=[
-            _field("mcpServerId", "MCP 服务", "McpServerSelect", "number", False),
-            _field("toolName", "工具", "ToolSelect", "string", True),
-            _field("toolParams", "工具参数", "JsonValueEditor", "object", False, {}),
+            _field("toolId", "工具", "ToolSelect", "number", True, None, "",
+                   "工具库中启用中的动态函数工具（选择后自动列出它的入参）"),
+            _field("inputs", "参数", "CodeParameterList", "array", False, [],
+                   "按工具参数定义绑定：引用上游变量或自定义值，未绑定项回落工具默认值"),
+            _field("timeout", "超时(ms)", "InputNumber", "number", False, None,
+                   "", "留空则取工具登记的超时"),
+            _field("outputVariable", "输出变量名", "Input", "string", False, "result"),
         ],
+        default_config={"inputs": [], "outputVariable": "result"},
+    ))
+    defs.append(_def(
+        "MCP_TOOL", "MCP 工具", "调用 MCP 连接提供的工具", "external",
+        "CloudServerOutlined", "#0e7fa8",
+        form_component="McpNodeForm",
+        required_fields=["mcpServerId", "toolName"],
+        output_variables=["result", "content", "urls"],
+        fields=[
+            _field("mcpServerId", "MCP 连接", "McpServerSelect", "number", True),
+            _field("toolName", "MCP 工具", "McpToolSelect", "string", True,
+                   None, "", "来自所选连接的 tools/list"),
+            _field("inputs", "参数", "CodeParameterList", "array", False, [],
+                   "按工具 inputSchema 绑定：引用上游变量或自定义值"),
+            _field("timeout", "超时(ms)", "InputNumber", "number", False, None,
+                   "", "留空取节点默认超时"),
+            _field("outputVariable", "输出变量名", "Input", "string", False, "result"),
+        ],
+        default_config={"inputs": [], "outputVariable": "result"},
     ))
     return defs
 

@@ -73,7 +73,11 @@ function handleChange() {
     </a-form-item>
 
     <!-- 引用参数：回复参数的值 -->
-    <a-form-item v-if="formData.replyType === 'VARIABLE'" label="引用参数" required>
+    <a-form-item
+      v-if="formData.replyType === 'VARIABLE'"
+      label="引用参数"
+      required
+    >
       <VariableInput
         v-model="formData.variableRef"
         :current-node-id="nodeId"
@@ -81,7 +85,9 @@ function handleChange() {
         class="reply-field"
         @change="handleChange"
       />
-      <div class="field-tip">执行时将回复所选参数的值（对象/数组自动序列化为 JSON）</div>
+      <div class="field-tip">
+        执行时将回复所选参数的值（对象/数组自动序列化为 JSON）
+      </div>
     </a-form-item>
 
     <!-- 自定义文本：回复文本内容 -->
@@ -89,13 +95,15 @@ function handleChange() {
       <VariableInput
         v-model="formData.text"
         :current-node-id="nodeId"
-        :placeholder="'输入回复内容，使用 {{变量}} 引用'"
+        placeholder="输入回复内容，使用 {{变量}} 引用"
         :max-rows="6"
         class="reply-field"
         @change="handleChange"
       />
       <!-- v-pre:{{节点.变量}} 是模板说明文字,不能写成插值(会解析 undefined.变量 报错) -->
-      <div v-pre class="field-tip">支持 {{节点.变量}} 模板引用，未解析的引用渲染为空</div>
+      <div v-pre class="field-tip">
+        支持 {{ 节点.变量 }} 模板引用，未解析的引用渲染为空
+      </div>
     </a-form-item>
 
     <!-- 输出变量名 -->
@@ -114,10 +122,12 @@ function handleChange() {
       <template #description>
         <ul class="help-list">
           <li>
-            <strong>引用参数</strong>：回复所选上游节点参数的值，保持原始类型，对象/数组自动 JSON 序列化
+            <strong>引用参数</strong
+            >：回复所选上游节点参数的值，保持原始类型，对象/数组自动 JSON 序列化
           </li>
           <li>
-            <strong>自定义文本</strong>：回复你输入的文本，可用 <code v-pre>{{ 节点.变量 }}</code> 模板引用
+            <strong>自定义文本</strong>：回复你输入的文本，可用
+            <code v-pre>{{ 节点.变量 }}</code> 模板引用
           </li>
           <li>两者只能选择一种，回复内容会随工作流结果一并返回</li>
         </ul>

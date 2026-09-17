@@ -14,6 +14,7 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   CloseCircleOutlined,
+  CloudServerOutlined,
   CodeOutlined,
   FileTextOutlined,
   FunctionOutlined,
@@ -167,6 +168,7 @@ function getNodeIcon(nodeType: string) {
     LIST_OPERATOR: FunctionOutlined,
     HTTP_REQUEST: ApiOutlined,
     TOOL: FunctionOutlined,
+    MCP_TOOL: CloudServerOutlined,
   };
   return iconMap[nodeType] || FunctionOutlined;
 }

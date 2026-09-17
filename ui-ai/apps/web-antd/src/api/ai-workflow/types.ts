@@ -26,13 +26,14 @@ export type NodeType =
   | 'LIST_OPERATOR' // 列表处理
   | 'LLM' // 大模型
   | 'LOOP' // 循环
+  | 'MCP_TOOL' // MCP 工具
   | 'PARALLEL' // 并行
   | 'PARAMETER_EXTRACTOR' // 结构化提取 Agent
   // 能力节点
   | 'QUESTION_CLASSIFIER' // 分类路由 Agent
+  | 'REPLY' // 指定回复
   | 'START' // 用户输入
   | 'TEMPLATE' // 模板转换
-  | 'REPLY' // 指定回复
   | 'TOOL' // 工具
   // 外部系统节点
   | 'VARIABLE_AGGREGATOR' // 变量聚合
@@ -499,6 +500,9 @@ export interface McpServerOption {
   description?: string;
 }
 
+/**
+ * MCP 工具入参定义行（由 inputSchema 摊平而来，供节点表单渲染参数绑定行）
+ */
 export interface McpToolParameterOption {
   name: string;
   type: string;
@@ -506,10 +510,38 @@ export interface McpToolParameterOption {
   required?: boolean;
 }
 
+/**
+ * MCP tools/list 返回的工具项
+ * 后端原样透传 MCP 协议字段，参数定义在 inputSchema（JSON Schema）里，
+ * 需要前端用 agent/mcp 的 schemaParams 摊平成参数行
+ */
 export interface McpToolOption {
+  server_id?: number;
   name: string;
-  description: string;
-  parameters: McpToolParameterOption[];
+  description?: string;
+  inputSchema?: {
+    properties?: Record<string, any>;
+    required?: string[];
+    type?: string;
+  };
+}
+
+/**
+ * 动态函数工具下拉项（GET /tools/options）
+ * parameters 为工具登记的参数定义，工作流工具节点据此生成绑定行
+ */
+export interface DynamicToolOption {
+  id: number;
+  name: string;
+  description?: string;
+  timeout?: number;
+  parameters?: Array<{
+    default?: any;
+    description?: string;
+    name: string;
+    required?: boolean;
+    type?: string;
+  }>;
 }
 
 // ==================== SSE 事件类型 ====================
@@ -1228,16 +1260,16 @@ export interface VariableAggregatorConfig {
  * 代码参数类型枚举
  */
 export type CodeParameterType =
-  | 'string'
-  | 'number'
-  | 'boolean'
   | 'array'
-  | 'object';
+  | 'boolean'
+  | 'number'
+  | 'object'
+  | 'string';
 
 /**
  * 代码参数来源枚举
  */
-export type CodeInputSource = 'REFERENCE' | 'CONSTANT';
+export type CodeInputSource = 'CONSTANT' | 'REFERENCE';
 
 /**
  * 代码输入参数定义
@@ -1627,16 +1659,40 @@ export interface HttpRequestNodeConfig {
 // ==================== 其他节点配置 ====================
 
 /**
- * 工具节点配置
+ * 工具节点配置 (TOOL)
+ * 调用工具库登记的动态 Python 函数工具，与 CODE 节点同一沙箱口径；
+ * 参数绑定行复用 CodeInputVariable（引用上游变量 / 自定义值），
+ * 未绑定且工具定义里有默认值的参数由后端回落默认值。
+ * 输出为 { [outputVariable]: 返回值 }，默认 {{nodeId.result}}
  */
 export interface ToolNodeConfig {
-  /** MCP服务器ID */
-  mcpServerId?: number;
-  /** 工具名称 */
+  /** 工具ID（工具下拉，启用中的工具） */
+  toolId?: number;
+  /** 工具名称（展示与旧图兼容，toolId 缺失时后端按名称加载） */
   toolName?: string;
-  /** 工具参数 */
-  toolParams?: Record<string, any>;
-  /** 输出变量名 */
+  /** 参数绑定行 */
+  inputs?: CodeInputVariable[];
+  /** 执行超时（毫秒），留空取工具登记的超时 */
+  timeout?: number;
+  /** 输出变量名，默认 result */
+  outputVariable?: string;
+}
+
+/**
+ * MCP 工具节点配置 (MCP_TOOL)
+ * 调用指定 MCP 连接下的某个工具，参数按该工具 inputSchema 生成绑定行。
+ * 输出：result（structuredContent 优先，否则文本 content）/ content / urls
+ */
+export interface McpNodeConfig {
+  /** MCP 连接ID */
+  mcpServerId?: number;
+  /** 工具名称（来自所选连接的 tools/list） */
+  toolName?: string;
+  /** 参数绑定行 */
+  inputs?: CodeInputVariable[];
+  /** 执行超时（毫秒），留空取节点默认超时 */
+  timeout?: number;
+  /** 输出变量名，默认 result */
   outputVariable?: string;
 }
 
@@ -1772,6 +1828,7 @@ export interface NodeConfigMap {
   LIST_OPERATOR: ListOperatorConfig;
   HTTP_REQUEST: HttpRequestNodeConfig;
   TOOL: ToolNodeConfig;
+  MCP_TOOL: McpNodeConfig;
 }
 
 /**

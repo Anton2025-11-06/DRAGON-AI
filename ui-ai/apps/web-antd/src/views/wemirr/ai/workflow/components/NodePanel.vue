@@ -13,6 +13,7 @@ import {
   ApiOutlined,
   BookOutlined,
   BranchesOutlined,
+  CloudServerOutlined,
   CodeOutlined,
   CommentOutlined,
   EditOutlined,
@@ -105,6 +106,7 @@ const iconComponents: Record<string, any> = {
   // 外部系统图标
   ApiOutlined,
   ToolOutlined,
+  CloudServerOutlined,
 };
 
 /**

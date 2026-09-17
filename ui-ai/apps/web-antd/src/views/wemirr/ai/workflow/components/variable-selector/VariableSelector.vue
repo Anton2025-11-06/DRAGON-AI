@@ -1,117 +1,3 @@
-<template>
-  <a-popover
-    v-model:open="popoverVisible"
-    trigger="click"
-    placement="bottomLeft"
-    :overlay-style="{ width: '320px' }"
-  >
-    <template #content>
-      <div class="variable-selector">
-        <!-- 搜索框 -->
-        <a-input-search
-          v-model:value="searchText"
-          placeholder="搜索变量"
-          size="small"
-          allow-clear
-          class="search-input"
-        />
-
-        <!-- 变量列表 -->
-        <div class="variable-list">
-          <template v-if="filteredNodes.length > 0">
-            <div
-              v-for="node in filteredNodes"
-              :key="node.id"
-              class="node-group"
-            >
-              <!-- 节点头部 -->
-              <div class="node-header" @click="toggleNodeExpand(node.id)">
-                <component :is="getNodeIcon(node.type)" class="node-icon" />
-                <span class="node-name">{{ node.label || node.id }}</span>
-                <span class="variable-count">{{ node.variables.length }}</span>
-                <RightOutlined
-                  class="expand-icon"
-                  :class="{ expanded: expandedNodes.has(node.id) }"
-                />
-              </div>
-
-              <!-- 变量列表 -->
-              <div v-show="expandedNodes.has(node.id)" class="variables">
-                <div
-                  v-for="variable in node.variables"
-                  :key="variable.name"
-                  class="variable-item"
-                >
-                  <div
-                    class="variable-row"
-                    @click="selectVariable(node, variable)"
-                  >
-                    <span class="var-icon">{x}</span>
-                    <span class="var-name">{{ variable.name }}</span>
-                    <a-tag size="small" :color="getTypeColor(variable.type)">
-                      {{ variable.type }}
-                    </a-tag>
-                    <span
-                      v-if="enablePath"
-                      class="path-toggle"
-                      :class="{
-                        active: editingPathKey === pathRowKey(node, variable),
-                      }"
-                      @click.stop="togglePathEdit(node, variable)"
-                    >
-                      路径
-                    </span>
-                  </div>
-                  <div
-                    v-if="editingPathKey === pathRowKey(node, variable)"
-                    class="path-editor"
-                    @click.stop
-                  >
-                    <div class="path-editor-row">
-                      <a-input
-                        v-model:value="pathDraft[editingPathKey]"
-                        size="small"
-                        placeholder="子路径，如 data.list[0]"
-                        @press-enter="insertWithPath(node, variable)"
-                      />
-                      <a-button
-                        size="small"
-                        type="primary"
-                        @click="insertWithPath(node, variable)"
-                      >
-                        插入
-                      </a-button>
-                    </div>
-                    <div class="path-hint">
-                      {{ pathHintText(node, variable) }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- 空状态 -->
-          <div v-else class="empty-state">
-            <InboxOutlined class="empty-icon" />
-            <span class="empty-text">
-              {{ searchText ? '未找到匹配的变量' : '暂无可用变量' }}
-            </span>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- 触发按钮 -->
-    <slot>
-      <a-button type="text" size="small" class="trigger-btn">
-        <template #icon><PlusOutlined /></template>
-        {{ buttonText }}
-      </a-button>
-    </slot>
-  </a-popover>
-</template>
-
 <script setup lang="ts">
 /**
  * VariableSelector 变量选择器组件
@@ -119,29 +5,33 @@
  * Requirements: 7.7
  */
 import type { Component } from 'vue';
-import type { NodeType, ExtendedVariableType } from '#/api/ai-workflow/types';
+
+import type { ExtendedVariableType, NodeType } from '#/api/ai-workflow/types';
 
 import { computed, reactive, ref, watch } from 'vue';
+
 import {
-  PlusOutlined,
-  RightOutlined,
-  InboxOutlined,
-  PlayCircleOutlined,
-  StopOutlined,
-  RobotOutlined,
-  BookOutlined,
-  ToolOutlined,
-  UserOutlined,
-  BranchesOutlined,
-  SyncOutlined,
   ApartmentOutlined,
   ApiOutlined,
+  BookOutlined,
+  BranchesOutlined,
+  CloudServerOutlined,
   CodeOutlined,
   CommentOutlined,
   DatabaseOutlined,
+  InboxOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  RightOutlined,
+  RobotOutlined,
+  StopOutlined,
+  SyncOutlined,
+  ToolOutlined,
+  UserOutlined,
 } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
+
 import {
   buildWorkflowVariableReference,
   normalizeVariablePathSuffix,
@@ -230,6 +120,7 @@ const iconComponents: Record<string, Component> = {
   LLM: RobotOutlined,
   KNOWLEDGE_RETRIEVAL: BookOutlined,
   TOOL: ToolOutlined,
+  MCP_TOOL: CloudServerOutlined,
   AGENT: UserOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
@@ -416,78 +307,16 @@ function getNodeOutputVariables(
   const variables: NodeVariable[] = [];
 
   switch (nodeType) {
-    case 'START':
-      // START 节点的输出是其定义的输入字段
-      if (config.fields && Array.isArray(config.fields)) {
-        config.fields.forEach((field: any) => {
-          variables.push({
-            name: field.name,
-            type: mapInputFieldType(field.type),
-            description: field.description || field.label,
-          });
-        });
-      }
-      break;
-
-    case 'LLM':
+    case 'AGENT': {
       variables.push({
-        name: config.outputVariable || 'output',
+        name: config.outputVariable || 'response',
         type: 'string',
-        description: 'LLM 输出内容',
-      });
-      if (config.structuredOutput?.enabled) {
-        variables.push({
-          name: 'structured_output',
-          type: 'object',
-          description: '结构化输出',
-        });
-      }
-      break;
-
-    case 'KNOWLEDGE_RETRIEVAL':
-      variables.push({
-        name: config.outputVariable || 'results',
-        type: 'array',
-        description: '检索结果列表',
+        description: '智能体响应',
       });
       break;
+    }
 
-    case 'QUESTION_CLASSIFIER':
-      variables.push({
-        name: 'category',
-        type: 'string',
-        description: '分类结果',
-      });
-      variables.push({
-        name: 'selectedBranch',
-        type: 'string',
-        description: '选中的分支ID',
-      });
-      break;
-
-    case 'PARAMETER_EXTRACTOR':
-      if (config.parameters && Array.isArray(config.parameters)) {
-        config.parameters.forEach((param: any) => {
-          variables.push({
-            name: param.name,
-            type: param.type || 'string',
-            description: param.description,
-          });
-        });
-      }
-      variables.push({
-        name: '__is_success',
-        type: 'boolean',
-        description: '提取是否成功',
-      });
-      variables.push({
-        name: '__reason',
-        type: 'string',
-        description: '失败原因',
-      });
-      break;
-
-    case 'CODE':
+    case 'CODE': {
       // 代码节点输出固定为 { result: <返回值> }（参照 MaxKB ToolExecutor）
       variables.push({
         name: 'result',
@@ -495,82 +324,9 @@ function getNodeOutputVariables(
         description: '代码执行返回值（类型不限）',
       });
       break;
+    }
 
-    case 'HTTP_REQUEST':
-      variables.push({
-        name: config.outputVariable || 'response',
-        type: 'object',
-        description: 'HTTP 响应',
-      });
-      variables.push({
-        name: 'status',
-        type: 'number',
-        description: 'HTTP 状态码',
-      });
-      variables.push({
-        name: 'headers',
-        type: 'object',
-        description: '响应头',
-      });
-      variables.push({
-        name: 'body',
-        type: 'object',
-        description: '响应体',
-      });
-      break;
-
-    case 'ITERATION':
-      variables.push({
-        name: config.outputVariable || 'results',
-        type: 'array',
-        description: '迭代结果数组',
-      });
-      // 迭代内部变量
-      variables.push({
-        name: 'item',
-        type: 'object',
-        description: '当前迭代元素',
-      });
-      variables.push({
-        name: 'index',
-        type: 'number',
-        description: '当前迭代索引',
-      });
-      break;
-
-    case 'VARIABLE_AGGREGATOR':
-      if (config.groups && Array.isArray(config.groups)) {
-        config.groups.forEach((group: any) => {
-          // 未填写输出名的聚合组属于待配置状态，不作为可引用变量输出
-          if (!group.outputVariable) {
-            return;
-          }
-          variables.push({
-            name: group.outputVariable,
-            type: group.variableType || 'object',
-            description: '聚合变量',
-          });
-        });
-      }
-      break;
-
-    case 'TEMPLATE':
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'string',
-        description: '模板渲染结果',
-      });
-      break;
-
-    case 'REPLY':
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'string',
-        description: '回复内容',
-      });
-      break;
-
-    case 'DOC_EXTRACTOR':
+    case 'DOC_EXTRACTOR': {
       variables.push({
         name: config.outputVariable || 'text',
         type: 'string',
@@ -584,6 +340,63 @@ function getNodeOutputVariables(
         });
       }
       break;
+    }
+
+    case 'HTTP_REQUEST': {
+      variables.push(
+        {
+          name: config.outputVariable || 'response',
+          type: 'object',
+          description: 'HTTP 响应',
+        },
+        {
+          name: 'status',
+          type: 'number',
+          description: 'HTTP 状态码',
+        },
+        {
+          name: 'headers',
+          type: 'object',
+          description: '响应头',
+        },
+        {
+          name: 'body',
+          type: 'object',
+          description: '响应体',
+        },
+      );
+      break;
+    }
+
+    case 'ITERATION': {
+      variables.push(
+        {
+          name: config.outputVariable || 'results',
+          type: 'array',
+          description: '迭代结果数组',
+        },
+        {
+          name: 'item',
+          type: 'object',
+          description: '当前迭代元素',
+        },
+        {
+          name: 'index',
+          type: 'number',
+          description: '当前迭代索引',
+        },
+      );
+      break;
+    }
+
+    case 'KNOWLEDGE_RETRIEVAL': {
+      variables.push({
+        name: config.outputVariable || 'results',
+        type: 'array',
+        description: '检索结果列表',
+      });
+      break;
+    }
 
     case 'LIST_OPERATOR': {
       // 默认输出名与后端 ListOperatorNodeExecutor（cfg.outputVariable or "output"）保持一致
@@ -602,7 +415,145 @@ function getNodeOutputVariables(
       break;
     }
 
-    case 'VARIABLE_ASSIGNER':
+    case 'LLM': {
+      variables.push({
+        name: config.outputVariable || 'output',
+        type: 'string',
+        description: 'LLM 输出内容',
+      });
+      if (config.structuredOutput?.enabled) {
+        variables.push({
+          name: 'structured_output',
+          type: 'object',
+          description: '结构化输出',
+        });
+      }
+      break;
+    }
+
+    case 'MCP_TOOL': {
+      // 与后端 McpToolNodeExecutor 输出对齐：主变量 + content/urls
+      variables.push(
+        {
+          name: config.outputVariable || 'result',
+          type: 'object',
+          description: 'MCP 工具结果（结构化输出优先，否则文本内容）',
+        },
+        {
+          name: 'content',
+          type: 'string',
+          description: 'MCP 返回的文本内容',
+        },
+        {
+          name: 'urls',
+          type: 'array',
+          description: '图片/音频等资源链接',
+        },
+      );
+      break;
+    }
+
+    case 'PARAMETER_EXTRACTOR': {
+      if (config.parameters && Array.isArray(config.parameters)) {
+        config.parameters.forEach((param: any) => {
+          variables.push({
+            name: param.name,
+            type: param.type || 'string',
+            description: param.description,
+          });
+        });
+      }
+      variables.push(
+        {
+          name: '__is_success',
+          type: 'boolean',
+          description: '提取是否成功',
+        },
+        {
+          name: '__reason',
+          type: 'string',
+          description: '失败原因',
+        },
+      );
+      break;
+    }
+
+    case 'QUESTION_CLASSIFIER': {
+      variables.push(
+        {
+          name: 'category',
+          type: 'string',
+          description: '分类结果',
+        },
+        {
+          name: 'selectedBranch',
+          type: 'string',
+          description: '选中的分支ID',
+        },
+      );
+      break;
+    }
+
+    case 'REPLY': {
+      variables.push({
+        name: config.outputVariable || 'output',
+        type: 'string',
+        description: '回复内容',
+      });
+      break;
+    }
+
+    case 'START': {
+      // START 节点的输出是其定义的输入字段
+      if (config.fields && Array.isArray(config.fields)) {
+        config.fields.forEach((field: any) => {
+          variables.push({
+            name: field.name,
+            type: mapInputFieldType(field.type),
+            description: field.description || field.label,
+          });
+        });
+      }
+      break;
+    }
+
+    case 'TEMPLATE': {
+      variables.push({
+        name: config.outputVariable || 'output',
+        type: 'string',
+        description: '模板渲染结果',
+      });
+      break;
+    }
+
+    case 'TOOL': {
+      // 工具节点与代码节点同口径，输出 { [outputVariable]: 返回值 }，默认 result
+      variables.push({
+        name: config.outputVariable || 'result',
+        type: 'object',
+        description: '工具执行结果',
+      });
+      break;
+    }
+
+    case 'VARIABLE_AGGREGATOR': {
+      if (config.groups && Array.isArray(config.groups)) {
+        config.groups.forEach((group: any) => {
+          // 未填写输出名的聚合组属于待配置状态，不作为可引用变量输出
+          if (!group.outputVariable) {
+            return;
+          }
+          variables.push({
+            name: group.outputVariable,
+            type: group.variableType || 'object',
+            description: '聚合变量',
+          });
+        });
+      }
+      break;
+    }
+
+    case 'VARIABLE_ASSIGNER': {
       if (config.assignments && Array.isArray(config.assignments)) {
         config.assignments.forEach((assignment: any) => {
           variables.push({
@@ -613,30 +564,16 @@ function getNodeOutputVariables(
         });
       }
       break;
+    }
 
-    case 'TOOL':
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'object',
-        description: '工具执行结果',
-      });
-      break;
-
-    case 'AGENT':
-      variables.push({
-        name: config.outputVariable || 'response',
-        type: 'string',
-        description: '智能体响应',
-      });
-      break;
-
-    default:
+    default: {
       // 默认输出
       variables.push({
         name: 'output',
         type: 'object',
         description: '节点输出',
       });
+    }
   }
 
   return variables;
@@ -772,6 +709,120 @@ defineExpose({
   },
 });
 </script>
+
+<template>
+  <a-popover
+    v-model:open="popoverVisible"
+    trigger="click"
+    placement="bottomLeft"
+    :overlay-style="{ width: '320px' }"
+  >
+    <template #content>
+      <div class="variable-selector">
+        <!-- 搜索框 -->
+        <a-input-search
+          v-model:value="searchText"
+          placeholder="搜索变量"
+          size="small"
+          allow-clear
+          class="search-input"
+        />
+
+        <!-- 变量列表 -->
+        <div class="variable-list">
+          <template v-if="filteredNodes.length > 0">
+            <div
+              v-for="node in filteredNodes"
+              :key="node.id"
+              class="node-group"
+            >
+              <!-- 节点头部 -->
+              <div class="node-header" @click="toggleNodeExpand(node.id)">
+                <component :is="getNodeIcon(node.type)" class="node-icon" />
+                <span class="node-name">{{ node.label || node.id }}</span>
+                <span class="variable-count">{{ node.variables.length }}</span>
+                <RightOutlined
+                  class="expand-icon"
+                  :class="{ expanded: expandedNodes.has(node.id) }"
+                />
+              </div>
+
+              <!-- 变量列表 -->
+              <div v-show="expandedNodes.has(node.id)" class="variables">
+                <div
+                  v-for="variable in node.variables"
+                  :key="variable.name"
+                  class="variable-item"
+                >
+                  <div
+                    class="variable-row"
+                    @click="selectVariable(node, variable)"
+                  >
+                    <span class="var-icon">{x}</span>
+                    <span class="var-name">{{ variable.name }}</span>
+                    <a-tag size="small" :color="getTypeColor(variable.type)">
+                      {{ variable.type }}
+                    </a-tag>
+                    <span
+                      v-if="enablePath"
+                      class="path-toggle"
+                      :class="{
+                        active: editingPathKey === pathRowKey(node, variable),
+                      }"
+                      @click.stop="togglePathEdit(node, variable)"
+                    >
+                      路径
+                    </span>
+                  </div>
+                  <div
+                    v-if="editingPathKey === pathRowKey(node, variable)"
+                    class="path-editor"
+                    @click.stop
+                  >
+                    <div class="path-editor-row">
+                      <a-input
+                        v-model:value="pathDraft[editingPathKey]"
+                        size="small"
+                        placeholder="子路径，如 data.list[0]"
+                        @press-enter="insertWithPath(node, variable)"
+                      />
+                      <a-button
+                        size="small"
+                        type="primary"
+                        @click="insertWithPath(node, variable)"
+                      >
+                        插入
+                      </a-button>
+                    </div>
+                    <div class="path-hint">
+                      {{ pathHintText(node, variable) }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 空状态 -->
+          <div v-else class="empty-state">
+            <InboxOutlined class="empty-icon" />
+            <span class="empty-text">
+              {{ searchText ? '未找到匹配的变量' : '暂无可用变量' }}
+            </span>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- 触发按钮 -->
+    <slot>
+      <a-button type="text" size="small" class="trigger-btn">
+        <template #icon><PlusOutlined /></template>
+        {{ buttonText }}
+      </a-button>
+    </slot>
+  </a-popover>
+</template>
 
 <style scoped lang="less">
 .variable-selector {

@@ -1,62 +1,21 @@
-<template>
-  <div class="variable-input" :class="{ focused: isFocused, disabled }">
-    <!-- 输入区域 -->
-    <div class="input-wrapper">
-      <div
-        ref="editorRef"
-        class="editor"
-        :contenteditable="!disabled"
-        :placeholder="placeholder"
-        @input="handleInput"
-        @focus="handleFocus"
-        @blur="handleBlur"
-        @keydown="handleKeydown"
-        @paste="handlePaste"
-      />
-    </div>
-
-    <!-- 变量选择器按钮 -->
-    <div class="input-actions">
-      <VariableSelector
-        :current-node-id="currentNodeId"
-        :filter-types="filterTypes"
-        :enable-path="enablePath"
-        button-text=""
-        @select="handleVariableSelect"
-      >
-        <a-tooltip title="插入变量">
-          <a-button
-            type="text"
-            size="small"
-            :disabled="disabled"
-            class="var-btn"
-          >
-            <template #icon>
-              <CodeOutlined />
-            </template>
-          </a-button>
-        </a-tooltip>
-      </VariableSelector>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
+import type { NodeVariable, NodeWithVariables } from './VariableSelector.vue';
+
 /**
  * VariableInput 变量输入组件
  * 支持文本和变量混合输入，变量高亮显示
  * Requirements: 7.4
  */
 import type { ExtendedVariableType } from '#/api/ai-workflow/types';
-import type { NodeVariable, NodeWithVariables } from './VariableSelector.vue';
 
 import { onMounted, ref, watch } from 'vue';
+
 import { CodeOutlined } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
-import VariableSelector from './VariableSelector.vue';
 import { formatWorkflowVariableReferenceLabel } from './variable-reference';
+import VariableSelector from './VariableSelector.vue';
 
 // ==================== Props & Emits ====================
 
@@ -113,11 +72,11 @@ const VARIABLE_REGEX = /\{\{([^}]+)\}\}/g;
 
 function escapeHtml(text: string): string {
   return text
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 function resolveNodeLabel(nodeId: string): string | undefined {
@@ -138,7 +97,7 @@ function textToHtml(text: string): string {
   const escaped = escapeHtml(text);
 
   // 高亮变量引用
-  return escaped.replace(VARIABLE_REGEX, (_match, varPath) => {
+  return escaped.replaceAll(VARIABLE_REGEX, (_match, varPath) => {
     const label = formatWorkflowVariableReferenceLabel(
       varPath,
       resolveNodeLabel,
@@ -166,7 +125,7 @@ function htmlToText(html: string): string {
       const element = node as HTMLElement;
       if (element.classList.contains('variable-tag')) {
         // 对于变量标签，只提取 data-variable 属性，跳过子节点
-        const varPath = element.getAttribute('data-variable');
+        const varPath = element.dataset.variable;
         result += `{{${varPath}}}`;
         // 不遍历子节点，避免重复
         return;
@@ -236,7 +195,7 @@ function insertAtCursor(text: string) {
   // 插入节点
   const fragment = document.createDocumentFragment();
   while (temp.firstChild) {
-    fragment.appendChild(temp.firstChild);
+    fragment.append(temp.firstChild);
   }
 
   range.insertNode(fragment);
@@ -302,7 +261,9 @@ function handlePaste(event: ClipboardEvent) {
   if (!text) return;
 
   // 单行模式下移除换行
-  const processedText = props.multiline ? text : text.replace(/[\r\n]/g, ' ');
+  const processedText = props.multiline
+    ? text
+    : text.replaceAll(/[\r\n]/g, ' ');
 
   insertAtCursor(processedText);
 }
@@ -355,6 +316,49 @@ defineExpose({
   setValue: setEditorContent,
 });
 </script>
+
+<template>
+  <div class="variable-input" :class="{ focused: isFocused, disabled }">
+    <!-- 输入区域 -->
+    <div class="input-wrapper">
+      <div
+        ref="editorRef"
+        class="editor"
+        :contenteditable="!disabled"
+        :placeholder="placeholder"
+        @input="handleInput"
+        @focus="handleFocus"
+        @blur="handleBlur"
+        @keydown="handleKeydown"
+        @paste="handlePaste"
+      ></div>
+    </div>
+
+    <!-- 变量选择器按钮 -->
+    <div class="input-actions">
+      <VariableSelector
+        :current-node-id="currentNodeId"
+        :filter-types="filterTypes"
+        :enable-path="enablePath"
+        button-text=""
+        @select="handleVariableSelect"
+      >
+        <a-tooltip title="插入变量">
+          <a-button
+            type="text"
+            size="small"
+            :disabled="disabled"
+            class="var-btn"
+          >
+            <template #icon>
+              <CodeOutlined />
+            </template>
+          </a-button>
+        </a-tooltip>
+      </VariableSelector>
+    </div>
+  </div>
+</template>
 
 <style scoped lang="less">
 .variable-input {

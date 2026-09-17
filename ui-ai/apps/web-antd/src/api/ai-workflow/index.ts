@@ -5,6 +5,7 @@
 
 import type {
   AiModelOption,
+  DynamicToolOption,
   KnowledgeBaseOption,
   McpServerOption,
   McpToolOption,
@@ -26,7 +27,6 @@ import type {
 import type { PageResult } from '#/api/common';
 
 import { resolveApiUrl } from '#/api/helper';
-
 import { requestClient } from '#/api/request';
 
 import { MODEL_TYPE_TEXT } from './const';
@@ -77,19 +77,34 @@ export function listKnowledgeBases() {
   );
 }
 
+/**
+ * 工作流 MCP 节点的连接下拉：只取「启用」状态的连接
+ * 后端 POST /mcp-server/page 返回 data = { total, items: [...] }（经 requestClient 剥壳后
+ * 直接是 items 分页体），故解析时以 items 为准，兼容 records/裸数组等历史形态。
+ */
 export function listMcpServers() {
   return requestClient
-    .post<McpServerOption[] | { records?: McpServerOption[] }>(
-      `${BASE_URL}/mcp-server/page`,
-      { current: 1, size: 100 },
-    )
-    .then((resp) => (Array.isArray(resp) ? resp : resp.records || []));
+    .post<
+      | McpServerOption[]
+      | { items?: McpServerOption[]; records?: McpServerOption[] }
+    >(`${BASE_URL}/mcp-server/page`, { current: 1, size: 100, status: true })
+    .then((resp) =>
+      Array.isArray(resp) ? resp : resp.items || resp.records || [],
+    );
 }
 
 export function listMcpServerTools(serverId: number | string) {
   return requestClient.get<McpToolOption[]>(
     `${BASE_URL}/mcp-server/${serverId}/tools`,
   );
+}
+
+/**
+ * 动态函数工具下拉（工具库中启用中的 Python 函数工具）
+ * 返回项带 parameters 参数定义，工作流工具节点据此生成参数绑定行
+ */
+export function listDynamicTools() {
+  return requestClient.get<DynamicToolOption[]>(`${BASE_URL}/tools/options`);
 }
 
 /**
@@ -177,15 +192,19 @@ export function createWorkflowFromTemplate(
 
 /**
  * 异步执行工作流（需求 4:后台已取消同步 /execute,统一 execute-async 投递）
- * 返回 executionId,状态/结果通过 SSE 订阅或 GET 执行详情轮询获取
+ * 返回 executionId,状态/结果通过 SSE 订阅或 GET 执行详情轮询获取。
+ * 传了 apiKey 就加 X-Workflow-Token 请求头，走网关的 API Key 模式（Redis 校验 Key
+ * + 按 Key 配置的 QPS 限流）；不传走登录态直转。
  */
 export function executeWorkflowAsync(
   workflowId: number | string,
   data: WorkflowExecutionReq,
+  apiKey?: string,
 ) {
   return requestClient.post<string>(
     `${BASE_URL}/workflow-executions/workflows/${workflowId}/execute-async`,
     data,
+    { headers: apiKey ? { 'X-Workflow-Token': apiKey } : undefined },
   );
 }
 
@@ -457,9 +476,7 @@ export interface WorkflowFileUpload {
 /**
  * 上传单个文件（开始节点文件类型参数、文档提取器入参均先由此拿到 url）
  */
-export function uploadWorkflowFile(
-  file: File,
-): Promise<WorkflowFileUpload> {
+export function uploadWorkflowFile(file: File): Promise<WorkflowFileUpload> {
   const formData = new FormData();
   formData.append('file', file);
   return requestClient.post<WorkflowFileUpload>(
@@ -531,6 +548,17 @@ export interface ApiKeyCreateResp {
   workflowId: number;
 }
 
+/**
+ * 编辑 API Key：只传要改的字段
+ *
+ * expireTime 传 null 是「改为永不过期」，不传是「不改」，两者语义不同。
+ */
+export interface ApiKeyUpdateReq {
+  name?: string;
+  rateLimit?: number;
+  expireTime?: null | string;
+}
+
 export interface ApiKeyListResp {
   id: number;
   name: string;
@@ -576,6 +604,13 @@ export function updateApiKeyStatus(id: number, status: string): Promise<void> {
       params: { status },
     },
   );
+}
+
+/**
+ * 编辑 API Key（重命名 / 改 QPS / 改过期时间）
+ */
+export function updateApiKey(id: number, req: ApiKeyUpdateReq): Promise<void> {
+  return requestClient.put<void>(`${BASE_URL}/workflow-api-keys/${id}`, req);
 }
 
 /**

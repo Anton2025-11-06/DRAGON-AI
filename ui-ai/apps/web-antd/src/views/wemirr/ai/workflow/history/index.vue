@@ -8,9 +8,9 @@ import type { WorkflowExecutionResp } from '#/api/ai-workflow/types';
 import { computed, defineComponent, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
-import { ArrowLeftOutlined, HistoryOutlined } from '@ant-design/icons-vue';
 import { useFs } from '@fast-crud/fast-crud';
 import { message } from 'ant-design-vue';
+
 import { getExecution, getWorkflowDetail } from '#/api/ai-workflow';
 
 import ExecutionDetailModal from './components/ExecutionDetailModal.vue';

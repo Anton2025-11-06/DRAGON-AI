@@ -2,6 +2,7 @@
 """工作流 API Schema（请求/响应模型，字段与前端 types.ts 一一对应）。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -55,6 +56,17 @@ class ApiKeyCreateReq(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     rateLimit: int = Field(0, ge=0, description="每秒调用上限(QPS) 0=不限",)
     expireDays: Optional[int] = Field(None, ge=1, le=3650, description="有效天数")
+
+
+class ApiKeyUpdateReq(BaseModel):
+    """编辑 API Key：只改传了的字段。
+
+    expireTime 区分两种语义：不传=不改；显式传 null=改为永不过期
+    （靠 model_fields_set 判定是否传过，所以不能只判 None）。
+    """
+    name: Optional[str] = Field(None, min_length=1, max_length=128, description="备注名称")
+    rateLimit: Optional[int] = Field(None, ge=0, description="每秒调用上限(QPS) 0=不限")
+    expireTime: Optional[datetime] = Field(None, description="过期时间，null=永不过期")
 
 
 # ==================== 内部 DTO（service → router） ====================

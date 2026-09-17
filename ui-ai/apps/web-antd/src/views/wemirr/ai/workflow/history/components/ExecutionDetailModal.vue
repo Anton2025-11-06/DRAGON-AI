@@ -31,7 +31,7 @@ const emit = defineEmits<{
 const loading = ref(false);
 
 // 状态配置
-const statusConfig: Record<string, { color: string; text: string; icon: any }> =
+const statusConfig: Record<string, { color: string; icon: any; text: string }> =
   {
     PENDING: { color: 'default', text: '等待中', icon: ClockCircleOutlined },
     RUNNING: { color: 'processing', text: '执行中', icon: LoadingOutlined },
@@ -52,8 +52,8 @@ function formatDuration(ms?: number): string {
   // 0 是真实耗时（轻量节点常 sub-ms），不能当作缺数据返回 '-'
   if (ms === null || ms === undefined) return '-';
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60000).toFixed(1)}min`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}min`;
 }
 
 function formatTime(time?: string): string {
@@ -209,7 +209,7 @@ function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
         </div>
 
         <!-- 节点执行时间线 -->
-        <div v-if="nodeExecutionList.length" class="timeline-section">
+        <div v-if="nodeExecutionList.length > 0" class="timeline-section">
           <h4>节点执行详情</h4>
           <Timeline>
             <Timeline.Item

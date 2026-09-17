@@ -1,9 +1,7 @@
 import type {
-  AddReq,
   CreateCrudOptionsProps,
   CreateCrudOptionsRet,
   DelReq,
-  EditReq,
 } from '@fast-crud/fast-crud';
 
 import { h } from 'vue';
@@ -14,13 +12,17 @@ import { message } from 'ant-design-vue';
 
 import { hiddenIdColumn } from '#/plugin/fast-crud/shared';
 
-import CodeEditor from '../skill/components/code-editor.vue';
 import * as api from './api';
 
+/**
+ * 工具列表配置
+ * 新增/编辑走自定义弹窗（ToolFormModal，排版对齐工作流代码节点，含「按定义测试」），
+ * 因此这里只保留列表列与删除/状态切换，不再配置 fast-crud 内置表单。
+ */
 export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
-  const { openTestModal, toggleStatus } = props.context || {};
+  const { openFormModal, openTestModal, toggleStatus } = props.context || {};
 
   return {
     crudOptions: {
@@ -28,31 +30,16 @@ export default function createCrudOptions(
         pageRequest: async (query: any) => {
           return await api.PageList(query);
         },
-        transformQuery: ({ page, form, sort }: any) => {
-          const order =
-            sort === null ? {} : { column: sort.prop, asc: sort.asc };
-          return {
-            current: page.currentPage ?? 1,
-            size: page.pageSize ?? 10,
-            ...form,
-            ...order,
-          };
-        },
-        // 编辑弹窗打开时拉取完整详情（列表接口只返回源码摘要）；
-        // 注意：fast-crud 在 openAdd 时也会调用 infoRequest，此时 row 不存在，需守卫
-        infoRequest: async ({ row }: any) => {
-          if (!row || row.id === undefined || row.id === null) {
-            return {};
-          }
-          return await api.GetDetail(row.id);
-        },
-        addRequest: async ({ form }: AddReq) => await api.AddObj(form),
-        editRequest: async ({ form }: EditReq) =>
-          await api.UpdateObj(form.id, form),
         delRequest: async ({ row }: DelReq) => await api.DelObj(row.id),
       },
-      toolbar: {
-        buttons: {},
+      actionbar: {
+        buttons: {
+          add: {
+            click() {
+              openFormModal?.(null);
+            },
+          },
+        },
       },
       columns: {
         id: hiddenIdColumn,
@@ -60,76 +47,31 @@ export default function createCrudOptions(
           title: '工具名称',
           type: 'text',
           search: { show: true },
-          form: {
-            rules: [{ required: true, message: '请输入工具名称' }],
-            component: { placeholder: '请输入工具名称' },
-          },
           column: { width: 180, ellipsis: true },
         },
         description: {
           title: '描述',
-          type: 'textarea',
-          search: { show: false },
-          form: {
-            col: { span: 24 },
-            component: {
-              placeholder: '工具用途说明（将展示给 AI 编排使用）',
-              rows: 2,
-              maxlength: 500,
-              showCount: true,
-            },
-          },
-          column: { width: 260, ellipsis: true },
+          type: 'text',
+          column: { width: 240, ellipsis: true },
         },
         function_code: {
-          title: '函数源码',
-          // 注意：fast-crud 渲染表单组件看 component.name（缺省为 a-input），
-          // component.is 只是透传 prop 不会参与组件选择
-          form: {
-            col: { span: 24 },
-            wrapperCol: { span: 24 },
-            rules: [{ required: true, message: '请输入函数源码' }],
-            component: {
-              name: CodeEditor,
-              is: CodeEditor,
-              vModel: 'command',
-              style: { height: '300px' },
-            },
-            helper:
-              '定义 run()/main() 函数（与工作流 CODE 节点一致），测试时将以关键字参数调用；危险内建（文件IO/网络）已被禁用',
-          },
-          column: {
-            width: 300,
-            ellipsis: true,
-            title: '源码预览',
-          },
+          title: '源码预览',
+          type: 'text',
+          column: { width: 300, ellipsis: true },
         },
-        parameters_schema: {
-          title: '参数说明',
-          type: 'textarea',
-          form: {
-            col: { span: 24 },
-            component: {
-              placeholder:
-                '{"parameters": [{"name": "a", "type": "number", "required": true, "default": 1}]}',
-              rows: 3,
-            },
-            helper:
-              'JSON 格式：{"parameters": [{"name":"a","type":"number","required":true,"default":1,"description":"说明"}]}，测试弹窗按此渲染动态表单；也兼容 {"example": {…}} 旧格式',
-          },
-          column: { show: false },
+        timeout: {
+          title: '超时(ms)',
+          type: 'text',
+          column: { width: 96 },
         },
         status: {
           title: '启用状态',
           type: 'dict-switch',
           search: { show: true },
           dict: statusDict(),
-          form: {
-            value: true,
-            component: {
-              checkedChildren: '启用',
-              unCheckedChildren: '禁用',
-            },
+          component: {
+            checkedChildren: '启用',
+            unCheckedChildren: '禁用',
           },
           valueChange({ row, value }: any) {
             if (row?.id !== undefined) {
@@ -141,13 +83,11 @@ export default function createCrudOptions(
         create_time: {
           title: '创建时间',
           type: 'text',
-          form: { show: false },
           column: { width: 160 },
         },
         update_time: {
           title: '更新时间',
           type: 'text',
-          form: { show: false },
           column: { width: 160 },
         },
       },
@@ -160,7 +100,7 @@ export default function createCrudOptions(
             type: 'link',
             size: 'small',
             icon: () => h(PlayCircleOutlined),
-            title: '在受限环境中运行函数',
+            title: '在受限沙箱中运行函数',
             show: true,
             order: 0,
             click({ row }: any) {
@@ -174,6 +114,9 @@ export default function createCrudOptions(
           edit: {
             text: '编辑',
             order: 1,
+            click({ row }: any) {
+              openFormModal?.(row.id);
+            },
           },
           remove: {
             text: '删除',
@@ -194,4 +137,3 @@ function statusDict() {
     ],
   });
 }
-

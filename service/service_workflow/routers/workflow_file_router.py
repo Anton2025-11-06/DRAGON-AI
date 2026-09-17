@@ -16,6 +16,9 @@ file_router = APIRouter(prefix="/workflow-files", tags=["工作流文件"])
 # 匿名下载入口路径（网关对外口径，与 TokenCheckMiddleware 白名单一致）
 _DOWNLOAD_PATH = "/api/workflow/workflow-files/download"
 
+# workflow-file 上传统一归入的存储子目录（本地=local_dir/tmp，OSS=path_prefix/tmp）
+_UPLOAD_DIR = "tmp"
+
 
 def _download_base(request: Request) -> str:
     """本地存储后端的匿名下载基址：环境变量 FILE_PUBLIC_BASE > 请求 Origin/Referer > Host。
@@ -34,7 +37,8 @@ def _download_base(request: Request) -> str:
 
 @file_router.post("/upload", summary="上传单个文件，返回匿名可访问 URL")
 async def upload_file(request: Request, file: UploadFile = File(...)):
-    info = (await common_storage.upload(file, base_url=_download_base(request)))[0]
+    info = (await common_storage.upload(
+        file, base_url=_download_base(request), directory=_UPLOAD_DIR))[0]
     if not info["ok"]:
         return ApiResponse.error(400, info.get("error") or "上传失败")
     return ApiResponse.success(data=info, message="上传成功")
@@ -42,7 +46,8 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 
 @file_router.post("/upload-batch", summary="批量上传文件")
 async def upload_files(request: Request, files: List[UploadFile] = File(...)):
-    infos = await common_storage.upload(files, base_url=_download_base(request))
+    infos = await common_storage.upload(
+        files, base_url=_download_base(request), directory=_UPLOAD_DIR)
     failed = [i for i in infos if not i["ok"]]
     return ApiResponse.success(
         data=infos,
@@ -50,7 +55,7 @@ async def upload_files(request: Request, files: List[UploadFile] = File(...)):
                 (f"，失败 {len(failed)} 个：{failed[0]['error']}" if failed else ""))
 
 
-@file_router.get("/download/{name}", summary="按文件名下载（匿名，地址由上传接口返回）")
+@file_router.get("/download/{name:path}", summary="按文件名下载（匿名，地址由上传接口返回）")
 async def download_file(name: str):
     """本地后端的匿名下载入口（OSS 预签名 URL 不经过这里，但同样支持手动访问）。"""
     try:
@@ -67,12 +72,12 @@ async def download_file(name: str):
                      f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(display)}'})
 
 
-@file_router.get("/exists/{name}", summary="按文件名判断是否存在")
+@file_router.get("/exists/{name:path}", summary="按文件名判断是否存在")
 async def file_exists(name: str):
     return ApiResponse.success(data=await common_storage.exists(name))
 
 
-@file_router.delete("/{name}", summary="按文件名删除")
+@file_router.delete("/{name:path}", summary="按文件名删除")
 async def delete_file(name: str):
     try:
         ok = await common_storage.delete(name)

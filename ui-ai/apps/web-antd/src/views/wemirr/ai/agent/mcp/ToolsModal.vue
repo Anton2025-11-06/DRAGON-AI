@@ -6,10 +6,12 @@ import { onMounted, ref, watch } from 'vue';
 import { message } from 'ant-design-vue';
 
 import * as api from './api';
+import { paramsSummary, schemaParams } from './schema';
+import ToolTestModal from './ToolTestModal.vue';
 
 interface Props {
-  visible: boolean;
   mcpServer: any;
+  visible: boolean;
 }
 
 const props = defineProps<Props>();
@@ -20,47 +22,30 @@ const emit = defineEmits<{
 const loading = ref(false);
 const tools = ref<McpToolInfo[]>([]);
 
+const testOpen = ref(false);
+const testTool = ref<McpToolInfo | null>(null);
+
 const columns = [
+  { dataIndex: 'name', key: 'name', title: '工具名称', width: 200 },
   {
-    title: '工具名称',
-    dataIndex: 'name',
-    key: 'name',
-    width: 200,
-  },
-  {
-    title: '工具描述',
     dataIndex: 'description',
     key: 'description',
     ellipsis: true,
+    title: '工具描述',
   },
-  {
-    title: '参数',
-    key: 'params',
-    width: 90,
-  },
+  { key: 'params', title: '参数', width: 160 },
+  { fixed: 'right', key: 'action', title: '操作', width: 80 },
 ];
 
 const schemaColumns = [
-  { title: '参数名', dataIndex: 'name', key: 'name', width: 180 },
-  { title: '类型', dataIndex: 'type', key: 'type', width: 90 },
-  { title: '必填', dataIndex: 'required', key: 'required', width: 70 },
-  { title: '说明', dataIndex: 'desc', key: 'desc', ellipsis: true },
+  { dataIndex: 'name', key: 'name', title: '参数名', width: 160 },
+  { dataIndex: 'type', key: 'type', title: '类型', width: 90 },
+  { key: 'required', title: '必填', width: 70 },
+  { dataIndex: 'desc', key: 'desc', ellipsis: true, title: '说明' },
 ];
 
-/** 展开行：完整 JSON Schema 展示 */
-const schemaOf = (record: McpToolInfo) => {
-  const schema = record?.inputSchema;
-  const props = schema?.properties;
-  const required = Array.isArray(schema?.required) ? schema.required : [];
-  if (!props || typeof props !== 'object') return null;
-  const rows = Object.entries(props).map(([name, p]: [string, any]) => ({
-    name,
-    type: p?.type || typeof p,
-    desc: p?.description || '',
-    required: required.includes(name),
-  }));
-  return rows;
-};
+/** 展开行与参数列共用一份解析结果，避免同一个 schema 解析两遍口径不一 */
+const schemaOf = (record: McpToolInfo) => schemaParams(record?.inputSchema);
 
 const loadTools = async () => {
   if (!props.mcpServer?.id) return;
@@ -70,12 +55,18 @@ const loadTools = async () => {
     const result = await api.GetTools(props.mcpServer.id);
     tools.value = result || [];
   } catch (error: any) {
-    message.error(`获取工具列表失败: ${error.message}`);
+    // 连接不通时后端现在直接报错，不再静默返回空列表，这里要把原因摊开
+    message.error(`获取工具列表失败: ${error?.message || '未知错误'}`);
     tools.value = [];
   } finally {
     loading.value = false;
   }
 };
+
+function openTest(tool: McpToolInfo) {
+  testTool.value = tool;
+  testOpen.value = true;
+}
 
 watch(
   () => props.visible,
@@ -99,18 +90,18 @@ const handleClose = () => {
 
 <template>
   <a-modal
+    :footer="null"
     :open="visible"
     :title="`MCP工具列表 - ${mcpServer?.name || ''}`"
-    width="800px"
-    :footer="null"
+    width="900px"
     @cancel="handleClose"
   >
     <a-alert
       v-if="!loading && tools.length === 0"
       message="暂无可用工具"
-      type="info"
       show-icon
       style="margin-bottom: 16px"
+      type="info"
     />
 
     <a-table
@@ -118,29 +109,42 @@ const handleClose = () => {
       :data-source="tools"
       :loading="loading"
       :pagination="false"
+      :scroll="{ x: 860, y: 400 }"
       row-key="name"
       size="middle"
-      :scroll="{ y: 400 }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'params'">
-          <a-tag v-if="schemaOf(record)" color="blue">
-            {{ (schemaOf(record) || []).length }}
-          </a-tag>
-          <span v-else class="no-schema">—</span>
+          <span v-if="schemaOf(record)" class="params-text">
+            {{ paramsSummary(schemaOf(record)) }}
+          </span>
+          <span v-else class="no-schema">无参数</span>
+        </template>
+        <template v-else-if="column.key === 'action'">
+          <a @click="openTest(record)">测试</a>
         </template>
       </template>
       <template #expandedRowRender="{ record }">
         <div v-if="schemaOf(record)" class="schema-wrap">
           <a-table
-            :data-source="schemaOf(record)"
             :columns="schemaColumns"
+            :data-source="schemaOf(record)"
             :pagination="false"
-            size="small"
             row-key="name"
-          />
+            size="small"
+          >
+            <template #bodyCell="{ column: schemaColumn, record: param }">
+              <template v-if="schemaColumn.key === 'required'">
+                <a-tag :color="param.required ? 'orange' : 'default'">
+                  {{ param.required ? '必填' : '选填' }}
+                </a-tag>
+              </template>
+            </template>
+          </a-table>
         </div>
-        <pre v-else class="schema-raw">{{ JSON.stringify(record.inputSchema || {}, null, 2) }}</pre>
+        <pre v-else class="schema-raw">{{
+          JSON.stringify(record.inputSchema || {}, null, 2)
+        }}</pre>
       </template>
       <template #emptyText>
         <a-empty description="暂无工具数据" />
@@ -151,9 +155,21 @@ const handleClose = () => {
       <a-button type="primary" @click="handleClose">关闭</a-button>
     </template>
   </a-modal>
+
+  <ToolTestModal
+    v-model:open="testOpen"
+    :server-id="mcpServer?.id"
+    :server-name="mcpServer?.name"
+    :tool="testTool"
+  />
 </template>
 
 <style scoped>
+.params-text {
+  font-size: 12px;
+  color: #595959;
+}
+
 .no-schema {
   color: #bfbfbf;
 }
@@ -163,15 +179,18 @@ const handleClose = () => {
 }
 
 .schema-raw {
-  margin: 0;
-  padding: 10px;
   max-height: 260px;
+  padding: 10px;
+  margin: 0;
   overflow: auto;
   font-size: 12px;
   line-height: 1.5;
-  background: #fafafa;
-  border-radius: 6px;
-  white-space: pre-wrap;
+  color: #fff;
   word-break: break-all;
+  white-space: pre-wrap;
+
+  /* 钉住底色：全局 pre 样式一旦把它盖成浅底，白字就直接隐形 */
+  background: #1e1e1e !important;
+  border-radius: 6px;
 }
 </style>

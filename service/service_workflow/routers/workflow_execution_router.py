@@ -33,7 +33,7 @@ from common.common_log.log_init import log
 from common.common_middleware.operate_log_middleware import _mask_sensitive, _persist_log
 from common.common_permission.permission import get_user_id, has_permission
 from service.service_workflow.schemas.workflow_schema import (
-    ApiKeyCreateReq, WorkflowExecutionReq,
+    ApiKeyCreateReq, ApiKeyUpdateReq, WorkflowExecutionReq,
 )
 from service.service_workflow.services.workflow_apikey_service import WorkflowApiKeyService
 from service.service_workflow.services.workflow_execution_service import WorkflowExecutionService
@@ -281,6 +281,21 @@ async def create_api_key(request: Request, body: ApiKeyCreateReq):
 @has_permission("workflow:apikey:list")
 async def list_api_keys(request: Request, workflow_id: int):
     return ApiResponse.success(data=await WorkflowApiKeyService.list_by_workflow(workflow_id))
+
+
+@api_key_router.put("/{api_key_id}", summary="编辑 API Key（名称/QPS/过期时间）")
+@has_permission("workflow:apikey:edit")
+async def update_api_key(request: Request, api_key_id: int, body: ApiKeyUpdateReq):
+    # 只把请求体里真出现过的字段交下去，区分“没传”与“传了 null”（后者是改为永不过期）
+    changes = {
+        key: value
+        for key, value in body.model_dump().items()
+        if key in body.model_fields_set
+    }
+    ok = await WorkflowApiKeyService.update(api_key_id, changes)
+    if not ok:
+        return ApiResponse.error(400, "API Key 不存在")
+    return ApiResponse.success(message="已保存")
 
 
 @api_key_router.put("/{api_key_id}/status", summary="更新 API Key 状态")

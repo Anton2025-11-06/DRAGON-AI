@@ -3,6 +3,7 @@
 技能管理接口：SKILL.zip 上传 / 替换 / 预览 / 下载 / 重命名 / 状态 / 删除 + 单文件编辑
 权限：workflow:skill:list / add / edit / delete
 """
+import io
 import json
 import urllib.parse
 from typing import List, Optional
@@ -42,11 +43,13 @@ def _parse_tags_form(raw: str) -> List[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
+
+
 @router.get("/page", summary="分页查询技能目录")
 @has_permission("workflow:skill:list")
-async def page_skills(request: Request, page: int = 1, page_size: int = 10,
-                      keyword: str = None, category: str = None, status: int = None):
-    data = await svc.SkillService.page(page, page_size, keyword, category, status)
+async def page_skills(request: Request, current: int = 1, size: int = 10,
+                      keyword: str = None, category: str = None, status: bool = None):
+    data = await svc.SkillService.page(current, size, keyword, category,status)
     return ApiResponse.success(data=data)
 
 
@@ -61,7 +64,7 @@ async def skill_detail(request: Request, skill_id: int):
 
 
 @router.get("/{skill_id}/preview", summary="技能预览（SKILL.md + 资源树 + 文本内容）")
-@has_permission("workflow:skill:list")
+@has_permission("workflow:skill:view")
 async def skill_preview(request: Request, skill_id: int):
     try:
         data = await svc.SkillService.preview(skill_id)
@@ -81,14 +84,15 @@ async def upload_skill(request: Request, name: str = Form(...), code: str = Form
         new_id = await svc.SkillService.upload(
             name=name, code=code, data=data,
             description=description or None, category=category or None, icon=icon or None,
-            tags=_parse_tags_form(tags), created_by=login_user.get("user_id") or 0)
+            tags=_parse_tags_form(tags), created_by=login_user.get("user_id") or 0,
+            original_name=file.filename)
         return ApiResponse.success(data={"id": new_id}, message="技能上传成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 
 
 @router.put("/{skill_id}/upload", summary="zip 替换技能目录（清空原目录后解压）")
-@has_permission("workflow:skill:edit")
+@has_permission("workflow:skill:replace")
 async def replace_skill(request: Request, skill_id: int, file: UploadFile = File(...),
                         name: str = Form(""), description: str = Form(""),
                         category: str = Form(""), icon: str = Form(""), tags: str = Form("")):
@@ -97,14 +101,15 @@ async def replace_skill(request: Request, skill_id: int, file: UploadFile = File
         await svc.SkillService.replace(
             skill_id, data,
             name=name or None, description=description or None,
-            category=category or None, icon=icon or None, tags=_parse_tags_form(tags))
+            category=category or None, icon=icon or None, tags=_parse_tags_form(tags),
+            original_name=file.filename)
         return ApiResponse.success(message="技能目录已替换")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 
 
 @router.patch("/{skill_id}/rename", summary="重命名技能")
-@has_permission("workflow:skill:edit")
+@has_permission("workflow:skill:rename")
 async def rename_skill(request: Request, skill_id: int, body: SkillRenameRequest):
     try:
         await svc.SkillService.rename(skill_id, body.name)
@@ -134,25 +139,22 @@ async def delete_skill(request: Request, skill_id: int):
 
 
 @router.get("/{skill_id}/download", summary="下载技能 zip 包")
-@has_permission("workflow:skill:list")
+@has_permission("workflow:skill:download")
 async def download_skill(request: Request, skill_id: int):
-    row = await svc.SkillService.get_by_id(skill_id)
-    if not row:
-        return ApiResponse.error(400, "技能不存在")
-    skill_dir = svc.SkillService._dir_of(row)
-    if not skill_dir.is_dir():
-        return ApiResponse.error(400, "技能目录不存在，请重新上传")
-    buf = svc.SkillService.zip_skill(skill_dir)
-    quoted = urllib.parse.quote(f"{row[2]}.zip")
+    try:
+        zip_bytes, filename = await svc.SkillService.download_zip(skill_id)
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
+    quoted = urllib.parse.quote(filename)
     return StreamingResponse(
-        buf,
+        io.BytesIO(zip_bytes),
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"},
     )
 
 
 @router.put("/{skill_id}/files", summary="编辑技能内文本文件（预览窗保存）")
-@has_permission("workflow:skill:edit")
+@has_permission("workflow:skill:editSkill")
 async def update_skill_file(request: Request, skill_id: int, body: SkillFileUpdateRequest):
     try:
         await svc.SkillService.update_file(skill_id, body.path, body.content)

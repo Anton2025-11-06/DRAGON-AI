@@ -1,82 +1,3 @@
-<template>
-  <a-form layout="vertical" :model="formData" class="node-form">
-    <div class="assignments">
-      <div
-        v-for="(assignment, index) in formData.assignments"
-        :key="index"
-        class="assignment-item"
-      >
-        <div class="assignment-header">
-          <span>赋值 {{ index + 1 }}</span>
-          <a-button
-            v-if="formData.assignments.length > 1"
-            type="text"
-            size="small"
-            danger
-            @click="removeAssignment(index)"
-          >
-            删除
-          </a-button>
-        </div>
-
-        <a-form-item label="目标变量名" required>
-          <div class="target-name-row">
-            <a-input
-              v-model:value="assignment.variableName"
-              placeholder="自定义变量名，例如: answer"
-              @change="handleChange"
-            />
-            <VariableSelector
-              :current-node-id="nodeId"
-              button-text="引用上游"
-              @select="
-                (reference: string) =>
-                  handleTargetReferenceSelect(assignment, reference)
-              "
-            />
-          </div>
-          <div class="form-hint">
-            直接输入即自定义变量名；点「引用上游」选中的变量会在运行时取其值作为目标变量名
-          </div>
-        </a-form-item>
-
-        <a-form-item label="赋值类型">
-          <a-select
-            v-model:value="assignment.type"
-            @change="handleAssignmentTypeChange(assignment)"
-          >
-            <a-select-option value="LITERAL">字面量</a-select-option>
-            <a-select-option value="VARIABLE">变量引用</a-select-option>
-            <a-select-option value="EXPRESSION">表达式</a-select-option>
-          </a-select>
-        </a-form-item>
-
-        <a-form-item label="变量值">
-          <VariableInput
-            v-model="assignment.value"
-            :current-node-id="nodeId"
-            :placeholder="getValuePlaceholder(assignment.type)"
-            :multiline="assignment.type !== 'VARIABLE'"
-            :max-rows="4"
-            @change="handleChange"
-          />
-        </a-form-item>
-
-        <a-form-item v-if="assignment.type === 'EXPRESSION'" label="转换表达式">
-          <VariableInput
-            v-model="assignment.transformExpression"
-            :current-node-id="nodeId"
-            :placeholder="'例如: {{nodes.xx.output}}.name 或 {{nodes.xx.output}}[0].name'"
-            @change="handleChange"
-          />
-        </a-form-item>
-      </div>
-    </div>
-
-    <a-button type="dashed" block @click="addAssignment">添加赋值</a-button>
-  </a-form>
-</template>
-
 <script setup lang="ts">
 /**
  * 变量赋值节点配置表单
@@ -161,7 +82,10 @@ function handleAssignmentTypeChange(assignment: Assignment) {
  * 目标变量名引用上游变量（BUG7）：名字不再只能是字面量，
  * 选中后把变量引用（如 {{nodes.xx.output}}）写回 variableName，后端运行时解析取值作为变量名。
  */
-function handleTargetReferenceSelect(assignment: Assignment, reference: string) {
+function handleTargetReferenceSelect(
+  assignment: Assignment,
+  reference: string,
+) {
   assignment.variableName = reference;
   handleChange();
 }
@@ -172,6 +96,85 @@ function handleChange() {
   });
 }
 </script>
+
+<template>
+  <a-form layout="vertical" :model="formData" class="node-form">
+    <div class="assignments">
+      <div
+        v-for="(assignment, index) in formData.assignments"
+        :key="index"
+        class="assignment-item"
+      >
+        <div class="assignment-header">
+          <span>赋值 {{ index + 1 }}</span>
+          <a-button
+            v-if="formData.assignments.length > 1"
+            type="text"
+            size="small"
+            danger
+            @click="removeAssignment(index)"
+          >
+            删除
+          </a-button>
+        </div>
+
+        <a-form-item label="目标变量名" required>
+          <div class="target-name-row">
+            <a-input
+              v-model:value="assignment.variableName"
+              placeholder="自定义变量名，例如: answer"
+              @change="handleChange"
+            />
+            <VariableSelector
+              :current-node-id="nodeId"
+              button-text="引用上游"
+              @select="
+                (reference: string) =>
+                  handleTargetReferenceSelect(assignment, reference)
+              "
+            />
+          </div>
+          <div class="form-hint">
+            直接输入即自定义变量名；点「引用上游」选中的变量会在运行时取其值作为目标变量名
+          </div>
+        </a-form-item>
+
+        <a-form-item label="赋值类型">
+          <a-select
+            v-model:value="assignment.type"
+            @change="handleAssignmentTypeChange(assignment)"
+          >
+            <a-select-option value="LITERAL">字面量</a-select-option>
+            <a-select-option value="VARIABLE">变量引用</a-select-option>
+            <a-select-option value="EXPRESSION">表达式</a-select-option>
+          </a-select>
+        </a-form-item>
+
+        <a-form-item label="变量值">
+          <VariableInput
+            v-model="assignment.value"
+            :current-node-id="nodeId"
+            :placeholder="getValuePlaceholder(assignment.type)"
+            :multiline="assignment.type !== 'VARIABLE'"
+            :max-rows="4"
+            @change="handleChange"
+          />
+        </a-form-item>
+
+        <a-form-item v-if="assignment.type === 'EXPRESSION'" label="转换表达式">
+          <VariableInput
+            v-model="assignment.transformExpression"
+            :current-node-id="nodeId"
+            placeholder="例如: {{nodes.xx.output}}.name 或 {{nodes.xx.output}}[0].name"
+            @change="handleChange"
+          />
+        </a-form-item>
+      </div>
+    </div>
+
+    <a-button type="dashed" block @click="addAssignment">添加赋值</a-button>
+  </a-form>
+</template>
 
 <style scoped lang="less">
 .node-form {

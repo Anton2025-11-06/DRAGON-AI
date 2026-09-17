@@ -201,7 +201,7 @@ onMounted(() => {
       </div>
 
       <!-- 分类标签 -->
-      <Tabs v-model:activeKey="activeCategory" class="category-tabs">
+      <Tabs v-model:active-key="activeCategory" class="category-tabs">
         <a-tab-pane v-for="cat in categories" :key="cat.key" :tab="cat.label" />
       </Tabs>
 

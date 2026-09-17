@@ -4,10 +4,10 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import has_permission, get_login_user
+from common.common_permission.permission import has_permission, get_login_user, is_admin
 from service.service_workflow.services.mcp_service import McpServerService
 
-router = APIRouter(prefix="/mcp-server", tags=["MCP连接管理"])
+router = APIRouter(prefix="/mcp-server", tags=["MCP连接"])
 
 
 class McpServerSaveRequest(BaseModel):
@@ -17,6 +17,7 @@ class McpServerSaveRequest(BaseModel):
     command: Optional[str] = Field(None, max_length=255, description="STDIO 启动命令")
     args: Optional[str] = Field(None, max_length=1000, description="STDIO 参数 JSON 数组")
     env: Optional[str] = Field(None, max_length=1000, description="环境变量 JSON 对象")
+    description: Optional[str] = Field(None, max_length=500, description="MCP 描述（这个连接是做什么的）")
     status: bool = True
 
 
@@ -44,19 +45,13 @@ class McpToolCallRequest(BaseModel):
     arguments: dict = Field(default_factory=dict, description="调用参数 JSON 对象")
 
 
-@router.get("/page", summary="分页查询 MCP 连接")
-@has_permission("workflow:mcp:list")
-async def page_mcp(request: Request, page: int = 1, page_size: int = 10,
-                   name: str = None, status: int = None):
-    data = await McpServerService.page(page, page_size, name, status)
-    return ApiResponse.success(data=data)
-
-
 @router.post("/page", summary="分页查询 MCP 连接（POST 兼容）")
 @has_permission("workflow:mcp:list")
 async def page_mcp_post(request: Request, body: McpServerPageRequest):
+    login_user = await get_login_user(request)
     data = await McpServerService.page(
-        body.current, body.size, body.name, _parse_status(body.status))
+        body.current, body.size, body.name, body.status,
+        viewer_id=int(login_user.get("user_id") or 0), viewer_admin=is_admin(login_user))
     return ApiResponse.success(data=data)
 
 
@@ -66,7 +61,7 @@ async def create_mcp(request: Request, body: McpServerSaveRequest):
     login_user = await get_login_user(request)
     new_id = await McpServerService.create(
         body.name, body.type, body.url, body.command, body.args, body.env,
-        body.status, login_user.get("user_id") or 0)
+        body.status, login_user.get("user_id") or 0, body.description)
     return ApiResponse.success(data={"id": new_id}, message="新增成功")
 
 
@@ -74,7 +69,8 @@ async def create_mcp(request: Request, body: McpServerSaveRequest):
 @has_permission("workflow:mcp:edit")
 async def update_mcp(request: Request, mcp_id: int, body: McpServerSaveRequest):
     await McpServerService.update(mcp_id, body.name, body.type, body.url,
-                                  body.command, body.args, body.env, body.status)
+                                  body.command, body.args, body.env, body.status,
+                                  body.description)
     return ApiResponse.success(message="保存成功")
 
 
@@ -94,15 +90,15 @@ async def toggle_status(request: Request, mcp_id: int, status: bool = True):
     return ApiResponse.success(message="状态已更新")
 
 
-@router.post("/{mcp_id}/test-connection", summary="按ID测试连接")
-@has_permission("workflow:mcp:test")
+@router.post("/{mcp_id}/test-connection", summary="按列表页测试连接")
+@has_permission("workflow:mcp:test-external")
 async def test_connection(request: Request, mcp_id: int):
     result = await McpServerService.test_by_id(mcp_id)
     return ApiResponse.success(data=result)
 
 
-@router.post("/test-params", summary="按参数测试连接(表单测试按钮)")
-@has_permission("workflow:mcp:test")
+@router.post("/test-params", summary="编辑页测试连接")
+@has_permission("workflow:mcp:test-internal")
 async def test_params(request: Request, body: McpServerTestRequest):
     result = await McpServerService.test_params(
         name=body.name, type_=body.type, url=body.url,
@@ -111,28 +107,19 @@ async def test_params(request: Request, body: McpServerTestRequest):
 
 
 @router.get("/{mcp_id}/tools", summary="获取MCP服务器工具列表")
-@has_permission("workflow:mcp:list")
+@has_permission("workflow:mcp:toolList")
 async def list_tools(request: Request, mcp_id: int):
     row = await McpServerService.get_by_id(mcp_id)
     if not row:
         return ApiResponse.error(400, "连接不存在")
-    tools = await McpServerService.batch_tools([mcp_id])
+    # 单服务器查询不走 batch_tools：那里为了多服务器并发故意吞异常，
+    # 页面会拿不到原因只看到“暂无工具”；这里让真实报错直接透到前端
+    tools = await McpServerService.list_tools(row, mcp_id)
     return ApiResponse.success(data=tools)
 
 
-@router.patch("/{mcp_id}/refresh", summary="刷新MCP连接")
-@has_permission("workflow:mcp:test")
-async def refresh_connection(request: Request, mcp_id: int):
-    row = await McpServerService.get_by_id(mcp_id)
-    if not row:
-        return ApiResponse.error(400, "连接不存在")
-    # 断开并清除缓存会话：下次 list_tools / call_tool 自动重连
-    await McpServerService.refresh(mcp_id)
-    return ApiResponse.success(message="刷新成功（下次调用将重新建立连接）")
-
-
 @router.post("/{mcp_id}/call-tool", summary="调用MCP工具")
-@has_permission("workflow:mcp:test")
+@has_permission("workflow:mcp:call")
 async def call_tool(request: Request, mcp_id: int, body: McpToolCallRequest):
     row = await McpServerService.get_by_id(mcp_id)
     if not row:
@@ -143,12 +130,3 @@ async def call_tool(request: Request, mcp_id: int, body: McpToolCallRequest):
     return ApiResponse.success(data=result)
 
 
-def _parse_status(status):
-    """兼容 string/list 状态参数（fast-crud dict-switch 搜索框）"""
-    if status is None or status == "":
-        return None
-    if isinstance(status, list):
-        status = status[-1] if status else None
-    if isinstance(status, str):
-        return 1 if status.lower() in ("true", "1") else 0
-    return 1 if status else 0

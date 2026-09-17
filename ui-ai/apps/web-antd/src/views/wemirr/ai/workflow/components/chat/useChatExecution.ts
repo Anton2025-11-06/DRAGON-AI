@@ -37,6 +37,8 @@ import {
 export interface ChatStep {
   duration?: number;
   error?: string;
+  /** 节点入边输入视图（node.started 带的 input） */
+  input?: any;
   /** 画布上的节点名（异步事件不带 label，由 graph 映射补齐） */
   label: string;
   nodeId: string;
@@ -178,6 +180,10 @@ export function useChatExecution(options: ChatExecutionOptions) {
       data.nodeName ||
       step.label ||
       options.resolveLabel(data.nodeId, data.nodeType);
+    // 输入视图只在节点开始那一刻给，错过这帧执行过程里就没有「输入」可展开
+    if (data.input !== undefined && data.input !== null) {
+      step.input = data.input;
+    }
   }
 
   function onNodeDelta(run: ChatRun, data: NodeDeltaEvent) {
@@ -306,6 +312,8 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
     const url = getExecutionSubscribeUrl(executionId);
     source = new SSE(url, {
+      // 只带登录态：订阅是网关与下游共同的白名单路径（executionId 为 UUID 熵足够），
+      // 本身不需要 X-Workflow-Token；API Key 模式下网关对 GET .../subscribe 也是直接放行
       headers: { Authorization: `Bearer ${accessStore.accessToken || ''}` },
       method: 'GET',
       start: false,
@@ -362,12 +370,18 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
   /**
    * 发起一轮对话：异步执行 + 订阅事件流，返回被填充的 ChatRun。
+   * apiKey 是对话选中的 Key，随 execute-async 的 X-Workflow-Token 下发。
    */
   async function send(
     workflowId: number | string,
     inputs: Record<string, any>,
+    apiKey?: string,
   ) {
-    const executionId = await executeWorkflowAsync(workflowId, { inputs });
+    const executionId = await executeWorkflowAsync(
+      workflowId,
+      { inputs },
+      apiKey,
+    );
     const run = createChatRun(executionId);
     subscribe(executionId, run);
     return run;

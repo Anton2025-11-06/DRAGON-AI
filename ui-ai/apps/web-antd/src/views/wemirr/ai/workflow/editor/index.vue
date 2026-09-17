@@ -24,6 +24,7 @@ import {
   ExpandOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
+  PlayCircleOutlined,
   SaveOutlined,
   SendOutlined,
   StopOutlined,
@@ -31,7 +32,6 @@ import {
   WarningOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
-  PlayCircleOutlined,
 } from '@ant-design/icons-vue';
 import { Badge, message, Modal, Spin, Tag, Tooltip } from 'ant-design-vue';
 
@@ -45,13 +45,13 @@ import {
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
+import { ErrorDetailPanel } from '../components/debug';
 import DebugPanel from '../components/DebugPanel.vue';
 import NodePanel from '../components/NodePanel.vue';
 import PropertyPanel from '../components/PropertyPanel.vue';
 import VersionHistoryModal from '../components/VersionHistoryModal.vue';
 import VueFlowCanvas from '../components/VueFlowCanvas.vue';
 import WorkflowDiagnosticsPanel from '../components/WorkflowDiagnosticsPanel.vue';
-import { ErrorDetailPanel } from '../components/debug';
 
 const route = useRoute();
 const router = useRouter();
@@ -96,7 +96,7 @@ const showVersionHistoryModal = ref(false);
 // 发布状态与 5 秒点击间隔（防狂点）
 const publishing = ref(false);
 const publishCountdown = ref(0);
-let publishTimer: ReturnType<typeof setInterval> | null = null;
+let publishTimer: null | ReturnType<typeof setInterval> = null;
 
 // 是否有未保存的更改
 const isDirty = computed(() => workflowStore.isDirty);
@@ -135,7 +135,7 @@ const inputVariables = computed(() => {
         label: field.label || field.name,
         type: field.type || 'TEXT',
         defaultValue: field.defaultValue,
-        description: field.description || field.label,
+        description: field.description,
         required: field.required || false,
         options: field.options,
         maxLength: field.maxLength,
@@ -167,7 +167,7 @@ const inputVariables = computed(() => {
     label: field.label || field.name,
     type: field.type || 'TEXT',
     defaultValue: field.defaultValue,
-    description: field.description || field.label,
+    description: field.description,
     required: field.required || false,
     options: field.options,
     maxLength: field.maxLength,
@@ -571,7 +571,7 @@ const canvasReady = ref(false);
 const displayVersion = ref(0);
 
 // 待加载的工作流ID（画布就绪后加载）
-const pendingWorkflowId = ref<string | null>(null);
+const pendingWorkflowId = ref<null | string>(null);
 
 // 监听路由参数变化
 watch(
@@ -644,7 +644,7 @@ onMounted(() => {
         canvasRef.value
           ?.getNodes()
           ?.find(
-            (item: any) => !['START', 'END'].includes(item.data?.nodeType),
+            (item: any) => !['END', 'START'].includes(item.data?.nodeType),
           ) || canvasRef.value?.getNodes()?.[0];
       if (node) {
         workflowStore.selectNode(node.id);
@@ -789,15 +789,17 @@ onBeforeUnmount(() => {
                   color="processing"
                   size="small"
                   style="margin-left: 4px"
-                  >运行中</Tag
                 >
+                  运行中
+                </Tag>
                 <Tag
                   v-else-if="isDebugPaused"
                   color="warning"
                   size="small"
                   style="margin-left: 4px"
-                  >已暂停</Tag
                 >
+                  已暂停
+                </Tag>
               </a-button>
             </a-tooltip>
             <a-tooltip title="工作流诊断">
@@ -840,7 +842,9 @@ onBeforeUnmount(() => {
               @click="handlePublish"
             >
               <template #icon><SendOutlined /></template>
-              {{ publishCountdown > 0 ? `发布 (${publishCountdown}s)` : '发布' }}
+              {{
+                publishCountdown > 0 ? `发布 (${publishCountdown}s)` : '发布'
+              }}
             </a-button>
           </a-space>
         </div>

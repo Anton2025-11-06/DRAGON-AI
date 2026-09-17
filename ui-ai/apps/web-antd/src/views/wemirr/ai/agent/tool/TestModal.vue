@@ -54,8 +54,8 @@ function guessType(value: unknown): string {
 
 /** 解析 parameters_schema：{"parameters":[{name,type,required,default,description}]}，兼容 {"example": {...}} 旧格式 */
 function parseSchema(raw?: string): {
-  fields: ParamField[];
   example: Record<string, any>;
+  fields: ParamField[];
 } {
   let schema: any = {};
   try {
@@ -63,11 +63,13 @@ function parseSchema(raw?: string): {
   } catch {
     schema = {};
   }
-  if (schema && typeof schema === 'object' && Array.isArray(schema.parameters)) {
+  if (
+    schema &&
+    typeof schema === 'object' &&
+    Array.isArray(schema.parameters)
+  ) {
     const example: Record<string, any> = {};
-    const list: ParamField[] = (
-      schema.parameters as Array<Record<string, any>>
-    )
+    const list: ParamField[] = (schema.parameters as Array<Record<string, any>>)
       .filter((p) => p && typeof p.name === 'string' && p.name)
       .map((p) => {
         const type = p.type || guessType(p.default);
@@ -107,7 +109,7 @@ watch(
     for (const f of fs) {
       const def = f.default ?? example[f.name];
       formValues[f.name] =
-        def !== undefined ? def : f.type === 'number' ? undefined : '';
+        def === undefined ? (f.type === 'number' ? undefined : '') : def;
     }
     paramsText.value = JSON.stringify(example || {}, null, 2);
     mode.value = fs.length > 0 ? 'form' : 'json';
@@ -123,18 +125,30 @@ function collectFormParams(): Record<string, any> {
   for (const f of fields.value) {
     const v = formValues[f.name];
     if (v === '' || v === undefined || v === null) continue;
-    if (f.type === 'number') {
-      params[f.name] = Number(v);
-    } else if (f.type === 'boolean') {
-      params[f.name] = Boolean(v);
-    } else if (f.type === 'array' || f.type === 'object') {
-      try {
-        params[f.name] = JSON.parse(String(v));
-      } catch {
+    switch (f.type) {
+      case 'array':
+      case 'object': {
+        try {
+          params[f.name] = JSON.parse(String(v));
+        } catch {
+          params[f.name] = v;
+        }
+
+        break;
+      }
+      case 'boolean': {
+        params[f.name] = Boolean(v);
+
+        break;
+      }
+      case 'number': {
+        params[f.name] = Number(v);
+
+        break;
+      }
+      default: {
         params[f.name] = v;
       }
-    } else {
-      params[f.name] = v;
     }
   }
   return params;

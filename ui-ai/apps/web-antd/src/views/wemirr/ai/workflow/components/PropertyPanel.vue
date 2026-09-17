@@ -18,6 +18,7 @@ import {
   ApiOutlined,
   BookOutlined,
   BranchesOutlined,
+  CloudServerOutlined,
   CodeOutlined,
   CommentOutlined,
   DatabaseOutlined,
@@ -50,6 +51,7 @@ import ListOperatorNodeForm from './node-forms/ListOperatorNodeForm.vue';
 // 节点配置表单组件 - 智能体节点
 import LLMNodeForm from './node-forms/LLMNodeForm.vue';
 import LoopNodeForm from './node-forms/LoopNodeForm.vue';
+import McpNodeForm from './node-forms/McpNodeForm.vue';
 import ParallelNodeForm from './node-forms/ParallelNodeForm.vue';
 import ParameterExtractorNodeForm from './node-forms/ParameterExtractorNodeForm.vue';
 import QuestionClassifierNodeForm from './node-forms/QuestionClassifierNodeForm.vue';
@@ -135,6 +137,7 @@ const iconComponents: Record<NodeType, Component> = {
   // 外部系统节点
   HTTP_REQUEST: ApiOutlined,
   TOOL: ToolOutlined,
+  MCP_TOOL: CloudServerOutlined,
 };
 
 /**
@@ -167,6 +170,7 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   // 外部系统节点
   HTTP_REQUEST: HttpNodeForm,
   TOOL: ToolNodeForm,
+  MCP_TOOL: McpNodeForm,
 };
 
 // 监听选中节点变化
@@ -318,67 +322,65 @@ function handleDeleteNode() {
     >
       <!-- 节点基本信息 -->
       <div class="node-info-section">
-          <div class="node-type-badge" :style="getNodeTypeBadgeStyle()">
-            <component :is="getNodeIcon()" class="type-icon" />
-            <span>{{ getNodeTypeLabel() }}</span>
-          </div>
-          <a-form layout="vertical" :model="nodeConfig" class="basic-form">
-            <a-form-item label="节点名称">
-              <a-input
-                v-model:value="nodeLabel"
-                placeholder="请输入节点名称"
-                @change="handleLabelChange"
-              />
-            </a-form-item>
-            <a-form-item
-              v-if="
-                selectedNode.type !== 'START' && selectedNode.type !== 'END'
-              "
-              label="节点描述"
-            >
-              <a-textarea
-                v-model:value="nodeDescription"
-                placeholder="请输入节点描述（可选）"
-                :rows="2"
-                @change="handleDescriptionChange"
-              />
-            </a-form-item>
-            <a-form-item label="返回内容">
-              <div class="emit-output-control">
-                <a-switch
-                  v-model:checked="nodeEmitOutput"
-                  size="small"
-                  @change="handleEmitOutputChange"
-                />
-                <span class="emit-output-tip"
-                  >开启时该节点输出（含流式内容）实时推送给客户端，关闭不影响执行与数据持久化</span
-                >
-              </div>
-            </a-form-item>
-          </a-form>
+        <div class="node-type-badge" :style="getNodeTypeBadgeStyle()">
+          <component :is="getNodeIcon()" class="type-icon" />
+          <span>{{ getNodeTypeLabel() }}</span>
         </div>
+        <a-form layout="vertical" :model="nodeConfig" class="basic-form">
+          <a-form-item label="节点名称">
+            <a-input
+              v-model:value="nodeLabel"
+              placeholder="请输入节点名称"
+              @change="handleLabelChange"
+            />
+          </a-form-item>
+          <a-form-item
+            v-if="selectedNode.type !== 'START' && selectedNode.type !== 'END'"
+            label="节点描述"
+          >
+            <a-textarea
+              v-model:value="nodeDescription"
+              placeholder="请输入节点描述（可选）"
+              :rows="2"
+              @change="handleDescriptionChange"
+            />
+          </a-form-item>
+          <a-form-item label="返回内容">
+            <div class="emit-output-control">
+              <a-switch
+                v-model:checked="nodeEmitOutput"
+                size="small"
+                @change="handleEmitOutputChange"
+              />
+              <span class="emit-output-tip">
+                开启时该节点输出（含流式内容）实时推送给客户端，关闭不影响执行与数据持久化
+              </span>
+            </div>
+          </a-form-item>
+        </a-form>
+      </div>
 
-        <a-divider style="margin: 12px 0" />
+      <a-divider style="margin: 12px 0" />
 
-        <!-- 动态节点配置表单 -->
-        <div class="node-config-section">
-          <component
-            :is="configFormComponent"
-            v-if="configFormComponent"
-            :config="nodeConfig"
-            :node-id="selectedNode.id"
-            @update:config="handleConfigUpdate"
-          />
-          <a-alert
-            v-if="formRenderError"
-            type="error"
-            show-icon
-            :message="`节点配置表单渲染失败: ${formRenderError}`"
-          />
-          <div v-else-if="!configFormComponent" class="no-config">
-            <span>该节点无需额外配置</span>
-          </div>
+      <!-- 动态节点配置表单 -->
+      <div class="node-config-section">
+        <component
+          :is="configFormComponent"
+          v-if="configFormComponent"
+          :config="nodeConfig"
+          :node-id="selectedNode.id"
+          @update:config="handleConfigUpdate"
+        />
+        <a-alert
+          v-if="formRenderError"
+          type="error"
+          show-icon
+          :message="`节点配置表单渲染失败: ${formRenderError}`"
+        />
+        <div v-else-if="!configFormComponent" class="no-config">
+          <span>该节点无需额外配置</span>
         </div>
+      </div>
     </div>
   </div>
 </template>

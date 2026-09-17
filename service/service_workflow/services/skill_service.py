@@ -1,53 +1,59 @@
 # -*- coding: utf-8 -*-
 """
-技能管理服务：SKILL.zip 上传解压存储 + 元信息 CRUD + 预览 / 下载 / 单文件编辑
-- 存储根目录：SKILL_ROOT 环境变量（默认 /data/skills），不可写时回退 service/service_workflow/skills/（Windows 本地可跑）
+技能管理服务：SKILL.zip 上传（原件存储）+ 元信息 CRUD + 预览 / 下载 / 单文件编辑
+- 存储：压缩包原件经公共存储 common_storage 落盘（本地后端永久保存 / OSS 对象），
+  统一存在存储后端的 skills/ 子目录下（存储名为 skills/{uuid}_{code}.zip），
+  数据表记录 zip 包文件名 + 存储句柄（含子目录的相对地址）+ 创建人/时间等
+- 不再把 zip 解压成常驻目录：预览 / 下载 / 单文件编辑都按需从存储取回 zip 在内存处理
 - 压缩包要求：≤100MB、必须含 SKILL.md、逐成员校验防路径穿越；支持单顶层目录包裹自动剥离
 """
 import io
 import json
-import os
 import re
-import shutil
-import time
 import zipfile
-from pathlib import Path
+from typing import Optional
 
 from sqlalchemy import text
 
+from common import common_storage
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_storage.base import new_file_name
 
 # 压缩包大小上限（100MB）
 MAX_SKILL_SIZE = 100 * 1024 * 1024
 
-# 可预览的文本扩展名（二进制文件在预览中仅列出路径）
+# 可预览的文本扩展名（二进制文件在预览中仅列出路径，内容留空）
 TEXT_EXTS = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm",
     ".py", ".js", ".ts", ".tsx", ".vue", ".java", ".go", ".c", ".cpp", ".h",
     ".sh", ".bat", ".ps1", ".sql", ".log", ".ini", ".conf", ".toml",
 }
 
-# 存储根目录：优先 SKILL_ROOT 环境变量；启动时校验可写，否则回退服务本地目录
-_ENV_ROOT = os.environ.get("SKILL_ROOT")
-_FALLBACK_ROOT = Path(os.path.dirname(os.path.abspath(__file__))) / "skills"
-try:
-    SKILL_ROOT = Path(_ENV_ROOT) if _ENV_ROOT else _FALLBACK_ROOT
-    SKILL_ROOT.mkdir(parents=True, exist_ok=True)
-    _probe = SKILL_ROOT / ".write_probe"
-    _probe.write_text("ok", encoding="utf-8")
-    _probe.unlink()
-except OSError:
-    log.warning("SKILL_ROOT {} 不可写，回退本地 {}", SKILL_ROOT, _FALLBACK_ROOT)
-    SKILL_ROOT = _FALLBACK_ROOT
-    SKILL_ROOT.mkdir(parents=True, exist_ok=True)
+# get_by_id 列顺序（内部按下标取值，新增列一律追加在末尾以免打乱既有索引）
+# 0 id | 1 name | 2 code | 3 description | 4 category | 5 icon | 6 tags | 7 status
+# 8 skill_path | 9 resource_count | 10 created_by | 11 create_time | 12 update_time
+# 13 zip_file_name | 14 zip_storage_name
+_SELECT_COLS = """id, name, code, description, category, icon, tags, status,
+                  skill_path, resource_count, created_by,
+                  DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') AS create_time,
+                  DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') AS update_time,
+                  zip_file_name, zip_storage_name"""
 
 # 目录名安全校验：禁止路径分隔符/控制字符，允许中文等 Unicode；≤128 位
 _CODE_RE = re.compile(r"^[^/\\\x00-\x1f]{1,128}$")
 
+# 技能 zip 在存储后端统一归入的子目录（本地=local_dir/skills，OSS=path_prefix/skills）
+SKILL_STORAGE_DIR = "skills"
+
+
+def _skill_storage_name(code: str) -> str:
+    """技能 zip 的存储名：{子目录}/{uuid}_{code}.zip（安全相对路径，后端各自补 root/前缀）。"""
+    return f"{SKILL_STORAGE_DIR}/{new_file_name(f'{code}.zip')}"
+
 
 class SkillService:
-    """技能目录：zip 解压存储 + 元信息/内容管理"""
+    """技能目录：zip 原件存储 + 元信息/内容管理（预览/编辑按需从存储取回解压）"""
 
     # ==================== 查询 ====================
     @staticmethod
@@ -68,10 +74,7 @@ class SkillService:
             total = (await session.execute(
                 text(f"SELECT COUNT(*) FROM tb_skill {where}"), params)).scalar()
             rows = (await session.execute(
-                text(f"""SELECT id, name, code, description, category, icon, tags, status,
-                               skill_path, resource_count, created_by,
-                               DATE_FORMAT(create_time, '%%Y-%%m-%%d %%H:%%i:%%s') AS create_time,
-                               DATE_FORMAT(update_time, '%%Y-%%m-%%d %%H:%%i:%%s') AS update_time
+                text(f"""SELECT {_SELECT_COLS}
                         FROM tb_skill {where}
                         ORDER BY id DESC LIMIT :limit OFFSET :offset"""),
                 {**params, "limit": page_size, "offset": (page - 1) * page_size})).all()
@@ -80,13 +83,9 @@ class SkillService:
     @staticmethod
     async def get_by_id(id_: int):
         async with mysql_client.get_session() as session:
-            row = (await session.execute(
-                text("""SELECT id, name, code, description, category, icon, tags, status,
-                               skill_path, resource_count, created_by,
-                               DATE_FORMAT(create_time, '%%Y-%%m-%%d %%H:%%i:%%s') AS create_time,
-                               DATE_FORMAT(update_time, '%%Y-%%m-%%d %%H:%%i:%%s') AS update_time
-                        FROM tb_skill WHERE id = :id"""), {"id": id_})).first()
-            return row
+            return (await session.execute(
+                text(f"SELECT {_SELECT_COLS} FROM tb_skill WHERE id = :id"),
+                {"id": id_})).first()
 
     @staticmethod
     def _row_to_dict(row) -> dict:
@@ -96,18 +95,15 @@ class SkillService:
             "description": row[3], "category": row[4], "icon": row[5],
             "tags": SkillService._parse_tags(row[6]),
             "status": bool(row[7]),
+            # 展示用目录路径：技能 zip 统一落在存储后端 skills/ 子目录，逻辑归入 skills/{code}
             "skillPath": row[8] or f"skills/{code}",
             "resourceCount": row[9], "created_by": row[10],
             "create_time": row[11], "update_time": row[12],
             "skillFile": "SKILL.md",
+            "zipFileName": row[13] or f"{code}.zip",
         }
 
-    @staticmethod
-    def _dir_of(row) -> Path:
-        """技能目录绝对路径（目录名 = code）"""
-        return SKILL_ROOT / row[2]
-
-    # ==================== 预览 / 下载 ====================
+    # ==================== 元信息 / 预览 ====================
     @staticmethod
     async def detail(id_: int) -> dict:
         """技能元信息"""
@@ -118,106 +114,111 @@ class SkillService:
 
     @staticmethod
     async def preview(id_: int) -> dict:
-        """SKILL.md 内容 + 资源树 + 文本文件内容（对齐前端 SkillDetailResp）"""
+        """SKILL.md 内容 + 资源树 + 文本文件内容（按需取回 zip 内存解压，对齐前端 SkillDetailResp）"""
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
         data = SkillService._row_to_dict(row)
-        resources, contents, skill_content = [], {}, ""
-        skill_dir = SkillService._dir_of(row)
-        if skill_dir.is_dir():
-            for p in sorted(skill_dir.rglob("*")):
-                if not p.is_file():
-                    continue
-                rel = p.relative_to(skill_dir).as_posix()
-                resources.append(rel)
-                if not SkillService._is_text_file(rel):
-                    continue
-                content = SkillService._read_text(p)
-                if rel == "SKILL.md" or rel.endswith("/SKILL.md"):
-                    skill_content = content
-                contents[rel] = content
+        entries = SkillService._zip_entries(await SkillService._load_zip(row))
+        resources = sorted(entries)
+        skill_content = ""
+        contents: dict = {}
+        for rel, raw in entries.items():
+            if not SkillService._is_text_file(rel):
+                continue
+            content = SkillService._decode_text(raw)
+            if rel == "SKILL.md" or rel.endswith("/SKILL.md"):
+                skill_content = content
+            contents[rel] = content
         data["skillContent"] = skill_content
         data["resources"] = resources
         data["resourceContents"] = contents
         return data
 
     @staticmethod
-    def zip_skill(skill_dir: Path) -> io.BytesIO:
-        """把技能目录打包为 zip（内存），文件名 UTF-8"""
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in sorted(skill_dir.rglob("*")):
-                if p.is_file():
-                    zf.write(p, p.relative_to(skill_dir).as_posix())
-        buf.seek(0)
-        return buf
+    async def download_zip(id_: int) -> tuple[bytes, str]:
+        """取回 zip 原件字节 + 下载文件名（{code}.zip）"""
+        row = await SkillService.get_by_id(id_)
+        if not row:
+            raise ValueError("技能不存在")
+        return await SkillService._load_zip(row), f"{row[2]}.zip"
 
     # ==================== 上传 / 替换 ====================
     @staticmethod
     async def upload(name: str, code: str, data: bytes, description: str = None,
                      category: str = None, icon: str = None, tags: list = None,
-                     created_by: int = 0) -> int:
+                     created_by: int = 0, original_name: str = None) -> int:
         name = (name or "").strip()
         code = SkillService._normalize_code(code)
         if not name or not code:
             raise ValueError("技能名称和技能标识不能为空")
-        async with mysql_client.get_session() as session:
-            if (await session.execute(
-                    text("SELECT id FROM tb_skill WHERE code = :code"),
-                    {"code": code})).first():
-                raise ValueError(f"技能标识已存在: {code}")
-            try:
-                skill_dir = SkillService._extract_zip(code, data)
+        zip_bytes, count = SkillService._normalize_zip(data)
+        storage_name = _skill_storage_name(code)
+        display_name = SkillService._safe_file_name(original_name) or f"{code}.zip"
+        await SkillService._store_zip(storage_name, zip_bytes)
+        try:
+            async with mysql_client.get_session() as session:
+                if (await session.execute(
+                        text("SELECT id FROM tb_skill WHERE code = :code"),
+                        {"code": code})).first():
+                    raise ValueError(f"技能标识已存在: {code}")
                 result = await session.execute(
                     text("""INSERT INTO tb_skill
-                            (name, code, description, category, icon, tags, skill_path, resource_count, created_by)
-                            VALUES (:name, :code, :description, :category, :icon, :tags, :skill_path, :resource_count, :created_by)"""),
+                            (name, code, description, category, icon, tags, skill_path,
+                             resource_count, created_by, zip_file_name, zip_storage_name)
+                            VALUES (:name, :code, :description, :category, :icon, :tags,
+                                    :skill_path, :resource_count, :created_by,
+                                    :zip_file_name, :zip_storage_name)"""),
                     {"name": name, "code": code, "description": description, "category": category,
                      "icon": icon, "tags": SkillService._dump_tags(tags),
-                     "skill_path": f"skills/{code}",
-                     "resource_count": SkillService._count_files(skill_dir),
-                     "created_by": created_by})
+                     "skill_path": f"skills/{code}", "resource_count": count,
+                     "created_by": created_by, "zip_file_name": display_name,
+                     "zip_storage_name": storage_name})
                 await session.commit()
-            except Exception:
-                shutil.rmtree(SKILL_ROOT / code, ignore_errors=True)
-                raise
-            log.info(f"Skill uploaded: {code} (files={SkillService._count_files(skill_dir)})")
-            return result.lastrowid
+        except Exception:
+            # 落库失败（含 code 冲突）时回收刚存入的孤儿对象
+            await common_storage.delete(storage_name)
+            raise
+        log.info(f"Skill uploaded: {code} (files={count})")
+        return result.lastrowid
 
     @staticmethod
     async def replace(id_: int, data: bytes, name: str = None, description: str = None,
-                      category: str = None, icon: str = None, tags: list = None) -> None:
-        """zip 替换：先解压到临时目录，成功后原子切换，失败保留原目录"""
+                      category: str = None, icon: str = None, tags: list = None,
+                      original_name: str = None) -> None:
+        """zip 替换：规范化后存入新对象，落库成功后再删旧对象（失败保留原 zip）"""
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
         code = row[2]
-        tmp_dir = SKILL_ROOT / f".{code}.tmp-{int(time.time() * 1000)}"
+        old_storage = row[14]
+        zip_bytes, count = SkillService._normalize_zip(data)
+        storage_name = _skill_storage_name(code)
+        display_name = SkillService._safe_file_name(original_name) or f"{code}.zip"
+        await SkillService._store_zip(storage_name, zip_bytes)
         try:
-            SkillService._extract_zip(code, data, target_dir=tmp_dir)
+            async with mysql_client.get_session() as session:
+                fields = ["resource_count = :rc", "zip_file_name = :zn",
+                          "zip_storage_name = :zs", "update_time = NOW()"]
+                params: dict = {"id": id_, "rc": count, "zn": display_name, "zs": storage_name}
+                if name is not None:
+                    fields.append("name = :name"); params["name"] = (name or "").strip()
+                if description is not None:
+                    fields.append("description = :description"); params["description"] = description
+                if category is not None:
+                    fields.append("category = :category"); params["category"] = category
+                if icon is not None:
+                    fields.append("icon = :icon"); params["icon"] = icon
+                if tags is not None:
+                    fields.append("tags = :tags"); params["tags"] = SkillService._dump_tags(tags)
+                await session.execute(
+                    text(f"UPDATE tb_skill SET {', '.join(fields)} WHERE id = :id"), params)
+                await session.commit()
         except Exception:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await common_storage.delete(storage_name)
             raise
-        old_dir = SkillService._dir_of(row)
-        shutil.rmtree(old_dir, ignore_errors=True)
-        tmp_dir.rename(old_dir)
-        async with mysql_client.get_session() as session:
-            fields, params = ["resource_count = :rc", "update_time = NOW()"], {"id": id_}
-            if name is not None:
-                fields.append("name = :name"); params["name"] = (name or "").strip()
-            if description is not None:
-                fields.append("description = :description"); params["description"] = description
-            if category is not None:
-                fields.append("category = :category"); params["category"] = category
-            if icon is not None:
-                fields.append("icon = :icon"); params["icon"] = icon
-            if tags is not None:
-                fields.append("tags = :tags"); params["tags"] = SkillService._dump_tags(tags)
-            params["rc"] = SkillService._count_files(old_dir)
-            await session.execute(
-                text(f"UPDATE tb_skill SET {', '.join(fields)} WHERE id = :id"), params)
-            await session.commit()
+        if old_storage and old_storage != storage_name:
+            await common_storage.delete(old_storage)
         log.info(f"Skill replaced: {code}")
 
     # ==================== 重命名 / 状态 / 删除 ====================
@@ -249,36 +250,66 @@ class SkillService:
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
-        shutil.rmtree(SkillService._dir_of(row), ignore_errors=True)
         async with mysql_client.get_session() as session:
             await session.execute(text("DELETE FROM tb_skill WHERE id = :id"), {"id": id_})
             await session.commit()
+        if row[14]:
+            await common_storage.delete(row[14])
         log.info(f"Skill deleted: id={id_}")
 
     # ==================== 单文件编辑 ====================
     @staticmethod
     async def update_file(id_: int, rel_path: str, content: str) -> None:
+        """改 zip 内某个文本文件：取回→改成员→重新打包存新对象→落库后删旧对象"""
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
+        code = row[2]
+        old_storage = row[14]
         rel = (rel_path or "").strip().replace("\\", "/").lstrip("/")
         if not rel:
             raise ValueError("文件路径不能为空")
-        root = SkillService._dir_of(row).resolve()
-        target = (root / rel).resolve()
-        if target != root and not str(target).startswith(str(root) + os.sep):
+        if any(p in ("..", ".") for p in rel.split("/")):
             raise ValueError("非法文件路径")
-        if not target.is_file():
-            raise ValueError("目标文件不存在")
         if not SkillService._is_text_file(rel):
             raise ValueError("仅支持编辑文本文件")
-        target.write_text(content or "", encoding="utf-8")
-        log.info(f"Skill file updated: {rel}")
+        entries = SkillService._zip_entries(await SkillService._load_zip(row))
+        if rel not in entries:
+            raise ValueError("目标文件不存在")
+        entries[rel] = (content or "").encode("utf-8")
+        zip_bytes = SkillService._build_zip(entries)
+        storage_name = _skill_storage_name(code)
+        await SkillService._store_zip(storage_name, zip_bytes)
+        try:
+            async with mysql_client.get_session() as session:
+                await session.execute(
+                    text("UPDATE tb_skill SET zip_storage_name = :zs, update_time = NOW() WHERE id = :id"),
+                    {"id": id_, "zs": storage_name})
+                await session.commit()
+        except Exception:
+            await common_storage.delete(storage_name)
+            raise
+        if old_storage and old_storage != storage_name:
+            await common_storage.delete(old_storage)
+        log.info(f"Skill file updated: {code}/{rel}")
 
-    # ==================== zip 校验与解压 ====================
+    # ==================== 存储读写（公共存储后端，永久保存） ====================
     @staticmethod
-    def _extract_zip(code: str, data: bytes, target_dir: Path = None) -> Path:
-        """校验并解压 zip：大小≤100MB、防路径穿越、必须含 SKILL.md；支持单顶层目录包裹剥离"""
+    async def _store_zip(storage_name: str, zip_bytes: bytes) -> None:
+        await common_storage.get_storage().save(storage_name, zip_bytes, "application/zip")
+
+    @staticmethod
+    async def _load_zip(row) -> bytes:
+        storage_name = row[14]
+        if not storage_name:
+            raise ValueError("技能 zip 记录缺失，请重新上传")
+        return await common_storage.download(storage_name)
+
+    # ==================== zip 校验与规范化 ====================
+    @staticmethod
+    def _normalize_zip(data: bytes) -> tuple[bytes, int]:
+        """校验并规范化 zip：大小≤100MB、防路径穿越、必须含 SKILL.md、剥离单顶层目录、
+        过滤 __MACOSX/隐藏项；返回 (规范化后的 zip 字节, 资源文件数)。"""
         if len(data) > MAX_SKILL_SIZE:
             raise ValueError(f"压缩包超过 {MAX_SKILL_SIZE // 1024 // 1024}MB 限制")
         try:
@@ -294,7 +325,7 @@ class SkillService:
         strip = not any("/" not in n for n in names) and len(top_levels) == 1
         total = 0
         has_skill_md = False
-        entries = []
+        entries: dict = {}
         for info in infos:
             parts = info.filename.split("/")
             # 路径穿越成分（.. / .）显式拒绝——先于隐藏文件过滤，避免被静默跳过
@@ -305,31 +336,38 @@ class SkillService:
             # 过滤 __MACOSX / 隐藏文件 / 隐藏目录
             if not parts or any(p == "__MACOSX" or p.startswith(".") for p in parts):
                 continue
-            clean = Path(*parts)
-            if clean.is_absolute():
-                raise ValueError(f"压缩包包含非法路径: {info.filename}")
+            rel = "/".join(parts)
+            if not rel:
+                continue
             total += info.file_size
             if total > MAX_SKILL_SIZE:
                 raise ValueError(f"压缩包超过 {MAX_SKILL_SIZE // 1024 // 1024}MB 限制")
-            rel = clean.as_posix()
             if rel == "SKILL.md" or rel.endswith("/SKILL.md"):
                 has_skill_md = True
-            entries.append((info, rel))
+            entries[rel] = zf.read(info)
+        if not entries:
+            raise ValueError("压缩包内没有有效文件")
         if not has_skill_md:
             raise ValueError("压缩包内必须包含 SKILL.md")
-        dest = target_dir or (SKILL_ROOT / code)
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True, exist_ok=True)
-        root_str = str(dest.resolve()) + os.sep
-        for info, rel in entries:
-            out = (dest / rel).resolve()
-            if not str(out).startswith(root_str):
-                raise ValueError(f"压缩包包含非法路径: {info.filename}")
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(out, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-        return dest
+        return SkillService._build_zip(entries), len(entries)
+
+    @staticmethod
+    def _build_zip(entries: dict) -> bytes:
+        """把 {相对路径: 字节} 打成 zip（内存）"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for rel, raw in entries.items():
+                zf.writestr(rel, raw)
+        return buf.getvalue()
+
+    @staticmethod
+    def _zip_entries(zip_bytes: bytes) -> dict:
+        """zip 字节 → {相对路径: 字节}（仅文件成员）"""
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        except zipfile.BadZipFile:
+            raise ValueError("技能 zip 已损坏，请重新上传")
+        return {i.filename: zf.read(i) for i in zf.infolist() if not i.is_dir()}
 
     # ==================== 工具方法 ====================
     @staticmethod
@@ -344,6 +382,12 @@ class SkillService:
         if not code or code in (".", "..") or not _CODE_RE.match(code):
             raise ValueError("技能标识需为字母/数字/中划线/下划线（≤128位）且不含路径分隔符")
         return code
+
+    @staticmethod
+    def _safe_file_name(name: Optional[str]) -> str:
+        """展示用原始 zip 文件名：去目录、截断，仅记录不进文件系统"""
+        name = (name or "").replace("\\", "/").split("/")[-1].strip()
+        return name[:255]
 
     @staticmethod
     def _parse_tags(raw) -> list:
@@ -369,19 +413,14 @@ class SkillService:
         name = rel.rsplit("/", 1)[-1].lower()
         if name in ("skill.md", "dockerfile", "makefile"):
             return True
-        return Path(rel).suffix.lower() in TEXT_EXTS
+        return ("." + name.rsplit(".", 1)[-1]).lower() in TEXT_EXTS if "." in name else False
 
     @staticmethod
-    def _read_text(path: Path) -> str:
-        data = path.read_bytes()
+    def _decode_text(raw: bytes) -> str:
         try:
-            text = data.decode("utf-8")
+            text_str = raw.decode("utf-8")
         except UnicodeDecodeError:
             return ""
-        if len(text) > 200 * 1024:
-            text = text[: 200 * 1024] + "\n...(内容过长已截断)"
-        return text
-
-    @staticmethod
-    def _count_files(skill_dir: Path) -> int:
-        return sum(1 for p in skill_dir.rglob("*") if p.is_file())
+        if len(text_str) > 200 * 1024:
+            text_str = text_str[: 200 * 1024] + "\n...(内容过长已截断)"
+        return text_str

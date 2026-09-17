@@ -74,17 +74,20 @@ _default: Optional[StorageBackend] = None
 # ==================== 业务入口（四个方法） ====================
 
 async def upload(files: Union[Any, Sequence[Any]],
-                 base_url: Optional[str] = None) -> List[dict]:
+                 base_url: Optional[str] = None,
+                 directory: Optional[str] = None) -> List[dict]:
     """把一个/多个接口文件上传到当前存储后端，始终返回列表。
 
     files 为 FastAPI 的 UploadFile（或任何具备 filename/content_type/read()/size 的对象）；
-    base_url 是匿名下载接口基址（仅本地后端用，OSS 忽略），由调用方按请求 Host 推导。
+    base_url 是匿名下载接口基址（仅本地后端用，OSS 忽略），由调用方按请求 Host 推导；
+    directory 为可选子目录（如 tmp），传入时把对象统一归到存储后端的该目录下
+    （name=dir/{uuid}_x），留空则维持扁平存储；下载/删除/判存在照常用返回的 fileName（含目录）。
     多文件并发上传（asyncio.gather），逐项返回成败，不因一个失败丢掉其它结果。
     """
     backend = get_storage()
     items = files if isinstance(files, (list, tuple)) else [files]
     return list(await asyncio.gather(
-        *(_upload_one(f, backend, base_url) for f in items)))
+        *(_upload_one(f, backend, base_url, directory) for f in items)))
 
 
 async def download(name: str) -> bytes:
@@ -102,9 +105,13 @@ async def exists(name: str) -> bool:
     return await get_storage().exists(check_name(name))
 
 
-async def _upload_one(file, backend: StorageBackend, base_url: Optional[str]) -> dict:
-    name = new_file_name(getattr(file, "filename", "") or "")
-    display = original_name(name)
+async def _upload_one(file, backend: StorageBackend, base_url: Optional[str],
+                      directory: Optional[str] = None) -> dict:
+    # 先按 basename 生成扁平唯一名（new_file_name 会丢弃传入目录），展示名由它反推；
+    # 需要归子目录时再把 directory 拼到存储名前缀（后端各自补 root/path_prefix）。
+    flat = new_file_name(getattr(file, "filename", "") or "")
+    name = f"{directory.strip('/')}/{flat}" if directory else flat
+    display = original_name(flat)
     try:
         data = await _read_upload(file)
         await backend.save(name, data, getattr(file, "content_type", None))

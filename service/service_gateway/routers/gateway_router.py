@@ -246,16 +246,23 @@ async def workflow_api_proxy(request: Request, path: str, url: str,
                              headers: dict, body: bytes):
     """
     API Key 模式代理：
-    1. 只接受执行接口 /workflow-executions/workflows/{id}/execute-async（其余返回 403）
+    1. 只接受异步执行接口 /workflow-executions/workflows/{id}/execute-async；订阅接口
+       （GET .../subscribe）按普通转发放行，其余路径返回 403
     2. 从 Redis 读取 X-Workflow-Token 对应配置（workflowId/rateLimit/expireTime/status）鉴权
     3. 按 Key 配置 QPS 限流（0=不限）
     4. 将请求体包装为符合执行接口的格式 {"inputs": ...}（宽松兼容直接传参对象）
     5. 透传 X-Workflow-Token 头，下游据此标记 trigger=API（只执行已发布版本）
     """
+    # 订阅（SSE 长连接）直接放行：executionId 是 UUID 熵足够，TokenCheckMiddleware 本来就
+    # 把 /subscribe 列进了后缀白名单（不校登录态）。若在这里按“只认 execute-async”判掉，
+    # 第三方带着 X-Workflow-Token 订阅反而会吃 403。
+    if request.method == "GET" and path.endswith("/subscribe"):
+        return await forward_downstream(request, url, headers, body)
+
     match = re.match(r"^workflow-executions/workflows/(\d+)/execute-async$", path)
     if not match:
         return JSONResponse(status_code=403,
-                            content=ApiResponse.error(403, "API Key 仅支持异步执行工作流接口"))
+                            content=ApiResponse.error(403, "API Key 仅支持【执行/订阅】工作流的操作"))
     workflow_id = int(match.group(1))
 
     token = (request.headers.get("X-Workflow-Token") or "").strip()

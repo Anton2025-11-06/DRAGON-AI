@@ -201,12 +201,13 @@ class OSSStorageBackend(StorageBackend):
     # ---------- 内部工具 ----------
 
     def _key(self, ref: str) -> str:
-        """文件名 → OSS object key（幂等补前缀，历史无前缀记录也能定位）。"""
-        ref = (ref or "").lstrip("/")
-        if not ref:
-            raise ValueError("OSS 文件名为空")
-        # 只取末段：容忍调用方传成完整 key 或下载 URL 路径
-        name = check_name(ref.rsplit("/", 1)[-1])
+        """存储名 → OSS object key（幂等补前缀，历史无前缀记录也能定位）。
+
+        存储名可含一段安全相对目录（如 skills/{uuid}_x.zip），需原样保留以落到子目录；
+        目录合法性统一交 check_name（禁绝对路径/反斜杠/`..`/`.`/空段）。扁平名不含 `/`，
+        行为与旧一致，对既有调用方零影响。
+        """
+        name = check_name((ref or "").lstrip("/"))
         return self._prefix + name
 
     @staticmethod

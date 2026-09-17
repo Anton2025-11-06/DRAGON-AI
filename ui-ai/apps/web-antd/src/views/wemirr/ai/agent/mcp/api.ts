@@ -17,6 +17,9 @@ export interface McpServerConfig {
   args?: string; // JSON字符串
   url?: string;
   env?: string; // JSON字符串
+  description?: string;
+  /** 非创建人且非管理员时后端隐藏 SSE url（url 为空且此标记为真） */
+  urlHidden?: boolean;
   status: boolean;
   createdTime?: string;
   updatedTime?: string;
@@ -29,6 +32,7 @@ export interface McpServerConfigSaveReq {
   args?: string;
   url?: string;
   env?: string;
+  description?: string;
   status?: boolean;
 }
 
@@ -45,6 +49,17 @@ export interface McpToolInfo {
   description?: string;
   /** MCP 工具输入参数 JSON Schema（tools/list 返回，仅展示） */
   inputSchema?: Record<string, any>;
+}
+
+/** 工具调用结果（与后端 _tool_result_to_dict 一致） */
+export interface McpToolCallResult {
+  /** 文本/资源内容拼接结果 */
+  content: string;
+  /** 图片/音频等二进制转 data URI 或资源 URI */
+  urls: string[];
+  isError: boolean;
+  /** 结构化输出（部分工具给 JSON） */
+  structured?: null | Record<string, any>;
 }
 
 // 分页查询
@@ -66,12 +81,6 @@ export const UpdateObj = (id: number, data: McpServerConfigSaveReq) =>
 export const DelObj = (id: number) =>
   defHttp.delete(`/api/workflow/mcp-server/${id}`);
 
-// 刷新连接
-export const RefreshConnection = (id: number) =>
-  defHttp.request(`/api/workflow/mcp-server/${id}/refresh`, {
-    method: 'PATCH',
-  });
-
 // 测试连接（按ID）
 export const TestConnection = (id: number) =>
   defHttp.post<McpConnectionTestResult>(
@@ -88,6 +97,17 @@ export const TestParams = (data: Partial<McpServerConfigSaveReq>) =>
 // 获取工具列表
 export const GetTools = (id: number) =>
   defHttp.get<McpToolInfo[]>(`/api/workflow/mcp-server/${id}/tools`);
+
+// 调用工具（查看工具页的「测试」按钮）
+export const CallTool = (
+  id: number,
+  toolName: string,
+  args: Record<string, any>,
+) =>
+  defHttp.post<McpToolCallResult>(`/api/workflow/mcp-server/${id}/call-tool`, {
+    tool_name: toolName,
+    arguments: args,
+  });
 
 // 切换启用状态
 export const ToggleStatus = (id: number, status: boolean) =>
