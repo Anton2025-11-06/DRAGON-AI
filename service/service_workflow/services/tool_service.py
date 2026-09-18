@@ -14,12 +14,13 @@ parameters_schema 存 JSON：
 import asyncio
 import json
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from sqlalchemy import text
+from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from service.service_workflow.models.agent_entity import Tool
 from service.service_workflow.workflow_engine import py_sandbox
 
 DEFAULT_TIMEOUT_MS = py_sandbox.DEFAULT_TIMEOUT_MS
@@ -35,48 +36,46 @@ class ToolService:
     async def page(page: int = 1, page_size: int = 10,
                    name: str = None, status: int = None) -> dict:
         async with mysql_client.get_session() as session:
-            where = "WHERE 1=1"
-            params = {}
+            conds = []
             if name:
-                where += " AND name LIKE :name"
-                params["name"] = f"%{name}%"
+                conds.append(Tool.name.like(f"%{name}%"))
             if status is not None:
-                where += " AND status = :status"
-                params["status"] = status
+                conds.append(Tool.status == status)
             total = (await session.execute(
-                text(f"SELECT COUNT(*) FROM tb_tool {where}"), params)).scalar()
+                select(func.count()).select_from(Tool).where(*conds))).scalar()
             rows = (await session.execute(
-                text(f"""SELECT id, name, description, LEFT(function_code, 200) AS function_preview,
-                               parameters_schema, status, timeout, created_by,
-                               DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') AS create_time,
-                               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') AS update_time
-                        FROM tb_tool {where}
-                        ORDER BY id DESC LIMIT :limit OFFSET :offset"""),
-                {**params, "limit": page_size, "offset": (page - 1) * page_size})).all()
+                select(Tool).where(*conds)
+                .order_by(Tool.id.desc())
+                .limit(page_size).offset((page - 1) * page_size))).scalars().all()
             items = [{
-                "id": r[0], "name": r[1], "description": r[2],
-                "function_code": r[3], "parameters_schema": r[4],
-                "status": bool(r[5]), "timeout": r[6], "created_by": r[7],
-                "create_time": r[8], "update_time": r[9],
+                "id": r.id, "name": r.name, "description": r.description,
+                # 列表页只回源码预览（截断 200 字），完整代码走 detail
+                "function_code": (r.function_code or "")[:200],
+                "parameters_schema": r.parameters_schema,
+                "status": bool(r.status), "timeout": r.timeout, "created_by": r.created_by,
+                "create_time": ToolService._fmt_time(r.create_time),
+                "update_time": ToolService._fmt_time(r.update_time),
             } for r in rows]
             return {"total": total, "items": items}
 
     @staticmethod
-    async def get_by_id(id_: int):
-        async with mysql_client.get_session() as session:
-            row = (await session.execute(
-                text("""SELECT id, name, description, function_code, parameters_schema,
-                               status, timeout
-                        FROM tb_tool WHERE id = :id"""), {"id": id_})).first()
-            return row
+    def _fmt_time(value) -> Optional[str]:
+        """DATETIME → 前端展示字符串（对齐旧 SQL 的 DATE_FORMAT 口径）。"""
+        return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
 
     @staticmethod
-    def _to_dict(row) -> dict:
-        """get_by_id 行 → 字典（列序只在这一处维护）"""
+    async def get_by_id(id_: int) -> Optional[Tool]:
+        async with mysql_client.get_session() as session:
+            return (await session.execute(
+                select(Tool).where(Tool.id == id_))).scalar_one_or_none()
+
+    @staticmethod
+    def _to_dict(row: Tool) -> dict:
+        """get_by_id 行 → 字典（列名只在这一处维护）"""
         return {
-            "id": row[0], "name": row[1], "description": row[2],
-            "function_code": row[3], "parameters_schema": row[4],
-            "status": bool(row[5]), "timeout": row[6] or DEFAULT_TIMEOUT_MS,
+            "id": row.id, "name": row.name, "description": row.description,
+            "function_code": row.function_code, "parameters_schema": row.parameters_schema,
+            "status": bool(row.status), "timeout": row.timeout or DEFAULT_TIMEOUT_MS,
         }
 
     @staticmethod
@@ -93,12 +92,12 @@ class ToolService:
         """
         async with mysql_client.get_session() as session:
             rows = (await session.execute(
-                text("""SELECT id, name, description, parameters_schema, timeout
-                        FROM tb_tool WHERE status = 1 ORDER BY id DESC"""))).all()
+                select(Tool).where(Tool.status == 1)
+                .order_by(Tool.id.desc()))).scalars().all()
         return [{
-            "id": r[0], "name": r[1], "description": r[2],
-            "timeout": r[4] or DEFAULT_TIMEOUT_MS,
-            "parameters": ToolService.parse_parameters(r[3]),
+            "id": r.id, "name": r.name, "description": r.description,
+            "timeout": r.timeout or DEFAULT_TIMEOUT_MS,
+            "parameters": ToolService.parse_parameters(r.parameters_schema),
         } for r in rows]
 
     # ==================== 新增 / 更新 / 删除 ====================
@@ -109,18 +108,15 @@ class ToolService:
         # 入库前先编译校验，避免无效源码入库
         py_sandbox.compile_check(function_code)
         async with mysql_client.get_session() as session:
-            result = await session.execute(text(
-                """INSERT INTO tb_tool (name, description, function_code, parameters_schema,
-                                        status, timeout, created_by)
-                   VALUES (:name, :description, :function_code, :parameters_schema,
-                           :status, :timeout, :created_by)"""),
-                {"name": name, "description": description, "function_code": function_code,
-                 "parameters_schema": parameters_schema, "status": 1 if status else 0,
-                 "timeout": ToolService.normalize_timeout(timeout),
-                 "created_by": created_by})
+            tool = Tool(name=name, description=description, function_code=function_code,
+                        parameters_schema=parameters_schema, status=1 if status else 0,
+                        timeout=ToolService.normalize_timeout(timeout), created_by=created_by)
+            session.add(tool)
+            await session.flush()
+            new_id = tool.id
             await session.commit()
             log.info(f"Tool created: {name}")
-            return result.lastrowid
+            return new_id
 
     @staticmethod
     async def update(id_: int, name: str = None, function_code: str = None,
@@ -129,24 +125,23 @@ class ToolService:
         if function_code:
             py_sandbox.compile_check(function_code)
         async with mysql_client.get_session() as session:
-            fields, params = [], {"id": id_}
+            values: dict = {}
             if name is not None:
-                fields.append("name = :name"); params["name"] = name
+                values["name"] = name
             if function_code is not None:
-                fields.append("function_code = :function_code"); params["function_code"] = function_code
+                values["function_code"] = function_code
             if description is not None:
-                fields.append("description = :description"); params["description"] = description
+                values["description"] = description
             if parameters_schema is not None:
-                fields.append("parameters_schema = :parameters_schema"); params["parameters_schema"] = parameters_schema
+                values["parameters_schema"] = parameters_schema
             if status is not None:
-                fields.append("status = :status"); params["status"] = 1 if status else 0
+                values["status"] = 1 if status else 0
             if timeout is not None:
-                fields.append("timeout = :timeout")
-                params["timeout"] = ToolService.normalize_timeout(timeout)
-            if not fields:
+                values["timeout"] = ToolService.normalize_timeout(timeout)
+            if not values:
                 return True
             await session.execute(
-                text(f"UPDATE tb_tool SET {', '.join(fields)} WHERE id = :id"), params)
+                update(Tool).where(Tool.id == id_).values(**values))
             await session.commit()
             log.info(f"Tool updated: id={id_}")
             return True
@@ -163,8 +158,7 @@ class ToolService:
     @staticmethod
     async def delete(id_: int) -> bool:
         async with mysql_client.get_session() as session:
-            result = await session.execute(
-                text("DELETE FROM tb_tool WHERE id = :id"), {"id": id_})
+            result = await session.execute(delete(Tool).where(Tool.id == id_))
             await session.commit()
             return result.rowcount > 0
 
@@ -172,8 +166,7 @@ class ToolService:
     async def toggle_status(id_: int, status: bool) -> bool:
         async with mysql_client.get_session() as session:
             result = await session.execute(
-                text("UPDATE tb_tool SET status = :status WHERE id = :id"),
-                {"id": id_, "status": 1 if status else 0})
+                update(Tool).where(Tool.id == id_).values(status=1 if status else 0))
             await session.commit()
             return result.rowcount > 0
 
@@ -264,9 +257,9 @@ class ToolService:
         row = await ToolService.get_by_id(id_)
         if not row:
             raise ValueError("工具不存在")
-        if not row[5]:
+        if not row.status:
             raise ValueError("工具已停用，请先启用后再测试")
-        return await ToolService._run_guarded(row[3], parameters or {}, row[6])
+        return await ToolService._run_guarded(row.function_code, parameters or {}, row.timeout)
 
     @staticmethod
     async def test_definition(function_code: str, parameters: dict = None,
@@ -277,17 +270,16 @@ class ToolService:
     @staticmethod
     async def load_for_node(tool_id: int = None, name: str = None) -> dict:
         """按 ID（优先）或名称取启用中的工具，供工作流工具节点执行。"""
-        sql = ("SELECT id, name, description, function_code, parameters_schema, status, timeout "
-               "FROM tb_tool WHERE id = :id" if tool_id else
-               "SELECT id, name, description, function_code, parameters_schema, status, timeout "
-               "FROM tb_tool WHERE name = :name ORDER BY id DESC LIMIT 1")
         async with mysql_client.get_session() as session:
-            row = (await session.execute(
-                text(sql), {"id": tool_id} if tool_id else {"name": name})).first()
+            if tool_id:
+                stmt = select(Tool).where(Tool.id == tool_id)
+            else:
+                stmt = select(Tool).where(Tool.name == name).order_by(Tool.id.desc()).limit(1)
+            row = (await session.execute(stmt)).scalar_one_or_none()
         if not row:
             raise ValueError(f"工具不存在: {name or tool_id}")
-        if not row[5]:
-            raise ValueError(f"工具已停用: {row[1]}")
+        if not row.status:
+            raise ValueError(f"工具已停用: {row.name}")
         return ToolService._to_dict(row)
 
     @staticmethod

@@ -5,20 +5,24 @@
   统一存在存储后端的 skills/ 子目录下（存储名为 skills/{uuid}_{code}.zip），
   数据表记录 zip 包文件名 + 存储句柄（含子目录的相对地址）+ 创建人/时间等
 - 不再把 zip 解压成常驻目录：预览 / 下载 / 单文件编辑都按需从存储取回 zip 在内存处理
+- zipfile 为同步 CPU 密集操作（最大 100MB），统一经 asyncio.to_thread 卸载到工作线程，避免阻塞事件循环
 - 压缩包要求：≤100MB、必须含 SKILL.md、逐成员校验防路径穿越；支持单顶层目录包裹自动剥离
 """
+import asyncio
 import io
 import json
 import re
 import zipfile
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import delete, func, or_, select, update
 
 from common import common_storage
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from common.common_storage.base import new_file_name
+from service.service_workflow.models.agent_entity import Skill
+from common.common_threadpool.pool import thread_pool
 
 # 压缩包大小上限（100MB）
 MAX_SKILL_SIZE = 100 * 1024 * 1024
@@ -29,16 +33,6 @@ TEXT_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".vue", ".java", ".go", ".c", ".cpp", ".h",
     ".sh", ".bat", ".ps1", ".sql", ".log", ".ini", ".conf", ".toml",
 }
-
-# get_by_id 列顺序（内部按下标取值，新增列一律追加在末尾以免打乱既有索引）
-# 0 id | 1 name | 2 code | 3 description | 4 category | 5 icon | 6 tags | 7 status
-# 8 skill_path | 9 resource_count | 10 created_by | 11 create_time | 12 update_time
-# 13 zip_file_name | 14 zip_storage_name
-_SELECT_COLS = """id, name, code, description, category, icon, tags, status,
-                  skill_path, resource_count, created_by,
-                  DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') AS create_time,
-                  DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') AS update_time,
-                  zip_file_name, zip_storage_name"""
 
 # 目录名安全校验：禁止路径分隔符/控制字符，允许中文等 Unicode；≤128 位
 _CODE_RE = re.compile(r"^[^/\\\x00-\x1f]{1,128}$")
@@ -60,47 +54,48 @@ class SkillService:
     async def page(page: int = 1, page_size: int = 10, keyword: str = None,
                    category: str = None, status: int = None) -> dict:
         async with mysql_client.get_session() as session:
-            where = "WHERE 1=1"
-            params = {}
+            conds = []
             if keyword:
-                where += " AND (name LIKE :kw OR code LIKE :kw)"
-                params["kw"] = f"%{keyword}%"
+                kw = f"%{keyword}%"
+                conds.append(or_(Skill.name.like(kw), Skill.code.like(kw)))
             if category:
-                where += " AND category = :category"
-                params["category"] = category
+                conds.append(Skill.category == category)
             if status is not None:
-                where += " AND status = :status"
-                params["status"] = status
+                conds.append(Skill.status == status)
             total = (await session.execute(
-                text(f"SELECT COUNT(*) FROM tb_skill {where}"), params)).scalar()
+                select(func.count()).select_from(Skill).where(*conds))).scalar()
             rows = (await session.execute(
-                text(f"""SELECT {_SELECT_COLS}
-                        FROM tb_skill {where}
-                        ORDER BY id DESC LIMIT :limit OFFSET :offset"""),
-                {**params, "limit": page_size, "offset": (page - 1) * page_size})).all()
+                select(Skill).where(*conds)
+                .order_by(Skill.id.desc())
+                .limit(page_size).offset((page - 1) * page_size))).scalars().all()
             return {"total": total, "items": [SkillService._row_to_dict(r) for r in rows]}
 
     @staticmethod
-    async def get_by_id(id_: int):
+    async def get_by_id(id_: int) -> Optional[Skill]:
         async with mysql_client.get_session() as session:
             return (await session.execute(
-                text(f"SELECT {_SELECT_COLS} FROM tb_skill WHERE id = :id"),
-                {"id": id_})).first()
+                select(Skill).where(Skill.id == id_))).scalar_one_or_none()
 
     @staticmethod
-    def _row_to_dict(row) -> dict:
-        code = row[2]
+    def _fmt_time(value) -> Optional[str]:
+        """DATETIME → 前端展示字符串（对齐旧 SQL 的 DATE_FORMAT 口径）。"""
+        return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
+
+    @staticmethod
+    def _row_to_dict(row: Skill) -> dict:
+        code = row.code
         return {
-            "id": row[0], "name": row[1], "code": code,
-            "description": row[3], "category": row[4], "icon": row[5],
-            "tags": SkillService._parse_tags(row[6]),
-            "status": bool(row[7]),
+            "id": row.id, "name": row.name, "code": code,
+            "description": row.description, "category": row.category, "icon": row.icon,
+            "tags": SkillService._parse_tags(row.tags),
+            "status": bool(row.status),
             # 展示用目录路径：技能 zip 统一落在存储后端 skills/ 子目录，逻辑归入 skills/{code}
-            "skillPath": row[8] or f"skills/{code}",
-            "resourceCount": row[9], "created_by": row[10],
-            "create_time": row[11], "update_time": row[12],
+            "skillPath": row.skill_path or f"skills/{code}",
+            "resourceCount": row.resource_count, "created_by": row.created_by,
+            "create_time": SkillService._fmt_time(row.create_time),
+            "update_time": SkillService._fmt_time(row.update_time),
             "skillFile": "SKILL.md",
-            "zipFileName": row[13] or f"{code}.zip",
+            "zipFileName": row.zip_file_name or f"{code}.zip",
         }
 
     # ==================== 元信息 / 预览 ====================
@@ -119,7 +114,8 @@ class SkillService:
         if not row:
             raise ValueError("技能不存在")
         data = SkillService._row_to_dict(row)
-        entries = SkillService._zip_entries(await SkillService._load_zip(row))
+        zip_bytes = await SkillService._load_zip(row)
+        entries = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._zip_entries, zip_bytes)
         resources = sorted(entries)
         skill_content = ""
         contents: dict = {}
@@ -141,7 +137,7 @@ class SkillService:
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
-        return await SkillService._load_zip(row), f"{row[2]}.zip"
+        return await SkillService._load_zip(row), f"{row.code}.zip"
 
     # ==================== 上传 / 替换 ====================
     @staticmethod
@@ -152,35 +148,32 @@ class SkillService:
         code = SkillService._normalize_code(code)
         if not name or not code:
             raise ValueError("技能名称和技能标识不能为空")
-        zip_bytes, count = SkillService._normalize_zip(data)
+        zip_bytes, count = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._normalize_zip,
+                                                                            data)
         storage_name = _skill_storage_name(code)
         display_name = SkillService._safe_file_name(original_name) or f"{code}.zip"
         await SkillService._store_zip(storage_name, zip_bytes)
         try:
             async with mysql_client.get_session() as session:
                 if (await session.execute(
-                        text("SELECT id FROM tb_skill WHERE code = :code"),
-                        {"code": code})).first():
+                        select(Skill.id).where(Skill.code == code))).first():
                     raise ValueError(f"技能标识已存在: {code}")
-                result = await session.execute(
-                    text("""INSERT INTO tb_skill
-                            (name, code, description, category, icon, tags, skill_path,
-                             resource_count, created_by, zip_file_name, zip_storage_name)
-                            VALUES (:name, :code, :description, :category, :icon, :tags,
-                                    :skill_path, :resource_count, :created_by,
-                                    :zip_file_name, :zip_storage_name)"""),
-                    {"name": name, "code": code, "description": description, "category": category,
-                     "icon": icon, "tags": SkillService._dump_tags(tags),
-                     "skill_path": f"skills/{code}", "resource_count": count,
-                     "created_by": created_by, "zip_file_name": display_name,
-                     "zip_storage_name": storage_name})
+                skill = Skill(
+                    name=name, code=code, description=description, category=category,
+                    icon=icon, tags=SkillService._dump_tags(tags),
+                    skill_path=f"skills/{code}", resource_count=count,
+                    created_by=created_by, zip_file_name=display_name,
+                    zip_storage_name=storage_name)
+                session.add(skill)
+                await session.flush()
+                new_id = skill.id
                 await session.commit()
         except Exception:
             # 落库失败（含 code 冲突）时回收刚存入的孤儿对象
             await common_storage.delete(storage_name)
             raise
         log.info(f"Skill uploaded: {code} (files={count})")
-        return result.lastrowid
+        return new_id
 
     @staticmethod
     async def replace(id_: int, data: bytes, name: str = None, description: str = None,
@@ -190,29 +183,29 @@ class SkillService:
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
-        code = row[2]
-        old_storage = row[14]
-        zip_bytes, count = SkillService._normalize_zip(data)
+        code = row.code
+        old_storage = row.zip_storage_name
+        zip_bytes, count = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._normalize_zip,
+                                                                            data)
         storage_name = _skill_storage_name(code)
         display_name = SkillService._safe_file_name(original_name) or f"{code}.zip"
         await SkillService._store_zip(storage_name, zip_bytes)
         try:
             async with mysql_client.get_session() as session:
-                fields = ["resource_count = :rc", "zip_file_name = :zn",
-                          "zip_storage_name = :zs", "update_time = NOW()"]
-                params: dict = {"id": id_, "rc": count, "zn": display_name, "zs": storage_name}
+                values: dict = {"resource_count": count, "zip_file_name": display_name,
+                                "zip_storage_name": storage_name}
                 if name is not None:
-                    fields.append("name = :name"); params["name"] = (name or "").strip()
+                    values["name"] = (name or "").strip()
                 if description is not None:
-                    fields.append("description = :description"); params["description"] = description
+                    values["description"] = description
                 if category is not None:
-                    fields.append("category = :category"); params["category"] = category
+                    values["category"] = category
                 if icon is not None:
-                    fields.append("icon = :icon"); params["icon"] = icon
+                    values["icon"] = icon
                 if tags is not None:
-                    fields.append("tags = :tags"); params["tags"] = SkillService._dump_tags(tags)
+                    values["tags"] = SkillService._dump_tags(tags)
                 await session.execute(
-                    text(f"UPDATE tb_skill SET {', '.join(fields)} WHERE id = :id"), params)
+                    update(Skill).where(Skill.id == id_).values(**values))
                 await session.commit()
         except Exception:
             await common_storage.delete(storage_name)
@@ -229,8 +222,7 @@ class SkillService:
             raise ValueError("技能名称不能为空")
         async with mysql_client.get_session() as session:
             result = await session.execute(
-                text("UPDATE tb_skill SET name = :name WHERE id = :id"),
-                {"name": name, "id": id_})
+                update(Skill).where(Skill.id == id_).values(name=name))
             await session.commit()
             if result.rowcount == 0:
                 raise ValueError("技能不存在")
@@ -239,8 +231,8 @@ class SkillService:
     async def toggle_status(id_: int, status: bool) -> None:
         async with mysql_client.get_session() as session:
             result = await session.execute(
-                text("UPDATE tb_skill SET status = :status WHERE id = :id"),
-                {"id": id_, "status": 1 if status else 0})
+                update(Skill).where(Skill.id == id_)
+                .values(status=1 if status else 0))
             await session.commit()
             if result.rowcount == 0:
                 raise ValueError("技能不存在")
@@ -251,10 +243,10 @@ class SkillService:
         if not row:
             raise ValueError("技能不存在")
         async with mysql_client.get_session() as session:
-            await session.execute(text("DELETE FROM tb_skill WHERE id = :id"), {"id": id_})
+            await session.execute(delete(Skill).where(Skill.id == id_))
             await session.commit()
-        if row[14]:
-            await common_storage.delete(row[14])
+        if row.zip_storage_name:
+            await common_storage.delete(row.zip_storage_name)
         log.info(f"Skill deleted: id={id_}")
 
     # ==================== 单文件编辑 ====================
@@ -264,8 +256,8 @@ class SkillService:
         row = await SkillService.get_by_id(id_)
         if not row:
             raise ValueError("技能不存在")
-        code = row[2]
-        old_storage = row[14]
+        code = row.code
+        old_storage = row.zip_storage_name
         rel = (rel_path or "").strip().replace("\\", "/").lstrip("/")
         if not rel:
             raise ValueError("文件路径不能为空")
@@ -273,18 +265,19 @@ class SkillService:
             raise ValueError("非法文件路径")
         if not SkillService._is_text_file(rel):
             raise ValueError("仅支持编辑文本文件")
-        entries = SkillService._zip_entries(await SkillService._load_zip(row))
+        zip_bytes = await SkillService._load_zip(row)
+        entries = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._zip_entries, zip_bytes)
         if rel not in entries:
             raise ValueError("目标文件不存在")
         entries[rel] = (content or "").encode("utf-8")
-        zip_bytes = SkillService._build_zip(entries)
+        zip_bytes = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._build_zip, entries)
         storage_name = _skill_storage_name(code)
         await SkillService._store_zip(storage_name, zip_bytes)
         try:
             async with mysql_client.get_session() as session:
                 await session.execute(
-                    text("UPDATE tb_skill SET zip_storage_name = :zs, update_time = NOW() WHERE id = :id"),
-                    {"id": id_, "zs": storage_name})
+                    update(Skill).where(Skill.id == id_)
+                    .values(zip_storage_name=storage_name))
                 await session.commit()
         except Exception:
             await common_storage.delete(storage_name)
@@ -299,8 +292,8 @@ class SkillService:
         await common_storage.get_storage().save(storage_name, zip_bytes, "application/zip")
 
     @staticmethod
-    async def _load_zip(row) -> bytes:
-        storage_name = row[14]
+    async def _load_zip(row: Skill) -> bytes:
+        storage_name = row.zip_storage_name
         if not storage_name:
             raise ValueError("技能 zip 记录缺失，请重新上传")
         return await common_storage.download(storage_name)

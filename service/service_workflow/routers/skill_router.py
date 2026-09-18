@@ -14,19 +14,10 @@ from pydantic import BaseModel, Field
 
 from common.common_entity.response_schema import ApiResponse
 from common.common_permission.permission import get_login_user, has_permission
+from service.service_workflow.models.skill import SkillRenameRequest, SkillFileUpdateRequest
 from service.service_workflow.services import skill_service as svc
 
 router = APIRouter(prefix="/skills", tags=["技能管理"])
-
-
-class SkillRenameRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=128, description="新的技能名称")
-
-
-class SkillFileUpdateRequest(BaseModel):
-    path: str = Field(..., max_length=500, description="技能内相对文件路径")
-    content: str = Field("", description="文件内容")
-
 
 def _parse_tags_form(raw: str) -> List[str]:
     """Form 标签解析：优先 JSON 数组字符串，兼容逗号分隔"""

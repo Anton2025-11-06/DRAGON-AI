@@ -7,10 +7,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from service.service_workflow.models.agent_entity import McpServer
 
 # MCP 连接测试超时（秒）：SDK initialize + 工具清单握手必须在此时限内完成
 _PROBE_TIMEOUT = 5.0
@@ -32,59 +33,52 @@ class McpServerService:
                    viewer_id: int = 0, viewer_admin: bool = False) -> dict:
         """分页查询 MCP 连接配置（非创建人且非管理员时隐藏 SSE url 值）"""
         async with mysql_client.get_session() as session:
-            where = "WHERE 1=1"
-            params = {}
+            conds = []
             if name:
-                where += " AND name LIKE :name"
-                params["name"] = f"%{name}%"
+                conds.append(McpServer.name.like(f"%{name}%"))
             if status is not None:
-                where += " AND status = :status"
-                params["status"] = status
+                conds.append(McpServer.status == status)
             total = (await session.execute(
-                text(f"SELECT COUNT(*) FROM tb_mcp_server {where}"), params)).scalar()
+                select(func.count()).select_from(McpServer).where(*conds))).scalar()
             rows = (await session.execute(
-                text(f"""SELECT id, name, type, url, command, args, env, status, created_by,
-                               create_time, update_time, description
-                        FROM tb_mcp_server {where}
-                        ORDER BY id DESC LIMIT :limit OFFSET :offset"""),
-                {**params, "limit": page_size, "offset": (page - 1) * page_size})).all()
+                select(McpServer).where(*conds)
+                .order_by(McpServer.id.desc())
+                .limit(page_size).offset((page - 1) * page_size))).scalars().all()
             items = [McpServerService._to_dict(r, viewer_id, viewer_admin) for r in rows]
             return {"total": total, "items": items}
 
     @staticmethod
-    def _to_dict(row, viewer_id: int = 0, viewer_admin: bool = False) -> dict:
-        """行转字典：status 统一转 bool（前端 dict-switch 使用）。
+    def _to_dict(row: McpServer, viewer_id: int = 0, viewer_admin: bool = False) -> dict:
+        """ORM 行转字典：status 统一转 bool（前端 dict-switch 使用）。
 
         SSE url 属敏感连接地址：非创建人且非管理员时置空并标 urlHidden，
         前端据此隐藏值；后端 update 会忽略空的 url，避免非创建人回写时误清。
         """
-        created_by = row[8]
-        hidden = (not viewer_admin) and (created_by != viewer_id)
+        hidden = (not viewer_admin) and (row.created_by != viewer_id)
         return {
-            "id": row[0], "name": row[1], "type": row[2],
-            "url": "" if hidden else row[3],
+            "id": row.id, "name": row.name, "type": row.type,
+            "url": "" if hidden else row.url,
             "urlHidden": hidden,
-            "command": row[4], "args": row[5], "env": row[6],
-            "status": bool(row[7]), "created_by": created_by,
-            "create_time": row[9], "update_time": row[10],
-            "description": row[11],
+            "command": row.command, "args": row.args, "env": row.env,
+            "status": bool(row.status), "created_by": row.created_by,
+            "create_time": row.create_time, "update_time": row.update_time,
+            "description": row.description,
         }
 
     @staticmethod
-    async def get_by_id(id_: int):
+    async def get_by_id(id_: int) -> Optional[McpServer]:
         async with mysql_client.get_session() as session:
-            row = (await session.execute(
-                text("""SELECT id, name, type, url, command, args, env, status, created_by
-                        FROM tb_mcp_server WHERE id = :id"""), {"id": id_})).first()
-            return row
+            return (await session.execute(
+                select(McpServer).where(McpServer.id == id_))).scalar_one_or_none()
 
     # ==================== SDK 连接与会话管理 ====================
 
     @staticmethod
-    def _transports(row):
+    def _transports(row: McpServer):
         """按配置行返回传输层上下文管理器（此时尚未建连）。
-
-        row 结构（与 get_by_id 一致）：(id, name, type, url, command, args, env, status, created_by)。
+    
+        row 为 McpServer ORM 行（get_by_id 结果或 test_params 构造的临时对象），
+        只读取 type/url/command/args/env 字段。
         - SSE：mcp.client.sse.sse_client(url, headers)
         - STDIO：mcp.client.stdio.stdio_client(StdioServerParameters(command, args, env))
         """
@@ -93,24 +87,24 @@ class McpServerService:
             from mcp.client.stdio import StdioServerParameters, stdio_client
         except ImportError as e:  # noqa: BLE001
             raise ValueError("mcp SDK 未安装，请执行 pip install mcp") from e
-
-        type_ = str(row[2] or "SSE").upper()
+    
+        type_ = str(row.type or "SSE").upper()
         if type_ == "SSE":
-            url = row[3]
+            url = row.url
             if not url:
                 raise ValueError("SSE 连接地址不能为空")
             if not url.startswith(("http://", "https://")):
                 raise ValueError("SSE 地址需以 http:// 或 https:// 开头")
-            McpServerService._parse_json(row[6], "env")  # 仅校验 env 格式合法；沿用旧格式时静默
+            McpServerService._parse_json(row.env, "env")  # 仅校验 env 格式合法；沿用旧格式时静默
             return sse_client(url, headers={"Accept": "text/event-stream"})
         if type_ == "STDIO":
-            command = row[4]
+            command = row.command
             if not command:
                 raise ValueError("STDIO 启动命令不能为空")
-            cmd_args = McpServerService._parse_json(row[5], "args")
+            cmd_args = McpServerService._parse_json(row.args, "args")
             if cmd_args and not isinstance(cmd_args, list):
                 raise ValueError("STDIO 参数必须是 JSON 数组格式")
-            env_dict = McpServerService._parse_json(row[6], "env") or None
+            env_dict = McpServerService._parse_json(row.env, "env") or None
             params = StdioServerParameters(
                 command=command,
                 args=[str(a) for a in (cmd_args or [])],
@@ -228,43 +222,43 @@ class McpServerService:
                      args: str = None, env: str = None, status: bool = True,
                      created_by: int = 0, description: str = None) -> int:
         async with mysql_client.get_session() as session:
-            result = await session.execute(text(
-                """INSERT INTO tb_mcp_server (name, type, url, command, args, env, status, created_by, description)
-                   VALUES (:name, :type, :url, :command, :args, :env, :status, :created_by, :description)"""),
-                {"name": name, "type": type_, "url": url, "command": command,
-                 "args": args, "env": env, "status": 1 if status else 0, "created_by": created_by,
-                 "description": description})
+            server = McpServer(name=name, type=type_, url=url, command=command,
+                               args=args, env=env, status=1 if status else 0,
+                               created_by=created_by, description=description)
+            session.add(server)
+            await session.flush()
+            new_id = server.id
             await session.commit()
             log.info(f"McpServer created: {name} ({type_})")
-            return result.lastrowid
+            return new_id
 
     @staticmethod
     async def update(id_: int, name: str = None, type_: str = None, url: str = None,
                      command: str = None, args: str = None, env: str = None,
                      status: bool = None, description: str = None) -> bool:
         async with mysql_client.get_session() as session:
-            fields, params = [], {"id": id_}
+            values: dict = {}
             if name is not None:
-                fields.append("name = :name"); params["name"] = name
+                values["name"] = name
             if type_ is not None:
-                fields.append("type = :type"); params["type"] = type_
+                values["type"] = type_
             # url 仅在传入非空时更新：非创建人拿到的 url 已被脱敏为空，回写不应清空真实地址
             if url:
-                fields.append("url = :url"); params["url"] = url
+                values["url"] = url
             if command is not None:
-                fields.append("command = :command"); params["command"] = command
+                values["command"] = command
             if args is not None:
-                fields.append("args = :args"); params["args"] = args
+                values["args"] = args
             if env is not None:
-                fields.append("env = :env"); params["env"] = env
+                values["env"] = env
             if status is not None:
-                fields.append("status = :status"); params["status"] = 1 if status else 0
+                values["status"] = 1 if status else 0
             if description is not None:
-                fields.append("description = :description"); params["description"] = description
-            if not fields:
+                values["description"] = description
+            if not values:
                 return True
             await session.execute(
-                text(f"UPDATE tb_mcp_server SET {', '.join(fields)} WHERE id = :id"), params)
+                update(McpServer).where(McpServer.id == id_).values(**values))
             await session.commit()
             log.info(f"McpServer updated: id={id_}")
             return True
@@ -273,7 +267,7 @@ class McpServerService:
     async def delete(id_: int) -> bool:
         async with mysql_client.get_session() as session:
             result = await session.execute(
-                text("DELETE FROM tb_mcp_server WHERE id = :id"), {"id": id_})
+                delete(McpServer).where(McpServer.id == id_))
             await session.commit()
             return result.rowcount > 0
 
@@ -282,8 +276,8 @@ class McpServerService:
         """切换启用/停用"""
         async with mysql_client.get_session() as session:
             result = await session.execute(
-                text("UPDATE tb_mcp_server SET status = :status WHERE id = :id"),
-                {"id": id_, "status": 1 if status else 0})
+                update(McpServer).where(McpServer.id == id_)
+                .values(status=1 if status else 0))
             await session.commit()
             return result.rowcount > 0
 
@@ -295,7 +289,8 @@ class McpServerService:
         if not row:
             raise ValueError("MCP 连接不存在")
         return await McpServerService.test_params(
-            name=row[1], type_=row[2], url=row[3], command=row[4], args=row[5], env=row[6])
+            name=row.name, type_=row.type, url=row.url, command=row.command,
+            args=row.args, env=row.env)
 
     @staticmethod
     async def test_params(name: str = None, type_: str = 'SSE', url: str = None,
@@ -310,7 +305,9 @@ class McpServerService:
             t = (type_ or 'SSE').upper()
             if t not in ('SSE', 'STDIO'):
                 raise ValueError(f"不支持的连接类型: {type_}")
-            row = [0, name or "MCP Server", t, url, command, args, env, 1, 0]
+            # 临时对象：_transports 只读连接字段，不会落库
+            row = McpServer(name=name or "MCP Server", type=t, url=url,
+                            command=command, args=args, env=env)
 
             async def _handshake() -> int:
                 async with McpServerService._session(row) as session:

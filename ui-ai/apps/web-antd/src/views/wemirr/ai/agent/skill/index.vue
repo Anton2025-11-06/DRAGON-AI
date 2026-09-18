@@ -33,7 +33,6 @@ import {
 import {
   Card,
   Drawer,
-  Empty,
   Form,
   Input,
   message,
@@ -603,12 +602,6 @@ onMounted(() => {
               </div>
             </div>
           </div>
-          <Empty v-else class="skill-empty" description="还没有技能目录">
-            <a-button type="primary" @click="openCreateDrawer">
-              <template #icon><UploadOutlined /></template>
-              上传技能压缩包
-            </a-button>
-          </Empty>
         </template>
       </fs-crud>
     </Card>

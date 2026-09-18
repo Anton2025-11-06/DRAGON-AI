@@ -11,16 +11,11 @@ from pydantic import BaseModel, Field
 
 from common.common_entity.response_schema import ApiResponse
 from common.common_permission.permission import get_login_user
+from service.service_workflow.models.sandbox import SandboxChatRequest
 from service.service_workflow.services import sandbox_service as svc
 
 router = APIRouter(prefix="/sandbox", tags=["沙箱"])
 
-
-class SandboxChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=4000, description="用户提问")
-    skills: list = Field(default_factory=list, description="挂载的技能 id 列表")
-    tools: list = Field(default_factory=list, description="挂载的工具 id 列表")
-    kbs: list = Field(default_factory=list, description="挂载的知识库 id 列表")
 
 
 @router.get("/files", summary="沙箱工作区目录列表")

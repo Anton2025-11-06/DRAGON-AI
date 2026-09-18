@@ -20,16 +20,15 @@ import ast
 import asyncio
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+from common.common_threadpool.pool import thread_pool
 
 # 输出体积上限（超出视为节点失败，避免把上百 KB 结果写进上下文与执行记录）
 MAX_OUTPUT_STR_BYTES = 200 * 1024
-MAX_OUTPUT_LIST_ITEMS = 100
+MAX_OUTPUT_LIST_ITEMS = 1000
 
 DEFAULT_TIMEOUT_MS = 30000
 
-thread_pool = ThreadPoolExecutor(max_workers=200)
 
 ALLOWED_BUILTINS: dict[str, Any] = {
     "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict, "divmod": divmod,
