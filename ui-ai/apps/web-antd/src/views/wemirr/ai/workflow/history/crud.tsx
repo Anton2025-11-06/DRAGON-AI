@@ -86,8 +86,10 @@ export default function crud(
               { value: 'RUNNING', label: '执行中', color: 'processing' },
               { value: 'COMPLETED', label: '已完成', color: 'success' },
               { value: 'FAILED', label: '失败', color: 'error' },
-              { value: 'PAUSED', label: '已暂停', color: 'warning' },
+              // 暂停的唯一来源是 APPROVAL 节点挂起，文案直接给出下一步动作
+              { value: 'PAUSED', label: '待审批', color: 'purple' },
               { value: 'CANCELLED', label: '已取消', color: 'default' },
+              { value: 'TIMEOUT', label: '已超时', color: 'warning' },
             ],
           }),
           column: { width: 100 },

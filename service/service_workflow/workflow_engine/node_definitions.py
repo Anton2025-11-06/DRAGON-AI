@@ -96,7 +96,7 @@ def build_node_definitions() -> list[dict]:
         "LLM", "大模型", "按模型能力类型调用（支持全部 12 类：文生文/向量/重排/图文理解/OCR/图像音视频生成等）", "ai", "Robot", "#1677ff",
         form_component="LlmNodeForm",
         required_fields=["modelId"],
-        output_variables=["output", "text", "reasoning", "usage",
+        output_variables=["output", "text", "reasoning", "usage", "memoryWarning",
                           "vectors", "scores", "urls", "url"],
         fields=[
             _field("modelId", "模型", "ModelSelect", "number", True, None, "", "模型广场中启用的模型（能力类型决定入参形态）"),
@@ -126,6 +126,25 @@ def build_node_definitions() -> list[dict]:
             _field("visionEnabled", "图像理解(对话)", "Switch", "boolean", False, False),
             _field("structuredOutput", "结构化输出", "StructuredOutputForm", "object", False,
                    {"enabled": False}),
+            # 记忆（需求 1）：历史存在 node_states[nid].llmMessages，跨轮（同一 execution_id）生效。
+            # 向量/重排/语音识别/语音合成四类不能开记忆（表单隐藏 + 后端 validate ERROR），
+            # 所以不能进 defaultConfig：否则会给不支持的类型也写上一个已开启的开关。
+            _field("memoryEnabled", "记忆", "Switch", "boolean", False, False,
+                   "同一执行 id（即会话）内的大模型对话历史，下一轮自动带入"),
+            _field("memoryLimit", "记忆条数", "InputNumber", "number", False, 10,
+                   "按消息条数计（一轮 = 提问+回答 两条），上限 100",
+                   rules=[{"type": "min", "value": 1, "message": "最少 1 条"},
+                          {"type": "max", "value": 100, "message": "最多 100 条"}]),
+            _field("memoryScope", "记忆范围", "Select", "string", False, "SELF",
+                   options=[("SELF", "本节点"), ("NODES", "指定节点"), ("WORKFLOW", "整条工作流")]),
+            _field("memoryNodes", "记忆节点", "MultiNodeSelect", "array", False, [],
+                   "仅「指定节点」范围生效：只取这些大模型节点的历史"),
+            _field("memoryStrategy", "超限策略", "Select", "string", False, "DROP_OLDEST",
+                   "历史超出条数上限时怎么处理",
+                   options=[("DROP_OLDEST", "丢弃最旧"), ("DROP_MIDDLE", "丢弃中间"),
+                            ("DROP_NEWEST", "丢弃最新"), ("COMPRESS", "自动压缩")]),
+            _field("memoryCompressModelId", "压缩模型", "ModelSelect", "number", False, None,
+                   "仅「自动压缩」需要：选一个文生文模型把旧历史摘要成一条"),
         ],
         # 默认只给输出变量名：调用参数与流式都不预置，避免把模型未开启的参数存进图
         default_config={"outputVariable": "output"},
@@ -264,6 +283,27 @@ def build_node_definitions() -> list[dict]:
         ],
         default_config={"replyType": "TEXT", "text": "", "variableRef": "",
                         "outputVariable": "output"},
+    ))
+    # 人工审批：在节点边界暂停整条流，结论由「指定 executionId 再提交」接口带回
+    defs.append(_def(
+        "APPROVAL", "审批", "暂停等待人工审批：同意则继续（可编辑上游数据），不同意则取消下游", "control",
+        "SafetyCertificateOutlined", "#13c2c2",
+        form_component="ApprovalNodeForm",
+        required_fields=["pauseScope"],
+        output_variables=["review", "reviewOpinion", "reviewBy"],
+        fields=[
+            _field("approvers", "审批人", "ApproverList", "array", False, [],
+                   "允许审批的标识集合（数字或字符串，命中其一即可）；留空=任何持有 api-key 且知道执行 id 者皆可审"),
+            _field("pauseScope", "暂停范围", "Select", "string", False, "DOWNSTREAM",
+                   "ALL：整条工作流一起停（在跑分支会被取消，恢复后重跑）；DOWNSTREAM：仅本节点及下游等待",
+                   options=[("DOWNSTREAM", "本节点及下游"), ("ALL", "整条工作流")]),
+            _field("rejectReply", "拒绝回复文案", "Textarea", "string", False, "",
+                   "不同意时作为工作流回复输出兜底（下游 END/回复节点被取消时使用）"),
+            _field("timeoutHours", "审批时限(小时)", "InputNumber", "number", False, 0,
+                   "0=不限；超时自动裁决二期实现"),
+        ],
+        default_config={"approvers": [], "pauseScope": "DOWNSTREAM", "rejectReply": "",
+                        "timeoutHours": 0},
     ))
 
     # ---------- 数据 ----------

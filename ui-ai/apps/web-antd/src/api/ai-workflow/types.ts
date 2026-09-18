@@ -14,6 +14,7 @@
 export type NodeType =
   // 工作流边界
   | 'AGENT' // 智能体
+  | 'APPROVAL' // 人工审批（暂停整条流等结论，由「再提交」接口带回）
   | 'CODE' // 代码
   | 'DOC_EXTRACTOR' // 文档读取
   // 智能体节点
@@ -54,6 +55,20 @@ export type ExecutionStatus =
   | 'PAUSED'
   | 'PENDING'
   | 'RUNNING';
+
+/**
+ * 节点执行状态
+ * AWAITING = 审批节点挂起等人工结论（非终态，恢复提交时必然重跑该节点）
+ * TIMEOUT / CANCELLED = 并行短路或审批不同意砍掉的分支
+ */
+export type NodeExecutionStatus =
+  | 'AWAITING'
+  | 'CANCELLED'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'PENDING'
+  | 'RUNNING'
+  | 'TIMEOUT';
 
 /**
  * 模板分类枚举
@@ -198,8 +213,71 @@ export interface WorkflowSaveReq {
 export interface WorkflowExecutionReq {
   /** 输入参数 */
   inputs?: Record<string, any>;
-  /** 断点节点ID集合 */
-  breakpoints?: string[];
+}
+
+/**
+ * 审批表单里被改过的一行：(源节点 id, 变量名, 新值) 三元组
+ * 后端会同时回写 node_states[源节点].output 与运行时上下文，并留 diff 作审批审计
+ */
+export interface ApprovalEditReq {
+  /** 源节点 id */
+  nodeId: string;
+  /** 源节点输出里的变量名 */
+  varName: string;
+  /** 改后的新值 */
+  value?: any;
+}
+
+/**
+ * 单个审批节点的结论
+ */
+export interface ApprovalDecisionReq {
+  /** 审批节点 id；只有一个待审批节点时可省略 */
+  nodeId?: string;
+  /** true=同意，false=不同意（取消下游） */
+  approved: boolean;
+  /** 审批意见 */
+  opinion?: string;
+  /** 同意时对上游数据的编辑 */
+  edits?: ApprovalEditReq[];
+}
+
+/**
+ * 指定 executionId 的再提交入参
+ * RETRY = 全量重跑（终态可用）；CONTINUE = 暂停后恢复（仅 PAUSED，必须带 approval）
+ */
+export interface WorkflowSubmitReq {
+  /** 提交模式 */
+  mode: 'CONTINUE' | 'RETRY';
+  /** 本轮输入；不传沿用上轮行内 inputs */
+  inputs?: Record<string, any>;
+  /** 审批结论列表（并行多个待审批时每节点一条） */
+  approval?: ApprovalDecisionReq[];
+}
+
+/**
+ * 审批上下文（后端在 node.paused / workflow.paused 里外发，审批面板的数据源）
+ */
+export interface ApprovalContext {
+  /** 审批节点 id */
+  nodeId: string;
+  /** 审批节点名称 */
+  nodeName?: string;
+  /** 配置的审批人集合（空=任何调用方皆可审） */
+  approvers?: Array<number | string>;
+  /** 暂停范围 */
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  /** 不同意时的回复兜底文案 */
+  rejectReply?: string;
+  /** 审批时限（小时，0=不限） */
+  timeoutHours?: number;
+  /** 可编辑的上游数据（三元组清单） */
+  editableInputs?: Array<{
+    nodeId: string;
+    nodeName?: string;
+    value?: any;
+    varName: string;
+  }>;
 }
 
 /**
@@ -327,7 +405,11 @@ export interface NodeExecutionState {
   /** 执行顺序（从1开始） */
   order?: number;
   /** 执行状态 */
-  status?: string;
+  status?: NodeExecutionStatus | string;
+  /** 所属分支/并行端口 id */
+  branch?: string;
+  /** 本轮沿用（未重跑）标记：CONTINUE 提交里跳过上轮已完成节点 */
+  skip?: boolean;
   /** 输入数据 */
   input?: Record<string, any>;
   /** 输出数据 */
@@ -340,6 +422,26 @@ export interface NodeExecutionState {
   label?: string;
   /** 节点类型（START/LLM/...） */
   nodeType?: string;
+  /** 大模型记忆：跨轮对话历史（随节点状态一起落库） */
+  llmMessages?: Array<{
+    content?: string;
+    role: 'assistant' | 'system' | 'user';
+    round?: number;
+    ts?: number;
+  }>;
+  /** 审批结论（true=同意） */
+  review?: boolean;
+  /** 审批人标识 */
+  reviewBy?: string;
+  /** 审批意见 */
+  reviewOpinion?: string;
+  /** 审批编辑留痕（含改前改后值） */
+  reviewDiff?: Array<{
+    newValue?: any;
+    nodeId: string;
+    oldValue?: any;
+    varName: string;
+  }>;
 }
 
 /**
@@ -384,6 +486,14 @@ export interface WorkflowExecutionResp {
   executedNodes?: string[];
   /** 当前节点ID（暂停时） */
   currentNodeId?: string;
+  /** 本轮提交模式（空=首次执行） */
+  submitMode?: 'CONTINUE' | 'RETRY';
+  /** 图拓扑指纹（再提交前的漂移校验依据） */
+  graphHash?: string;
+  /** 仍等待人工审批的节点 id 列表 */
+  awaitingNodeIds?: string[];
+  /** 审批上下文（按审批节点 id 索引，仅 PAUSED 行有值） */
+  approvalContext?: Record<string, ApprovalContext>;
   /** 执行用户ID (字符串类型，避免 JavaScript 大数精度丢失) */
   userId?: string;
   /** 创建时间 */
@@ -557,6 +667,8 @@ export const WORKFLOW_RUNTIME_EVENT_TYPES = [
   // 收到前节点只有 node.started，页面会一直停在蓝色「执行中」
   'node.timeout',
   'node.cancelled',
+  // 审批节点挂起（单节点级暂停，区别于整条流的 workflow.paused）
+  'node.paused',
   'workflow.paused',
   'workflow.completed',
   'workflow.failed',
@@ -613,6 +725,8 @@ export interface NodeCompletedEvent extends ExecutionEvent {
   output?: any;
   /** 执行耗时(毫秒) */
   duration: number;
+  /** true = 本轮未重跑，沿用上一轮结果（耗时为上一轮的值） */
+  skip?: boolean;
 }
 
 /**
@@ -692,14 +806,47 @@ export interface ExecutionFailedEvent extends ExecutionEvent {
 }
 
 /**
- * 断点命中事件
+ * 审批节点挂起事件（节点停在 AWAITING，不路由下游）
  */
-export interface BreakpointHitEvent extends ExecutionEvent {
-  type: 'workflow.paused';
-  /** 节点ID */
+export interface NodePausedEvent extends ExecutionEvent {
+  type: 'node.paused';
+  /** 审批节点ID */
   nodeId: string;
-  /** 当前变量 */
+  /** 节点类型 */
+  nodeType?: NodeType;
+  /** 挂起前已执行的耗时(毫秒) */
+  duration?: number;
+  /** 暂停范围 */
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  /** 审批表单数据源 */
+  approvalContext?: ApprovalContext;
+}
+
+/**
+ * 执行暂停事件（本轮跑完但存在未决策的审批节点）
+ * 不再是断点命中：唯一来源是审批节点，恢复只能走 submit 接口
+ */
+export interface ExecutionPausedEvent extends ExecutionEvent {
+  type: 'workflow.paused';
+  /** 首个待审批节点ID */
+  nodeId?: string;
+  /** 全部待审批节点ID（并行下可能多个） */
+  awaitingNodeIds?: string[];
+  /** 待审批节点的审批上下文 */
+  approvalContext?: ApprovalContext;
+  /** 已执行耗时(毫秒) */
+  duration?: number;
+  /** 当前全局变量（排障展示用） */
   variables?: Record<string, any>;
+}
+
+/**
+ * 恢复提交的首帧事件（与 workflow.started 二选一，订阅方据此区分「新一轮执行」与「接着跑」）
+ */
+export interface ExecutionResumedEvent extends ExecutionEvent {
+  type: 'workflow.resumed';
+  /** 本轮输入参数 */
+  inputs?: Record<string, any>;
 }
 
 // ==================== START 节点配置 ====================
@@ -709,6 +856,8 @@ export interface BreakpointHitEvent extends ExecutionEvent {
  * 输入字段类型 (START 节点)
  */
 export type InputFieldType =
+  /** 审批人标识数组（元素可数字可字符串；仅当画布存在审批节点时可用） */
+  | 'APPROVER'
   | 'CHECKBOX' // 开关（UI 为 switch；历史名“复选框”，存储值不变以兼容旧图）
   | 'FILE_LIST' // 多文件
   | 'NUMBER' // 数字
@@ -928,6 +1077,18 @@ export interface LLMNodeConfig {
   structuredOutput?: StructuredOutput;
   /** 上下文变量列表 */
   contextVariables?: ContextVariable[];
+  /** 是否启用对话记忆（仅文生文/提示词族能力类型可用） */
+  memoryEnabled?: boolean;
+  /** 注入条数（按消息条数计，1~100，默认 10；一轮 user+assistant = 2 条） */
+  memoryLimit?: number;
+  /** 记忆范围：SELF 仅本节点 / NODES 指定节点 / WORKFLOW 全图 */
+  memoryScope?: 'NODES' | 'SELF' | 'WORKFLOW';
+  /** NODES 范围下的节点 id 列表 */
+  memoryNodes?: string[];
+  /** 超出条数时的策略 */
+  memoryStrategy?: 'COMPRESS' | 'DROP_MIDDLE' | 'DROP_NEWEST' | 'DROP_OLDEST';
+  /** 自动压缩用的文生文模型 ID（strategy=COMPRESS 时必填） */
+  memoryCompressModelId?: number;
   /**
    * 节点级常用参数（按所选模型登记的 common_params 预置，可改值/新增/删除）。
    * 运行时会合并进 model_params 透传给 common_model 实现（覆盖或补充模型默认参数）。
@@ -1805,6 +1966,21 @@ export interface ReplyNodeConfig {
 }
 
 /**
+ * 人工审批节点配置
+ * 在节点边界暂停整条流；结论由「指定 executionId 再提交」接口带回
+ */
+export interface ApprovalNodeConfig {
+  /** 审批人集合（数字或字符串，命中其一即可）；空=持 key 且知道 executionId 者皆可审 */
+  approvers?: Array<number | string>;
+  /** 暂停范围：DOWNSTREAM 仅本节点及下游等待 / ALL 整条工作流一起停 */
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  /** 不同意时的回复兜底文案 */
+  rejectReply?: string;
+  /** 审批时限（小时，0=不限；超时自动裁决二期） */
+  timeoutHours?: number;
+}
+
+/**
  * 节点类型到配置类型的映射
  */
 export interface NodeConfigMap {
@@ -1829,6 +2005,7 @@ export interface NodeConfigMap {
   HTTP_REQUEST: HttpRequestNodeConfig;
   TOOL: ToolNodeConfig;
   MCP_TOOL: McpNodeConfig;
+  APPROVAL: ApprovalNodeConfig;
 }
 
 /**

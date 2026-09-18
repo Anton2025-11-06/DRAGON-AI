@@ -199,48 +199,9 @@ def evaluate_conditions(conditions: list[dict], operator: str, ctx) -> bool:
     return all(results)
 
 
-# ==================== 条件断点表达式（自由文本） ====================
-
-# {{node.field}} / {{global.x}} 变量引用（复用 context 的引用名规则：不含大括号）
-_EXPR_REF_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
-
-# 受限求值命名空间（条件断点表达式只允许纯比较/逻辑运算 + 少量安全内建）
-_EXPR_BUILTINS = {
-    "__builtins__": {},
-    "len": len, "str": str, "int": int, "float": float,
-    "abs": abs, "min": min, "max": max, "sum": sum,
-}
-
-
-def _normalize_js_operators(text: str) -> str:
-    """前端帮助文案以 JS 语法为示例（=== / !== / && / ||），
-    归一为等价 Python 运算符；true/false/null 同理。"""
-    text = text.replace("===", "==").replace("!==", "!=")
-    text = text.replace("&&", " and ").replace("||", " or ")
-    text = re.sub(r"\btrue\b", "True", text)
-    text = re.sub(r"\bfalse\b", "False", text)
-    text = re.sub(r"\bnull\b", "None", text)
-    return text
-
-
-def evaluate_expression(expr: str, ctx) -> bool:
-    """条件断点表达式求值。
-
-    - {{ref}} 引用先解析为 Python 字面量（repr），保证任意类型值（含含空格
-      字符串/数字/列表）可直接参与比较，而非裸文本替换
-    - 空表达式恒真（等价于无条件断点）
-    - 求值失败（语法错/未知名）抛 ValueError，由调用方决定降级策略
-    """
-    if not expr or not expr.strip():
-        return True
-
-    def _sub(m: re.Match) -> str:
-        return repr(ctx.resolve(m.group(1)))
-
-    py = _EXPR_REF_RE.sub(_sub, expr)
-    py = _normalize_js_operators(py)
-    try:
-        code = compile(py, "<breakpoint-condition>", "eval")
-        return bool(eval(code, dict(_EXPR_BUILTINS)))  # noqa: S307
-    except Exception as e:  # noqa: BLE001
-        raise ValueError(f"条件断点表达式求值失败 [{expr!r} -> {py!r}]: {e}") from e
+# ==================== 条件断点表达式（已废弃） ====================
+#
+# 原先这里是一整套「自由文本表达式」求值（{{ref}} 占位替换 + JS 运算符归一 + eval），
+# 唯一的调用方是断点条件。断点功能整体下线后（见 docs/workflow-approval-memory.md）
+# 它已成死代码，连带删除：留着一个 eval 入口只会被新功能误用。
+# 分支条件请走 evaluate_conditions（结构化 operator，无 eval）。

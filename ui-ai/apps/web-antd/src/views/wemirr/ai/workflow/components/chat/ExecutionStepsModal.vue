@@ -32,11 +32,14 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:open', open: boolean): void }>();
 
 const statusText: Record<string, string> = {
-  cancelled: '已跳过',
+  // awaiting = 审批节点挂起等人工决策；skipped = 恢复提交里沿用上轮结果未重跑
+  awaiting: '待审批',
+  cancelled: '已取消',
   completed: '完成',
   failed: '失败',
-  paused: '等待中',
+  paused: '已挂起',
   running: '执行中',
+  skipped: '本轮沿用',
   timeout: '已超时',
 };
 
@@ -381,6 +384,14 @@ function partKey(step: ChatStep, part: string): string {
 
     &.cancelled {
       background: #bfbfbf;
+    }
+
+    &.awaiting {
+      background: #722ed1;
+    }
+
+    &.skipped {
+      background: #13c2c2;
     }
   }
 

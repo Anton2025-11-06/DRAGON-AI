@@ -9,6 +9,7 @@
     node.failed
     node.timeout
     node.cancelled
+    node.paused
     workflow.completed
     workflow.failed
     workflow.cancelled

@@ -1,14 +1,15 @@
 /**
  * 变量编辑器 Hook
- * 提供变量编辑功能，包括 JSON 验证和后端 API 调用
+ * 提供变量编辑的表单态与 JSON 校验
  *
+ * 注：变量编辑不再直连后端（原 update_variable 接口已随外部暂停链路废弃）。
+ * 落库的编辑只能作为审批结论的一部分，以 (源节点id, 变量名, 新值) 三元组
+ * 随提交接口下发；此处的编辑仅用于面板内的临时查看与草稿构造。
  */
 
 import { ref } from 'vue';
 
 import { message } from 'ant-design-vue';
-
-import { updateVariable } from '#/api/ai-workflow';
 
 /**
  * 变量编辑状态
@@ -38,9 +39,12 @@ export interface JsonValidationResult {
 
 /**
  * 变量编辑器 Hook
- * @param executionId 执行ID（响应式引用）
+ * @param executionId 执行ID（响应式引用，仅供调用方定位上下文）
  */
 export function useVariableEditor(executionId: () => null | string) {
+  // 编辑不落库，因此不再需要执行ID发起请求；保留入参以不破坏调用方
+  void executionId;
+
   /** 是否正在编辑 */
   const isEditing = ref(false);
 
@@ -121,17 +125,11 @@ export function useVariableEditor(executionId: () => null | string) {
   }
 
   /**
-   * 保存变量编辑
+   * 保存变量编辑（仅本地生效，不落库）
    */
   async function saveEdit(): Promise<boolean> {
     if (!editState.value) {
       message.error('没有正在编辑的变量');
-      return false;
-    }
-
-    const execId = executionId();
-    if (!execId) {
-      message.error('执行ID不存在，无法更新变量');
       return false;
     }
 
@@ -144,22 +142,10 @@ export function useVariableEditor(executionId: () => null | string) {
     }
 
     isSaving.value = true;
-
     try {
-      // 构建完整的变量名（包含节点ID前缀）
-      const fullVariableName = `${editState.value.nodeId}.${editState.value.variableName}`;
-
-      // 调用后端 API 更新变量
-      await updateVariable(execId, fullVariableName, validation.value);
-
-      message.success('变量已更新');
+      // 编辑结果交由调用方写入本地视图；需要影响执行流程的改动走审批表单的 edits
       cancelEdit();
       return true;
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : '更新变量失败';
-      message.error(errorMessage);
-      return false;
     } finally {
       isSaving.value = false;
     }

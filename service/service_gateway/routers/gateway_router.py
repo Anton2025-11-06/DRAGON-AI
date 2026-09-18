@@ -246,12 +246,17 @@ async def workflow_api_proxy(request: Request, path: str, url: str,
                              headers: dict, body: bytes):
     """
     API Key 模式代理：
-    1. 只接受异步执行接口 /workflow-executions/workflows/{id}/execute-async；订阅接口
-       （GET .../subscribe）按普通转发放行，其余路径返回 403
+    1. 只接受异步执行接口 /workflow-executions/workflows/{id}/execute-async、订阅接口
+       （GET .../subscribe）、以及执行控制接口（POST .../{executionId}/submit|cancel），
+       其余路径返回 403
     2. 从 Redis 读取 X-Workflow-Token 对应配置（workflowId/rateLimit/expireTime/status）鉴权
     3. 按 Key 配置 QPS 限流（0=不限）
-    4. 将请求体包装为符合执行接口的格式 {"inputs": ...}（宽松兼容直接传参对象）
+    4. 将请求体包装为符合执行接口的格式 {"inputs": ...}（宽松兼容直接传参对象）；
+       执行控制类接口不包装（submit 的 body 自带 mode/inputs/approval）
     5. 透传 X-Workflow-Token 头，下游据此标记 trigger=API（只执行已发布版本）
+
+    执行控制（再提交/取消）的归属校验不在这里做：网关拿不到「这条 executionId 属于
+    哪个工作流」（没有 DB），只放行路径形态，key ↔ 执行的归属关系由下游 service 校验。
     """
     # 订阅（SSE 长连接）直接放行：executionId 是 UUID 熵足够，TokenCheckMiddleware 本来就
     # 把 /subscribe 列进了后缀白名单（不校登录态）。若在这里按“只认 execute-async”判掉，
@@ -259,10 +264,16 @@ async def workflow_api_proxy(request: Request, path: str, url: str,
     if request.method == "GET" and path.endswith("/subscribe"):
         return await forward_downstream(request, url, headers, body)
 
+    # 再提交（审批恢复/重新执行）与取消：第三方审批方的推进入口（body 原样透传，不包 inputs）
+    if request.method == "POST" and re.match(
+            r"^workflow-executions/[0-9a-fA-F-]{36}/(submit|cancel)$", path):
+        return await forward_downstream(request, url, headers, body)
+
     match = re.match(r"^workflow-executions/workflows/(\d+)/execute-async$", path)
     if not match:
         return JSONResponse(status_code=403,
-                            content=ApiResponse.error(403, "API Key 仅支持【执行/订阅】工作流的操作"))
+                            content=ApiResponse.error(
+                                403, "API Key 仅支持【执行/订阅/再提交/取消】工作流的操作"))
     workflow_id = int(match.group(1))
 
     token = (request.headers.get("X-Workflow-Token") or "").strip()
@@ -299,11 +310,11 @@ async def workflow_api_proxy(request: Request, path: str, url: str,
         return JSONResponse(status_code=429,
                             content=ApiResponse.error(429, "请求频率超过 API Key 限制，请稍后再试"))
 
-    # 包装 body 为执行接口格式；非 JSON 或已含 inputs/breakpoints 的原样透传
+    # 包装 body 为执行接口格式；非 JSON 或已含 inputs 的原样透传
     if body:
         try:
             parsed = json.loads(body)
-            if isinstance(parsed, dict) and not ("inputs" in parsed or "breakpoints" in parsed):
+            if isinstance(parsed, dict) and "inputs" not in parsed:
                 body = json.dumps({"inputs": parsed}, ensure_ascii=False).encode()
         except (json.JSONDecodeError, TypeError):
             pass

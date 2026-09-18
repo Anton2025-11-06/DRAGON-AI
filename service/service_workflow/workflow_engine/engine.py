@@ -9,18 +9,22 @@
 - 节点异常分支（exception） →  result.branch_id="exception" 走 branch:exception 端口
 
 新增能力（MaxKB 无 / 前端契约要求）：
-- 断点暂停（breakpoints）/ 恢复（resume）/ 取消（cancel）
-- 快照（variables + nodeStates + pending nodes）落库与恢复
 - 复合节点子图执行（run_subgraph：LOOP/ITERATION/PARALLEL 的循环体/分支体）
+- 审批暂停（APPROVAL 节点）：节点边界落快照 + run() 以 PAUSED 收尾，恢复由
+  「指定 executionId 再提交」接口驱动（设计冻结 docs/workflow-approval-memory.md）
+- 两种提交模式：RETRY 全量重跑 / CONTINUE 命中已完成节点则 skip（发 skip 事件不重跑）
+
+已废弃（勿再引入）：外部接口触发暂停、resume 断点续跑、_pending_nodes、breakpoints。
 """
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import time
 from typing import Any, Optional
 
-from service.service_workflow.workflow_engine.comparators import evaluate_expression
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.events import EventBus, WorkflowEvent
 from service.service_workflow.workflow_engine.graph import (
@@ -28,7 +32,8 @@ from service.service_workflow.workflow_engine.graph import (
 )
 from service.service_workflow.workflow_engine.nodes import NODE_REGISTRY
 from service.service_workflow.workflow_engine.nodes.base import (
-    EMIT_OUTPUT_KEY, NodeExecutionError, NodeResult,
+    APPROVAL_SCOPE_ALL, EMIT_OUTPUT_KEY, AwaitingApproval, NodeExecutionError,
+    NodeResult,
 )
 from common.common_log.log_init import log
 from common.common_httpx.httpx import httpx_pool
@@ -50,6 +55,32 @@ STATUS_COMPLETED = "COMPLETED"  # 成功完成
 STATUS_CANCELLED = "CANCELLED"  # 取消(仅执行记录与运行时使用)
 STATUS_TIMEOUT = "TIMEOUT"  # 超时(并行分支等待时限到点,节点被停止等待)
 STATUS_FAILED = "FAILED"  # 失败
+# 节点级专属：等待人工审批（不阻塞协程，run() 收尾时据此把工作流置 PAUSED）
+STATUS_AWAITING = "AWAITING"
+
+# 提交模式（tb_workflow_execution.submit_mode）：本轮提交是重新执行还是暂停后恢复
+SUBMIT_MODE_RETRY = "RETRY"
+SUBMIT_MODE_CONTINUE = "CONTINUE"
+# 可再次提交的结束态。PAUSED 不在其中——它是「等待审批」的可提交等待态，
+# 只允许 CONTINUE 模式；RUNNING/PENDING 才是禁止提交的「上次任务未结束」。
+TERMINAL_STATUSES = (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED)
+
+
+def compute_graph_hash(graph_raw: Any) -> str:
+    """图拓扑指纹（再提交前的漂移校验）：节点 id 集合 + 边集合的 sha1 前 16 位。
+
+    只看拓扑不看配置与坐标：改个提示词、挪一下节点不该拒掉恢复提交，但删节点、
+    改连线会让「按上轮状态续跑」失去意义（skip 出来的链路和新连线对不上）。
+    DEBUG 预览运行的画布是草稿，随时会变，同样靠这个值兜住。
+    """
+    raw = graph_raw if isinstance(graph_raw, dict) else {}
+    nodes = sorted({str(n.get("id")) for n in (raw.get("nodes") or [])
+                    if isinstance(n, dict) and n.get("id")})
+    edges = sorted(
+        f"{e.get('source')}->{e.get('target')}#{e.get('sourceHandle') or OUTPUT_HANDLE}"
+        for e in (raw.get("edges") or []) if isinstance(e, dict))
+    digest = json.dumps({"n": nodes, "e": edges}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(digest.encode("utf-8")).hexdigest()[:16]
 
 
 class WorkflowCancelled(Exception):
@@ -57,10 +88,16 @@ class WorkflowCancelled(Exception):
 
 
 class NodeState:
-    """节点执行状态（对齐前端 NodeExecutionState）。"""
+    """节点执行状态（对齐前端 NodeExecutionState）。
+
+    除展示字段外还承载「跨轮恢复所需的权威数据」：branch（上轮走的出边端口）、
+    llmMessages（大模型记忆）、review*（审批结论与编辑 diff）—— 全部随
+    tb_workflow_execution.node_states JSON 落库，恢复时靠它重建执行上下文。
+    """
 
     __slots__ = ("order", "status", "input", "output", "error", "duration",
-                 "started_at", "label", "nodeType")
+                 "started_at", "label", "nodeType", "branch", "llmMessages",
+                 "review", "reviewBy", "reviewOpinion", "reviewDiff", "skip")
 
     def __init__(self):
         self.order: int = 0
@@ -73,6 +110,19 @@ class NodeState:
         # 节点自定义名称与类型（快照，供执行详情展示，避免前端只能看到 nodeId）
         self.label: Optional[str] = None
         self.nodeType: Optional[str] = None
+        # 上轮实际走的出边端口（"exception"/分支 id/None=默认 output）。
+        # 恢复调度要靠它决定「跳过之后往哪个后继走」，以及汇合闸门的可达性判断；
+        # 丢了它，IF_ELSE/问题分类器/异常分支在恢复时会走错分支。
+        self.branch: Optional[str] = None
+        # 大模型记忆（[{role, content, round, ts}]）：不随本轮 output 覆写而丢失
+        self.llmMessages: list = []
+        # 审批节点结论与审计
+        self.review: Optional[bool] = None
+        self.reviewBy: Optional[str] = None
+        self.reviewOpinion: Optional[str] = None
+        self.reviewDiff: Optional[list] = None
+        # 本轮是否为「跳过已执行节点」（CONTINUE 模式），供明细表与前端展示
+        self.skip: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +134,13 @@ class NodeState:
             "duration": self.duration,
             "label": self.label,
             "nodeType": self.nodeType,
+            "branch": self.branch,
+            "llmMessages": self.llmMessages,
+            "review": self.review,
+            "reviewBy": self.reviewBy,
+            "reviewOpinion": self.reviewOpinion,
+            "reviewDiff": self.reviewDiff,
+            "skip": self.skip,
         }
 
 
@@ -99,8 +156,6 @@ class WorkflowRuntime:
 
     def __init__(self, graph: WorkflowGraph, execution_id: str,
                  inputs: Optional[dict] = None,
-                 breakpoints: Optional[list] = None,
-                 breakpoint_conditions: Optional[dict] = None,
                  model_provider=None,
                  http_client=None,
                  event_bus: EventBus = None,
@@ -111,7 +166,10 @@ class WorkflowRuntime:
                  trigger_type: str = "DEBUG",
                  user_id: int = 0,
                  workflow_id: int = 0,
-                 workflow_version: int = 0):
+                 workflow_version: int = 0,
+                 submit_mode: str = SUBMIT_MODE_RETRY,
+                 approval_decisions: Optional[dict] = None,
+                 round_no: int = 1):
         self.graph = graph
         self.execution_id = execution_id
         self.trigger_type = trigger_type
@@ -119,26 +177,41 @@ class WorkflowRuntime:
         self.workflow_id = workflow_id
         self.workflow_version = workflow_version
         self.ctx = ExecutionContext(graph, inputs)
-        self.breakpoints: set[str] = set(breakpoints or [])
-        # 条件断点：node_id → 自由文本表达式（{{ref}} 引用 + 比较/逻辑运算）
-        self.breakpoint_conditions: dict[str, str] = dict(breakpoint_conditions or {})
         self.bus = event_bus
         self.model_provider = model_provider
         self.http_client = http_client
         self.node_timeout = node_timeout
 
-        # 控制状态(需求 5):取消/暂停不通过进程内信号,全部由 DB 状态驱动。
-        # status_check_hook(execution_id) -> str:service 层注入的 DB 状态查询函数,
-        # engine 在每个节点执行前调用一次,返回 RUNNING/CANCELLED/PAUSED。
+        # 控制状态:取消由 DB 状态驱动（status_check_hook 每节点前查库）；
+        # 暂停只由审批节点触发（不再有外部暂停接口），见 awaiting_nodes。
         self.finished = False
         self.status = STATUS_PENDING
+
+        # 本轮提交模式：RETRY 全部重跑 / CONTINUE 已完成节点走 skip
+        self.submit_mode = submit_mode or SUBMIT_MODE_RETRY
+        # 对话轮次（execution_id 即会话 id，每次 RETRY 提交 +1；CONTINUE 是同一轮
+        # 的中断续跑，不另起一轮）。记忆条目靠它排序跨轮的历史。
+        self.round = max(1, int(round_no or 1))
+        # 本轮携带的审批结论 {node_id: {approved, opinion, edits, reviewBy}}
+        # —— 只放本次提交的新结论，历史结论不回灌（防重复审批/重复回写）
+        self.approval_decisions: dict[str, dict] = dict(approval_decisions or {})
+        # 等待审批的节点 {node_id: 审批上下文}，非空 → run() 收尾置 PAUSED
+        self.awaiting_nodes: dict[str, dict] = {}
+        # 子图重跑时的记忆暂存 {node_id: llmMessages}：_reset_subgraph_nodes 必须
+        # pop 掉 node_states（否则 CONTINUE 的 skip 判据会让循环体只跑一轮），
+        # 但大模型记忆不能被一起清掉，先暂存、节点重新执行时回位。
+        self._memory_archive: dict[str, list] = {}
+        # 审批暂停范围 ALL：True 时砍掉在跑任务、不再调度新节点
+        self.halt_all = False
 
         # 执行状态
         self.node_states: dict[str, NodeState] = {}
         self._order_counter = 0
         self._completed_with_branch: dict[str, Optional[str]] = {}  # node_id -> 活跃出边端口
+        # 本轮真正执行过（含 skip）的节点：LOOP 回边守卫与输出收集的唯一依据。
+        # 不能用 node_states 的终态判断——恢复时里面全是上一轮的陈旧状态。
+        self._executed_this_round: set[str] = set()
         self._running_tasks: set[asyncio.Task] = set()
-        self._pending_nodes: list[str] = []  # 暂停时未调度的节点
         # BUG15：并行分支短路所需的登记
         # _branch_tasks/_branch_wrappers: 分支派生的节点任务与分支协程，用于精确取消
         # _cancelled_nodes: 被「任一完成」短路掉的分支节点（视为不可达，不再执行）
@@ -152,10 +225,14 @@ class WorkflowRuntime:
         self._scheduled_nodes: set[str] = set()
         self.outputs: dict = {}
         self.error: Optional[str] = None
+        # 跨轮累计基准（CONTINUE 由 service 植入上轮值，RETRY/新执行为 0）
+        self.duration_base_ms: int = 0
         self.duration_ms: int = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.llm_call_count = 0
+        # 审批「不同意」时按配置兜底成工作流回答的文案（下游 END 被砍时启用）
+        self.reject_replies: dict[str, str] = {}
 
         # 持久化钩子(service 层注入:节点明细落库 / 执行状态落库 / DB 状态查询)
         self.node_persist_hook = node_persist_hook
@@ -177,39 +254,48 @@ class WorkflowRuntime:
     async def run(self) -> dict:
         """执行整个工作流。返回 outputs(或抛出异常由调用方落 FAILED)。
     
-        状态控制语义(需求 5):取消/暂停全部由 DB 状态驱动——
-        - API 层把执行记录状态改为 CANCELLED/PAUSED;
-        - 引擎每个节点的调度入口都会检查一次 DB 状态(_checkpoint):
-          仍 RUNNING 则继续;CANCELLED 抛 WorkflowCancelled 走取消分支收尾;
-          PAUSED 落库暂停快照并广播 workflow.paused,run() 正常结束(不再阻塞等信号);
-        - 恢复由 resume 接口把状态改回 RUNNING 并重新投递 resume 任务,
-          任务里从 DB 快照重建运行时 → run() 发现 _pending_nodes 非空即从断点继续。
+        状态控制语义:
+        - 取消:API 把执行记录改为 CANCELLED,引擎在每个节点调度入口查库
+          (_checkpoint) → 抛 WorkflowCancelled 走取消分支收尾;
+        - 暂停:唯一来源是审批节点。本轮拿不到结论的审批节点记进 awaiting_nodes
+          并终止本分支(暂停范围 ALL 时连在跑分支一起砍),其余分支照常跑完;
+          run() 收尾发现 awaiting_nodes 非空 → 状态 PAUSED + 落快照 + workflow.paused;
+        - 恢复与重跑都走「指定 executionId 再提交」接口,两种模式都从 START 遍历:
+          RETRY 全部重跑;CONTINUE 命中上轮 COMPLETED 的节点走 skip。
         """
         start = time.monotonic()
         self.status = STATUS_RUNNING
         try:
-            await self.emit("workflow.started", inputs=self.ctx.inputs)
-            if self._pending_nodes:
-                # 从快照恢复(resume 任务重建运行时):直接调度 pending 节点,
-                # 不可再从 START 重跑(已执行节点会被 _schedule 的「已完成守卫」跳过且无后继)。
-                pending = self._pending_nodes
-                self._pending_nodes = []
-                for nid in pending:
-                    await self._schedule(nid)
-                await self._wait_running()
+            # 事件语义（冻结文档第 4 节）：CONTINUE 首帧发 workflow.resumed，与
+            # workflow.started 二选一——两条都发会让订阅方把「恢复」当成新一轮执行重置。
+            if self.submit_mode == SUBMIT_MODE_CONTINUE:
+                await self.emit("workflow.resumed", inputs=self.ctx.inputs)
             else:
-                start_node = self.graph.find_start_node()
-                if start_node is None:
-                    raise NodeExecutionError("工作流缺少 START 节点")
-                await self._schedule(start_node.id)
-                await self._wait_running()
+                await self.emit("workflow.started", inputs=self.ctx.inputs)
+            # 两种提交模式都从 START 走一遍:CONTINUE 靠 _schedule 里的 skip 判据
+            # 续上路由(RETRY 全部重跑),不再依赖已废弃的 _pending_nodes。
+            start_node = self.graph.find_start_node()
+            if start_node is None:
+                raise NodeExecutionError("工作流缺少 START 节点")
+            await self._schedule(start_node.id)
+            await self._wait_running()
 
-            # 终态检查点:末节点执行期间到达的取消/暂停,在收尾前再查一次 DB 状态,
+            # 终态检查点:末节点执行期间到达的取消,在收尾前再查一次 DB 状态,
             # 避免「全部节点已跑完但 DB 已不是 RUNNING」时仍按成功落库。
             await self._checkpoint()
-            if self.status == STATUS_PAUSED:
-                # 暂停:run() 正常结束(暂停快照与 workflow.paused 事件已由
-                # _checkpoint → _enter_paused 完成),等待 resume 任务恢复。
+            # 审批等待收尾:存在未决策的审批节点 → 本轮到此为止,状态 PAUSED。
+            # 不能发 workflow.completed——对话页会把「还没跑完的半条流」当成回答定稿,
+            # 订阅方也无从得知接下来该提交审批结论。
+            if self.awaiting_nodes:
+                self.status = STATUS_PAUSED
+                self.duration_ms = self.duration_base_ms + int((time.monotonic() - start) * 1000)
+                self.outputs = {}
+                await self._persist_state(paused=True)
+                nid = next(iter(self.awaiting_nodes))
+                await self.emit("workflow.paused", nodeId=nid,
+                                awaitingNodeIds=list(self.awaiting_nodes),
+                                approvalContext=self.awaiting_nodes[nid],
+                                variables=self.ctx.global_vars)
                 return self.outputs
             # 终态兜底:节点失败会把工作流状态置 FAILED,而该异常在并行多目标下
             # 会被 _route_next 的 gather 兜住不上抛。此处若仍只在 RUNNING 分支
@@ -222,25 +308,25 @@ class WorkflowRuntime:
                 raise WorkflowCancelled()
             # 全图执行完毕 → 收集 END 节点输出(无 END 则为空)
             self.status = STATUS_COMPLETED
-            self.duration_ms = int((time.monotonic() - start) * 1000)
+            self.duration_ms = self.duration_base_ms + int((time.monotonic() - start) * 1000)
             self.outputs = self._collect_outputs()
-            asyncio.create_task(self._persist_state())
+            await self._persist_state()
             await self.emit("workflow.completed", outputs=self.outputs, duration=self.duration_ms)
             return self.outputs
         except WorkflowCancelled:
             self.status = STATUS_CANCELLED
-            self.duration_ms = int((time.monotonic() - start) * 1000)
+            self.duration_ms = self.duration_base_ms + int((time.monotonic() - start) * 1000)
             # 取消仍在执行的节点任务:防任务泄漏与取消后半途写库
             for t in list(self._running_tasks):
                 t.cancel()
-            asyncio.create_task(self._persist_state())
+            await self._persist_state()
             await self.emit("workflow.cancelled")
             return {}
         except Exception as e:  # noqa: BLE001
             self.status = STATUS_FAILED
             self.error = str(e)
-            self.duration_ms = int((time.monotonic() - start) * 1000)
-            asyncio.create_task(self._persist_state())
+            self.duration_ms = self.duration_base_ms + int((time.monotonic() - start) * 1000)
+            await self._persist_state()
             await self.emit("workflow.failed", error=str(e))
             raise
         finally:
@@ -257,6 +343,10 @@ class WorkflowRuntime:
                        if t is not me and t not in excl]
             if not pending:
                 return
+            if self.halt_all:
+                # 审批要求「整条工作流全部暂停」:砍掉仍在跑的任务,不再往下调度。
+                await self._cancel_running(keep={me} | excl)
+                return
             done, _ = await asyncio.wait(pending, timeout=0.5,
                                          return_when=asyncio.FIRST_COMPLETED)
             for t in done:
@@ -267,48 +357,80 @@ class WorkflowRuntime:
                 if exc is not None and not isinstance(exc, (WorkflowCancelled,)):
                     # 分支任务里的异常已在其内部处理为 node.failed；此处兜底上抛
                     raise exc
-            # 注:取消/暂停不在此处打断等待——相关任务会在各自的调度入口
-            # 检查点(_checkpoint)自行终止,这里只需等所有任务自然结束。
+            # 注:取消不在这里打断等待——相关任务会在各自的调度入口检查点
+            # (_checkpoint)自行终止,这里只需等所有任务自然结束。
+
+    async def _cancel_running(self, keep: set) -> None:
+        """砍掉仍在跑的节点任务（审批「整条流暂停」），并把停在 RUNNING 的节点收敛成取消态。
+
+        与并行短路砍分支同一口径:不发终态事件的节点会在页面永远停在蓝色「执行中」;
+        收敛为 CANCELLED 后,下轮恢复按「非 COMPLETED → 重跑」的 skip 判据重新执行。
+        """
+        targets = [t for t in self._running_tasks if t not in keep and not t.done()]
+        self._running_tasks.difference_update(targets)
+        for t in targets:
+            t.cancel()
+        if targets:
+            await asyncio.wait(targets, timeout=5)
+        for nid, state in list(self.node_states.items()):
+            if state.status != STATUS_RUNNING or nid in self.awaiting_nodes:
+                continue
+            state.status = STATUS_CANCELLED
+            state.error = "审批暂停（暂停范围：整条工作流），本节点将在恢复后重跑"
+            state.duration = int((time.monotonic() - state.started_at) * 1000)
+            self._cancelled_nodes.add(nid)
+            target = self.graph.get_node(nid)
+            if target is not None:
+                await self._persist_node(target, state)
+            await self.emit("node.cancelled", nodeId=nid, duration=state.duration,
+                            reason=state.error)
+
+    async def _persist_node(self, node, state) -> None:
+        """节点明细落库（await 串行，不再 create_task 火忘）。
+
+        火忘的迟到写会在「同一 executionId 再提交」时把上一轮数据盖到新一轮上，
+        而再提交的唯一互斥手段是 DB 状态，所以落库必须在引擎推进前完成。
+        失败只告警：明细表是展示/排障数据，不能因为它丢掉真实执行。
+        """
+        if not self.node_persist_hook:
+            return
+        try:
+            await self.node_persist_hook(self, node, state)
+        except Exception as e:  # noqa: BLE001
+            log.warning("node persist failed exec={} node={}: {}", self.execution_id, node.id, e)
 
     # ==================== 调度（对照 MaxKB run_chain_manage/get_next_node_list） ====================
 
     async def _schedule(self, node_id: str) -> None:
-        """调度一个节点:执行 → 路由出边 → 并行调度后继。"""
+        """调度一个节点:执行(或 skip) → 路由出边 → 并行调度后继。"""
         node = self.graph.get_node(node_id)
         if node is None:
             return
-        if node_id in {n for n in self.node_states if self.node_states[n].status == STATUS_COMPLETED}:
-            return  # 已执行(LOOP 回边场景)
+        if node_id in self._executed_this_round:
+            return  # 本轮已执行(LOOP 回边场景)
         if node_id in self._cancelled_nodes:
-            # BUG15：并行「任一完成」已短路掉的未命中分支节点，不再执行
+            # BUG15：并行「任一完成」/审批不同意已短路掉的节点，不再执行
             return
         if node_id in self._scheduled_nodes:
             # BUG15：同一节点的调度任务已派生过（并行汇合节点重放等场景），防重复执行
             return
         self._scheduled_nodes.add(node_id)
 
-        # 状态检查点(需求 5):每个节点执行前查一次 DB 状态。
-        # CANCELLED → 抛 WorkflowCancelled;PAUSED → 落库暂停快照后,
-        # 当前节点挂进 _pending_nodes,等 resume 任务从它继续。
+        # 状态检查点:每个节点执行前查一次 DB 状态。取消是唯一的即时外部干预
+        # （暂停改由审批节点在节点边界触发，不依赖此检查点）。
         await self._checkpoint()
-        if self.status == STATUS_PAUSED:
-            self._pending_nodes.append(node_id)
+        if self.halt_all:
+            # 审批「整条工作流暂停」已生效:本节点本轮不跑。它不会进 node_states，
+            # 下轮恢复时 skip 判据不成立 → 自然重跑，无需额外补登记。
             return
 
-        # 断点:命中断点节点(且已有节点执行过,避免首个节点即暂停)→ 暂停。
-        # 条件断点:命中后先求值表达式,true 才暂停;false 放行且保留断点
-        # (LOOP 等回边场景下次命中可重新求值)。暂停时清除该断点,
-        # 避免 resume 重新调度到它时重复暂停。
-        if node_id in self.breakpoints and self.ctx.executed:
-            if self._breakpoint_condition_met(node_id):
-                self.breakpoints.discard(node_id)
-                await self._enter_paused()
-                self._pending_nodes.append(node_id)
-                return
+        # CONTINUE：上轮已 COMPLETED 的节点不重跑，只补发 skip 事件并沿上轮出边端口续路由
+        if self.submit_mode == SUBMIT_MODE_CONTINUE and self._should_skip(node):
+            result = await self._skip_node(node)
+        else:
+            result = await self._execute_node(node)
 
-        result = await self._execute_node(node)
-
-        # 分支失败且无异常分支 → 终止
+        # 分支失败且无异常分支 / 审批挂起 / 不同意已就地收口 → 本分支终止
         if result is None:
             return
 
@@ -319,12 +441,49 @@ class WorkflowRuntime:
 
         await self._route_next(node, result)
 
+    def _should_skip(self, node) -> bool:
+        """CONTINUE 模式下的跳过判据：上轮 COMPLETED 才跳。
+
+        FAILED/CANCELLED/TIMEOUT/RUNNING（整条流暂停时被砍的）一律重跑；
+        审批节点特例：AWAITING 必然不跳（走本轮结论覆写）；已 COMPLETED（往轮
+        已决策）按普通节点跳过——本轮没带它的新结论，重跑只会重复挂一次审批。
+        """
+        state = self.node_states.get(node.id)
+        return state is not None and state.status == STATUS_COMPLETED
+
+    async def _skip_node(self, node) -> NodeResult:
+        """跳过上轮已完成的节点：不跑业务逻辑，只补发带 skip 标记的成对事件。
+
+        为什么要发事：订阅方（对话页/调试面板）要靠事件流还原整条链路，
+        不发的话这些节点在页面上根本不会出现。output 不重发（真实数据以详情接口
+        的 nodeStates 为准），耗时计 0，并补写一行明细（否则提交时物理删过的
+        明细表只剩本轮真跑的节点）。
+        """
+        state = self.node_states[node.id]
+        state.skip = True
+        self._executed_this_round.add(node.id)
+        self._completed_with_branch[node.id] = state.branch
+        if node.id not in self.ctx.executed:
+            self.ctx.executed.append(node.id)
+        output = state.output if isinstance(state.output, dict) else {}
+        await self.emit("node.started", nodeId=node.id, nodeType=node.type,
+                        input=state.input, skip=True)
+        await self.emit("node.completed", nodeId=node.id, duration=0, skip=True)
+        await self._persist_node(node, state)
+        return NodeResult(output=output, branch_id=state.branch)
+
     async def _execute_node(self, node) -> Optional[NodeResult]:
         """执行单个节点（含事件、计时、状态记录、异常处理）。"""
         state = self.node_states.get(node.id) or NodeState()
+        if not state.llmMessages and node.id in self._memory_archive:
+            # 刚被子图重置抹掉的节点：把它的记忆接回来（子图内每轮覆盖，不累加）
+            state.llmMessages = self._memory_archive.pop(node.id)
+        self._executed_this_round.add(node.id)
         self._order_counter += 1
         state.order = self._order_counter
         state.status = STATUS_RUNNING
+        state.error = None
+        state.skip = False
         state.started_at = time.monotonic()
         # 快照节点自定义名称/类型（执行时为准，不受后续画布改名影响）
         state.label = node.label
@@ -336,11 +495,7 @@ class WorkflowRuntime:
 
         started = time.monotonic()
         await self.emit("node.started", nodeId=node.id, nodeType=node.type, input=input_view)
-        if self.node_persist_hook:
-            try:
-                asyncio.create_task(self.node_persist_hook(self, node, state))
-            except Exception:  # noqa: BLE001
-                pass
+        await self._persist_node(node, state)
 
         try:
             executor_cls = NODE_REGISTRY.get(node.type)
@@ -357,16 +512,16 @@ class WorkflowRuntime:
                     f"节点「{node.label}」执行超时（>{timeout}s）")
         except WorkflowCancelled:
             raise
+        except AwaitingApproval as a:
+            # 审批挂起：不是失败也不是取消。节点停在 AWAITING（非 COMPLETED → 下轮必重跑），
+            # 本分支终止且不路由下游，返回 None 让 _schedule 安静收场。
+            return await self._enter_awaiting(node, state, a)
         except Exception as e:  # noqa: BLE001
             state.status = STATUS_FAILED
             state.error = str(e)
             state.output = None
 
-            if self.node_persist_hook:
-                try:
-                    asyncio.create_task(self.node_persist_hook(self, node, state))
-                except Exception:  # noqa: BLE001
-                    pass
+            await self._persist_node(node, state)
 
             state.duration = int((time.monotonic() - started) * 1000)
             await self.emit("node.failed", nodeId=node.id, error=str(e))
@@ -374,6 +529,7 @@ class WorkflowRuntime:
             # 异常分支：branch:exception 出边存在则继续，否则终止工作流
             if self.graph.get_out_edges(node.id, "exception"):
                 self._completed_with_branch[node.id] = "exception"
+                state.branch = "exception"
                 self.ctx.set_node_output(node.id, {"exception_message": str(e)})
                 return NodeResult(output={"exception_message": str(e)}, branch_id="exception")
             self.error = f"节点「{node.label}」执行失败: {e}"
@@ -382,17 +538,14 @@ class WorkflowRuntime:
 
         # 成功
         state.status = STATUS_COMPLETED
+        state.branch = result.branch_id
 
         state.output = result.output
         self.ctx.set_node_output(node.id, result.output)
         self.ctx.executed.append(node.id)
         self._completed_with_branch[node.id] = result.branch_id  # None → output 端口
 
-        if self.node_persist_hook:
-            try:
-                asyncio.create_task(self.node_persist_hook(self, node, state))
-            except Exception:  # noqa: BLE001
-                pass
+        await self._persist_node(node, state)
 
         state.duration = int((time.monotonic() - started) * 1000)
         # 输出开关打开: 广播输出
@@ -574,12 +727,9 @@ class WorkflowRuntime:
                 state.error = reason
                 settled.append(nid)
                 target = self.graph.get_node(nid)
-                if target is not None and self.node_persist_hook:
-                    # 状态同步落库，否则执行详情里这条节点永远停在 RUNNING
-                    try:
-                        asyncio.create_task(self.node_persist_hook(self, target, state))
-                    except Exception:  # noqa: BLE001
-                        pass
+                if target is not None:
+                    # 状态同步落库（await：不能火忘，否则执行收尾后迟到的写会跨轮脏写）
+                    await self._persist_node(target, state)
                 await self.emit(event_type, nodeId=nid, branchId=bid,
                                 duration=state.duration, error=reason)
         if settled:
@@ -761,7 +911,10 @@ class WorkflowRuntime:
             if nid in seen or nid is None:
                 continue
             seen.add(nid)
-            self.node_states.pop(nid, None)
+            old = self.node_states.pop(nid, None)
+            if old is not None and old.llmMessages:
+                # 状态可以重置，跨轮攒下来的大模型记忆不行
+                self._memory_archive[nid] = old.llmMessages
             self._completed_with_branch.pop(nid, None)
             # 子图重跑前释放调度登记，否则 _schedule 的「已派生过」守卫会让
             # LOOP/ITERATION 第二轮起整个循环体直接空跑
@@ -902,12 +1055,13 @@ class WorkflowRuntime:
         """节点状态检查点:每个节点执行前调用一次(经注入的 hook 查 DB 状态)。
 
         - DB 状态为 RUNNING(或 hook 缺失/查询失败)→ 放行,继续执行;
-        - DB 状态为 CANCELLED → 抛 WorkflowCancelled,run() 走取消分支统一收尾;
-        - DB 状态为 PAUSED → 进入暂停态(落库快照 + 广播 workflow.paused)。
+        - DB 状态为 CANCELLED → 抛 WorkflowCancelled,run() 走取消分支统一收尾。
+
+        只认 CANCELLED：暂停不再由外部接口触发，唯一来源是审批节点在节点边界的
+        挂起（见 _enter_awaiting）。DB 里残留的 PAUSED 只是「上一轮停在审批等待」的
+        结果标记，提交接口已在校验通过后把它置回 RUNNING，这里再按 PAUSED 自我暂停
+        会让恢复任务原地空转。
         """
-        if self.status == STATUS_PAUSED:
-            # 已处于暂停态(断点暂停或本检查点刚进入):后续调度不再放行
-            return
         status = STATUS_RUNNING
         if self.status_check_hook is not None:
             try:
@@ -918,101 +1072,286 @@ class WorkflowRuntime:
                 status = STATUS_RUNNING
         if status == STATUS_CANCELLED:
             raise WorkflowCancelled()
-        if status == STATUS_PAUSED:
-            await self._enter_paused()
 
-    async def _enter_paused(self) -> None:
-        """进入暂停态:改内存状态 → 落库暂停快照(含 variables)→ 广播事件。
+    # ==================== 审批：暂停落点与不同意收口 ====================
 
-        与旧信号方案不同:这里不阻塞 run(),run() 会正常结束;
-        恢复由 resume 接口改 DB 状态为 RUNNING 并重新投递任务驱动。
+    async def _enter_awaiting(self, node, state: NodeState,
+                              signal: AwaitingApproval) -> None:
+        """审批节点挂起：节点停在 AWAITING，本分支终止且不路由下游，返回 None。
+
+        AWAITING 不是终态，所以 CONTINUE 恢复时 skip 判据不成立 → 该节点必然重跑，
+        本轮带进来的审批结论在审批执行器里覆写它的输出。
+        暂停范围为 ALL 时置 halt_all：其余分支不再调度，在跑的由 _wait_running 砍掉。
         """
-        self.status = STATUS_PAUSED
-        current = self.ctx.executed[-1] if self.ctx.executed else None
-        await self._persist_state(paused=True)
-        await self.emit("workflow.paused", nodeId=current,
-                        variables=self.ctx.global_vars)
+        state.status = STATUS_AWAITING
+        state.output = None
+        state.error = None
+        state.duration = int((time.monotonic() - state.started_at) * 1000)
+        self.awaiting_nodes[node.id] = signal.context
+        if signal.scope == APPROVAL_SCOPE_ALL:
+            self.halt_all = True
+        await self._persist_node(node, state)
+        await self.emit("node.paused", nodeId=node.id, nodeType=node.type,
+                        duration=state.duration, pauseScope=signal.scope,
+                        approvalContext=signal.context)
+        log.info("workflow awaiting approval exec={} node={} scope={}",
+                 self.execution_id, node.id, signal.scope)
+        return None
 
-    def _breakpoint_condition_met(self, node_id: str) -> bool:
-        """条件断点求值：无条件 → 恒真；求值失败（语法错/变量不存在）
-        视为不满足并告警放行，不阻塞执行（调试器惯例：坏条件不 break）。"""
-        cond = self.breakpoint_conditions.get(node_id)
-        if not cond or not cond.strip():
-            return True
-        try:
-            return evaluate_expression(cond, self.ctx)
-        except ValueError as e:
-            log.warning("breakpoint condition eval failed, node={}: {}", node_id, e)
-            return False
+    def downstream_closure(self, node_id: str) -> list[str]:
+        """node_id 的下游可达闭包（不含自身）。"""
+        seen: set[str] = set()
+        stack = [node_id]
+        while stack:
+            nid = stack.pop()
+            for e in self.graph.get_out_edges(nid) or []:
+                t = e.target
+                if t == node_id or t in seen:
+                    continue
+                seen.add(t)
+                stack.append(t)
+        return sorted(seen)
+
+    async def cancel_downstream(self, node_id: str, reason: str,
+                               reject_reply: str = "") -> list[str]:
+        """审批「不同意」：把下游可达闭包整体取消（其余分支照常跑完）。
+
+        与并行短路同一口径复用 _cancelled_nodes：_schedule 见到它就跳过，
+        _is_reachable 判它不可达，汇合闸门因此不会死等被砍的分支。
+        已 COMPLETED 的下游不回滚（本轮它先跑完了）；正在跑的节点由自身协程
+        收尾，其下游再靠闭包登记拦住。整条流终态是 COMPLETED（部分取消）。
+        """
+        if reject_reply:
+            self.reject_replies[node_id] = reject_reply
+        targets: list[str] = []
+        for nid in self.downstream_closure(node_id):
+            state = self.node_states.get(nid)
+            if state is not None and state.status == STATUS_COMPLETED:
+                continue
+            targets.append(nid)
+            self._cancelled_nodes.add(nid)
+            self._blocked_targets.pop(nid, None)
+            node = self.graph.get_node(nid)
+            if node is None:
+                continue
+            if state is None:
+                # 尚未被调度过：补一个取消态并落库，否则执行详情里看不到「被拒」的节点。
+                # 事件成对发（started 不带 input），前端才不会停在无响应状态。
+                state = NodeState()
+                self._order_counter += 1
+                state.order = self._order_counter
+                state.label = node.label
+                state.nodeType = node.type
+                state.status = STATUS_CANCELLED
+                state.error = reason
+                self.node_states[nid] = state
+                await self.emit("node.started", nodeId=nid, nodeType=node.type)
+                await self.emit("node.cancelled", nodeId=nid, duration=0, reason=reason)
+            elif state.status == STATUS_RUNNING:
+                state.status = STATUS_CANCELLED
+                state.error = reason
+                state.duration = int((time.monotonic() - state.started_at) * 1000)
+                await self.emit("node.cancelled", nodeId=nid, duration=state.duration,
+                                reason=reason)
+            else:
+                continue
+            await self._persist_node(node, state)
+        log.info("approval rejected exec={} node={} cancelled={}",
+                 self.execution_id, node_id, targets)
+        return targets
+
+    async def apply_output_edits(self, node_id: str, edits: list) -> list:
+        """审批表单的编辑回写：同时改 node_states[源].output 与 ctx 里的同源输出。
+
+        两处都得改：前者是跨轮恢复的权威源（下轮与详情接口读它），后者是本轮
+        下游取数的入口。只改一处会出现「本轮已生效、恢复后又变回旧值」。
+        返回带旧值的 diff（审批审计）。
+        """
+        diff: list = []
+        for edit in edits or []:
+            if not isinstance(edit, dict):
+                continue
+            src = edit.get("nodeId")
+            var = edit.get("varName")
+            if not src or not var:
+                continue
+            state = self.node_states.get(src)
+            if state is None:
+                log.warning("approval edit target has no state exec={} node={}",
+                            self.execution_id, src)
+                continue
+            output = state.output if isinstance(state.output, dict) else {}
+            old = output.get(var)
+            output[var] = edit.get("value")
+            state.output = output
+            self.ctx.set_node_output(src, output)
+            diff.append({"nodeId": src, "varName": var,
+                         "oldValue": old, "newValue": edit.get("value")})
+        return diff
 
     async def _persist_state(self, paused: bool = False) -> None:
-        start = time.perf_counter()
         """执行状态落库钩子(service 层注入,引擎不直接依赖 ORM)。"""
         if self.state_persist_hook:
             try:
                 await self.state_persist_hook(self, paused)
-            except Exception:  # noqa: BLE001
-                pass
-        end = time.perf_counter()
-        # log.info("state persist hook took {} ms", (end - start) * 1000)
+            except Exception as e:  # noqa: BLE001
+                log.warning("state persist failed exec={}: {}", self.execution_id, e)
 
     def _collect_outputs(self) -> dict:
         """收集 END 节点输出（多 END 合并；无 END 则空）；
         并按执行顺序合并 REPLY 指定回复节点的输出（后执行的覆盖先执行的），
-        使回复内容直接出现在 workflow.completed 的 outputs 中。"""
+        使回复内容直接出现在 workflow.completed 的 outputs 中。
+
+        只认本轮真跑过的节点（_executed_this_round）：再提交时 node_states 里还留着
+        上一轮的输出，全量收集会把上一轮的 END/REPLY 答案当成本轮回答吐给用户。
+        本轮 END/REPLY 被审批「不同意」砍掉时，用审批节点配的拒绝文案兜底。
+        """
         outputs = {}
-        for end_node in self.graph.find_end_nodes():
-            outputs.update(self.ctx.get_node_output(end_node.id))
-        for nid in sorted(self.node_states, key=lambda n: self.node_states[n].order):
+        ordered = sorted((nid for nid in self._executed_this_round
+                          if nid in self.node_states),
+                         key=lambda n: self.node_states[n].order)
+        for nid in ordered:
             node = self.graph.get_node(nid)
-            if node is not None and node.type == "REPLY":
-                outputs.update(self.ctx.get_node_output(nid))
+            state = self.node_states[nid]
+            if node is None or state.status != STATUS_COMPLETED:
+                continue
+            if node.type in ("END", "REPLY"):
+                output = self.ctx.get_node_output(nid)
+                if isinstance(output, dict):
+                    outputs.update(output)
+        if not outputs and self.reject_replies:
+            # 审批「不同意」把下游 END/REPLY 全砍了：没有回答会让对话页空白，
+            # 用节点配的拒绝文案按 END 声明的变量名兜底铺回去
+            reply = list(self.reject_replies.values())[-1]
+            names = {f.get("name") for end in self.graph.find_end_nodes()
+                     for f in ((end.data or {}).get("outputs") or []) if f.get("name")}
+            names |= {"answer", "output", "text"}
+            outputs = {name: reply for name in names if name}
         return outputs
 
     def node_states_dict(self) -> dict:
         return {nid: s.to_dict() for nid, s in self.node_states.items()}
 
     def snapshot(self) -> dict:
-        """执行快照（variables API / resume-from-snapshot 用）。"""
+        """执行快照（写 tb_workflow_execution.variables，仅 PAUSED 与终态）。
+
+        瘦身：去掉 context/completedWithBranch 等与 nodeStates 重复的字段——恢复不
+        再依赖快照（以 node_states 为权威源由 hydrate 重建 ctx），快照只用于排障与
+        详情展示，冗余副本只会在跨轮覆盖时造成口径不一致。
+        """
         return {
             "executionId": self.execution_id,
             "status": self.status,
-            "context": self.ctx.to_dict(),
+            "submitMode": self.submit_mode,
+            "round": self.round,
             "nodeStates": self.node_states_dict(),
-            "completedWithBranch": dict(self._completed_with_branch),
-            "pendingNodes": list(self._pending_nodes),
-            # 剩余断点及其条件（resume-from-snapshot 重建运行时后仍可命中）
-            "breakpoints": list(self.breakpoints),
-            "breakpointConditions": dict(self.breakpoint_conditions),
-            "global": self.ctx.global_vars,
+            "awaitingNodeIds": list(self.awaiting_nodes),
+            "approvalContext": self.awaiting_nodes,
+            "approvalDecisions": self.approval_decisions,
+            "rejectReplies": self.reject_replies,
             "inputTokens": self.input_tokens,
             "outputTokens": self.output_tokens,
             "llmCallCount": self.llm_call_count,
+            "durationMs": self.duration_ms,
         }
 
-    def restore(self, snapshot: dict) -> None:
-        self.ctx.restore(snapshot.get("context") or {})
-        # global 变量在快照中存在两份冗余（顶层 "global" 与 context.global），
-        # 顶层为权威（与 _persist_state 落库语义一致），context 内为兼容兜底。
-        merged = dict((snapshot.get("context") or {}).get("global") or {})
-        merged.update(snapshot.get("global") or {})
-        self.ctx.global_vars = merged
-        self._completed_with_branch = dict(snapshot.get("completedWithBranch") or {})
-        self._pending_nodes = list(snapshot.get("pendingNodes") or [])
-        # 剩余断点与条件（快照带则恢复，不带则保持构造时传入值——向后兼容旧快照）
-        if snapshot.get("breakpoints") is not None:
-            self.breakpoints = set(snapshot["breakpoints"])
-            self.breakpoint_conditions = dict(snapshot.get("breakpointConditions") or {})
-        for nid, s in (snapshot.get("nodeStates") or {}).items():
+    def hydrate(self, node_states: Optional[dict], replay_global: bool = True) -> None:
+        """用 DB 里的 node_states（跨轮权威源）重建运行时上下文。
+
+        重建三件事：
+        1. NodeState 全字段（含 branch/llmMessages/review*）；
+        2. ctx.node_outputs —— CONTINUE 模式下 skip 节点的下游要能引用到上轮结果；
+        3. 出边端口 —— 汇合闸门与分支路由靠它判断跳过之后往哪个后继走。
+
+        replay_global：只有 CONTINUE 才重放全局变量。RETRY 会把全部节点重跑一遍，
+        带着上一轮的循环计数（如 loopIndex=3）开跑会让 LOOP 首轮就命中退出条件、
+        循环体一次都不执行。
+        """
+        for nid, s in (node_states or {}).items():
+            if not isinstance(s, dict) or self.graph.get_node(nid) is None:
+                continue  # 画布已删掉的节点不重建（graph_hash 已拦住大部分，此处兜底）
             state = NodeState()
-            state.order = s.get("order", 0)
-            state.status = s.get("status", STATUS_COMPLETED)
+            state.order = int(s.get("order") or 0)
+            state.status = s.get("status") or STATUS_COMPLETED
             state.input = s.get("input")
             state.output = s.get("output")
             state.error = s.get("error")
-            state.duration = s.get("duration", 0)
+            state.duration = int(s.get("duration") or 0)
+            state.label = s.get("label")
+            state.nodeType = s.get("nodeType")
+            state.branch = s.get("branch")
+            state.llmMessages = list(s.get("llmMessages") or [])
+            state.review = s.get("review")
+            state.reviewBy = s.get("reviewBy")
+            state.reviewOpinion = s.get("reviewOpinion")
+            state.reviewDiff = s.get("reviewDiff")
+            # skip 是本轮属性，不随历史状态带过来
             self.node_states[nid] = state
         self._order_counter = max((s.order for s in self.node_states.values()), default=0)
+        for nid, state in self.node_states.items():
+            # 只把「有结果的状态」灌回 ctx：RETRY 已把全部状态刷成 PENDING，
+            # 再灌上轮输出会让未重跑的节点读到陈旧数据
+            if (isinstance(state.output, dict) and state.output
+                    and state.status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_AWAITING)):
+                self.ctx.set_node_output(nid, state.output)
+            if state.status in (STATUS_COMPLETED, STATUS_FAILED):
+                self._completed_with_branch[nid] = state.branch
+        if replay_global:
+            self._replay_global_vars()
+
+    def _replay_global_vars(self) -> None:
+        """按执行顺序重放全局变量（快照不再存 global 副本，靠已落库节点输出推导）。
+
+        目前只有两类节点写 global_vars：
+        - VARIABLE_ASSIGNER：output 里就是本轮被赋值的变量（无透传字段），全部重放；
+        - LOOP：循环计数变量（执行器已按要求一并写进 output），按节点配置名精确取。
+        新增写全局变量的节点类型时必须在这里补一条，否则恢复后变量会丢。
+        """
+        for nid, state in sorted(self.node_states.items(), key=lambda kv: kv[1].order):
+            node = self.graph.get_node(nid)
+            if node is None or state.status != STATUS_COMPLETED:
+                continue
+            output = state.output
+            if not isinstance(output, dict):
+                continue
+            if node.type == "VARIABLE_ASSIGNER":
+                self.ctx.global_vars.update(output)
+            elif node.type == "LOOP":
+                loop_var = (node.data or {}).get("loopVariable") or "loopIndex"
+                if loop_var in output:
+                    self.ctx.global_vars[loop_var] = output[loop_var]
+
+    def restore(self, snapshot: dict) -> None:
+        """从上一轮落库的 variables 快照重建运行时（提交接口投递前调用）。
+
+        nodeStates 是权威源；老快照里的 context/global 只作结构升级前的兼容兜底。
+        """
+        self.hydrate(snapshot.get("nodeStates") or {},
+                     replay_global=(self.submit_mode == SUBMIT_MODE_CONTINUE))
+        legacy_ctx = snapshot.get("context") or {}
+        if legacy_ctx:
+            self.ctx.restore(legacy_ctx)
+        legacy_global = snapshot.get("global")
+        if legacy_global:
+            merged = dict(self.ctx.global_vars)
+            merged.update(legacy_global)
+            self.ctx.global_vars = merged
+        elif legacy_ctx.get("global"):
+            self.ctx.global_vars = dict(legacy_ctx["global"])
+        # 旧快照的端口路由记在顶层 completedWithBranch 里，nodeState.branch 缺失时回填
+        for nid, b in (snapshot.get("completedWithBranch") or {}).items():
+            state = self.node_states.get(nid)
+            if state is not None and state.branch is None:
+                state.branch = b
+                if state.status in (STATUS_COMPLETED, STATUS_FAILED):
+                    self._completed_with_branch[nid] = b
         self.input_tokens = int(snapshot.get("inputTokens", 0))
+        # 老快照没有 round：保持构造参数（默认 1），别把它归零
+        self.round = max(self.round, int(snapshot.get("round") or 0))
         self.output_tokens = int(snapshot.get("outputTokens", 0))
         self.llm_call_count = int(snapshot.get("llmCallCount", 0))
+        self.reject_replies = dict(snapshot.get("rejectReplies") or {})
+        self.duration_base_ms = int(snapshot.get("durationMs", 0))
+        # 提交时预存的审批结论：构造参数已带时不覆盖（新结论优先于快照里的残留）
+        if not self.approval_decisions:
+            self.approval_decisions = dict(snapshot.get("approvalDecisions") or {})

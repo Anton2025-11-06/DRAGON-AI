@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 
 export type NodeStatus =
+  | 'awaiting'
   | 'cancelled'
   | 'completed'
   | 'failed'
@@ -26,6 +27,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const statusText = computed(() => {
   const labelsEN: Record<string, string> = {
+    awaiting: 'Awaiting approval',
     cancelled: 'Cancelled',
     pending: 'Waiting',
     waiting: 'Waiting',
@@ -36,6 +38,7 @@ const statusText = computed(() => {
     timeout: 'Timeout',
   };
   const labelsCN: Record<string, string> = {
+    awaiting: '待审批',
     cancelled: '已取消',
     pending: '等待中',
     waiting: '等待中',
@@ -143,6 +146,17 @@ const durationText = computed(() => {
     color: #8c8c8c;
     .status-dot {
       background: #8c8c8c;
+    }
+  }
+
+  // 审批节点挂起：紫色等待态，与节点追踪面板同一语义
+  &.awaiting {
+    background: #f9f0ff;
+    border: 1px solid #d3adf7;
+    color: #722ed1;
+    .status-dot {
+      background: #722ed1;
+      animation: pulse 1.4s infinite;
     }
   }
 

@@ -24,6 +24,7 @@ import {
   PlusOutlined,
   RightOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   StopOutlined,
   SyncOutlined,
   ToolOutlined,
@@ -122,6 +123,7 @@ const iconComponents: Record<string, Component> = {
   TOOL: ToolOutlined,
   MCP_TOOL: CloudServerOutlined,
   AGENT: UserOutlined,
+  APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
   ITERATION: SyncOutlined,
@@ -313,6 +315,28 @@ function getNodeOutputVariables(
         type: 'string',
         description: '智能体响应',
       });
+      break;
+    }
+
+    case 'APPROVAL': {
+      // 与后端 ApprovalNodeExecutor 输出对齐：审批结论（挂起中不产出，不可引用）
+      variables.push(
+        {
+          name: 'review',
+          type: 'boolean',
+          description: '审批结论（true=同意）',
+        },
+        {
+          name: 'reviewOpinion',
+          type: 'string',
+          description: '审批意见',
+        },
+        {
+          name: 'reviewBy',
+          type: 'string',
+          description: '审批人标识',
+        },
+      );
       break;
     }
 
@@ -593,6 +617,8 @@ function mapInputFieldType(fieldType: string): ExtendedVariableType {
     CHECKBOX: 'boolean',
     SINGLE_FILE: 'File',
     FILE_LIST: 'Array[File]',
+    // 审批入参：一组审批人标识（数字或字符串）
+    APPROVER: 'array',
   };
   return typeMap[fieldType] || 'string';
 }

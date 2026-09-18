@@ -1,4 +1,8 @@
-import type { ExecutionEventType, NodeType } from '#/api/ai-workflow/types';
+import type {
+  ApprovalContext,
+  ExecutionEventType,
+  NodeType,
+} from '#/api/ai-workflow/types';
 
 import { WORKFLOW_RUNTIME_EVENT_TYPES } from '#/api/ai-workflow/types';
 
@@ -43,6 +47,8 @@ export interface NodeCompletedEvent extends WorkflowRuntimeEventBase {
   nodeId: string;
   output?: unknown;
   duration?: number;
+  /** true = 本轮未重跑（恢复提交里沿用上一轮结果） */
+  skip?: boolean;
   tokenUsage?: {
     inputTokens: number;
     outputTokens: number;
@@ -77,9 +83,23 @@ export interface NodeCancelledEvent extends WorkflowRuntimeEventBase {
   error?: string;
 }
 
+/** 审批节点挂起（节点停在 AWAITING，本分支终止不路由下游） */
+export interface NodePausedEvent extends WorkflowRuntimeEventBase {
+  type: 'node.paused';
+  nodeId: string;
+  nodeType?: NodeType;
+  duration?: number;
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  approvalContext?: ApprovalContext;
+}
+
+/** 整条流暂停：本轮跑完但存在未决策的审批节点（唯一暂停来源） */
 export interface WorkflowPausedEvent extends WorkflowRuntimeEventBase {
   type: 'workflow.paused';
-  nodeId: string;
+  nodeId?: string;
+  awaitingNodeIds?: string[];
+  approvalContext?: ApprovalContext;
+  duration?: number;
   variables?: Record<string, unknown>;
 }
 
@@ -104,6 +124,7 @@ export type WorkflowRuntimeEvent =
   | NodeCompletedEvent
   | NodeDeltaEvent
   | NodeFailedEvent
+  | NodePausedEvent
   | NodeStartedEvent
   | NodeTimeoutEvent
   | WorkflowCancelledEvent

@@ -20,13 +20,14 @@ export { default as ResultDisplay } from './ResultDisplay.vue';
 // Composables
 export { useSSE } from './use-sse';
 export type {
-  BreakpointHitEventData,
+  ApprovalPausedEventData,
   ExecutionCompletedEventData,
   ExecutionFailedEventData,
   NetworkError,
   NetworkErrorType,
   NodeCompletedEventData,
   NodeErrorEventData,
+  NodePausedEventData,
   NodeStartedEventData,
   SSEConnectionState,
   SSEEventCallbacks,

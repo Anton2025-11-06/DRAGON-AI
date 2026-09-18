@@ -25,6 +25,7 @@ import { message } from 'ant-design-vue';
 
 import {
   LLM_TYPE_OPTIONS,
+  MODEL_TYPES_MEMORY,
   MODEL_TYPES_STREAMABLE,
   MT_AUDIO_TO_TEXT,
   MT_IMAGE_EMBEDDING,
@@ -40,6 +41,7 @@ import {
   MT_TEXT_TO_VIDEO,
   MT_VIDEO_UNDERSTAND,
 } from '#/api/ai-workflow/const';
+import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import * as modelApi from '../../../model-plaza/api';
 import ModelTryPanel from '../../../model-plaza/components/ModelTryPanel.vue';
@@ -66,6 +68,8 @@ const defaultStructuredOutput: StructuredOutput = {
   strictMode: false,
 };
 
+const workflowStore = useAiWorkflowStore();
+
 // 表单数据（含 12 能力类型全部入参字段）
 const formData = reactive<
   LLMNodeConfig & { structuredOutput: StructuredOutput }
@@ -91,6 +95,12 @@ const formData = reactive<
   visionEnabled: false,
   imageVariables: [],
   structuredOutput: { ...defaultStructuredOutput },
+  memoryEnabled: false,
+  memoryLimit: 10,
+  memoryScope: 'SELF',
+  memoryNodes: [],
+  memoryStrategy: 'DROP_OLDEST',
+  memoryCompressModelId: undefined,
 });
 
 // ==================== 节点级常用参数（默认取模型管理登记的 common_params，可改值/新增/删除）====================
@@ -236,6 +246,12 @@ watch(
       structuredOutput: config.structuredOutput
         ? { ...defaultStructuredOutput, ...config.structuredOutput }
         : { ...defaultStructuredOutput },
+      memoryEnabled: config.memoryEnabled ?? false,
+      memoryLimit: config.memoryLimit ?? 10,
+      memoryScope: config.memoryScope || 'SELF',
+      memoryNodes: config.memoryNodes || [],
+      memoryStrategy: config.memoryStrategy || 'DROP_OLDEST',
+      memoryCompressModelId: config.memoryCompressModelId,
     });
     // 回填已存参数行；自身 emit 触发的回灌不重建（避免输入丢失焦点、也避免覆盖异步种子结果）
     const incoming = Array.isArray(config.params) ? config.params : [];
@@ -309,6 +325,66 @@ const showSize = computed(() =>
 );
 const showImageN = computed(() => cat.value === MT_TEXT_TO_IMAGE);
 const showVoice = computed(() => cat.value === MT_TEXT_TO_AUDIO);
+
+// ==================== 记忆（需求 1）====================
+
+/**
+ * 当前能力类型是否可注入历史
+ * 向量/重排/音频转文字/文生音频没有可注入的文本位，不展示开关也不下发相关字段。
+ */
+const showMemory = computed(() => MODEL_TYPES_MEMORY.includes(cat.value));
+
+const MEMORY_SCOPE_OPTIONS = [
+  { label: '本节点', value: 'SELF' },
+  { label: '指定节点', value: 'NODES' },
+  { label: '整条工作流', value: 'WORKFLOW' },
+];
+
+const MEMORY_STRATEGY_OPTIONS = [
+  { label: '丢弃最旧', value: 'DROP_OLDEST' },
+  { label: '丢弃中间', value: 'DROP_MIDDLE' },
+  { label: '丢弃最新', value: 'DROP_NEWEST' },
+  { label: '自动压缩', value: 'COMPRESS' },
+];
+
+/** 超限策略的口径提示（与后端 apply_limit 一致） */
+const memoryStrategyHint = computed(() => {
+  switch (formData.memoryStrategy) {
+    case 'COMPRESS': {
+      return '把超出额度部分压缩成一条系统摘要（压缩失败自动降级为丢弃最旧）';
+    }
+    case 'DROP_MIDDLE': {
+      return '保留最旧与最新的一半，砍掉中间（开场与当下都在）';
+    }
+    case 'DROP_NEWEST': {
+      return '保留最早的几条，丢弃较新历史';
+    }
+    default: {
+      return '保留最近的几条，丢弃更早历史';
+    }
+  }
+});
+
+/** 「指定节点」候选：画布上的其它大模型节点（只有大模型节点会写 llmMessages） */
+const memoryNodeOptions = computed(() => {
+  const canvas = workflowStore.canvasRef;
+  const nodes = canvas ? canvas.getNodes() || [] : [];
+  const options = nodes
+    .filter(
+      (node: any) => node.data?.nodeType === 'LLM' && node.id !== props.nodeId,
+    )
+    .map((node: any) => ({
+      label: node.data?.label || node.id,
+      value: node.id,
+    }));
+  // 已选但已被删除的节点保留展示，避免下拉回显为空、也让校验能报出丢节点
+  (formData.memoryNodes || []).forEach((id) => {
+    if (!options.some((opt) => opt.value === id)) {
+      options.push({ label: `${id}（已删除）`, value: id });
+    }
+  });
+  return options;
+});
 
 // ==================== 模型测试台（复用 ModelTryPanel，不影响配置字段保存）====================
 const testOpen = ref(false);
@@ -423,6 +499,32 @@ function handleChange() {
     structuredOutput: formData.structuredOutput.enabled
       ? { ...formData.structuredOutput }
       : undefined,
+    // 未开记忆时整组不下发：否则图里会多一堆用不上的开关字段
+    memoryEnabled: showMemory.value ? formData.memoryEnabled : undefined,
+    memoryLimit:
+      showMemory.value && formData.memoryEnabled
+        ? formData.memoryLimit
+        : undefined,
+    memoryScope:
+      showMemory.value && formData.memoryEnabled
+        ? formData.memoryScope
+        : undefined,
+    memoryNodes:
+      showMemory.value &&
+      formData.memoryEnabled &&
+      formData.memoryScope === 'NODES'
+        ? formData.memoryNodes
+        : undefined,
+    memoryStrategy:
+      showMemory.value && formData.memoryEnabled
+        ? formData.memoryStrategy
+        : undefined,
+    memoryCompressModelId:
+      showMemory.value &&
+      formData.memoryEnabled &&
+      formData.memoryStrategy === 'COMPRESS'
+        ? formData.memoryCompressModelId
+        : undefined,
     params: paramRows.value.map((p) => castParamRow(p)),
   };
   emit('update:config', config);
@@ -727,6 +829,87 @@ async function handleTypeChange() {
             @change="handleChange"
           />
         </a-form-item>
+      </template>
+    </template>
+
+    <!-- 记忆：历史写在 node_states[节点id].llmMessages，同一个执行 id（即会话）内跨轮生效 -->
+    <template v-if="showMemory">
+      <a-divider
+        orientation="left"
+        style="margin: 16px 0 12px; font-size: 12px"
+      >
+        记忆
+      </a-divider>
+      <a-form-item>
+        <template #label>
+          <span>
+            启用记忆
+            <a-tooltip
+              title="同一执行 id（等同于会话 id）内的历史问答自动带入下一轮"
+            >
+              <QuestionCircleOutlined
+                style="margin-left: 4px; color: #8c8c8c"
+              />
+            </a-tooltip>
+          </span>
+        </template>
+        <a-switch
+          v-model:checked="formData.memoryEnabled"
+          @change="handleChange"
+        />
+      </a-form-item>
+      <template v-if="formData.memoryEnabled">
+        <a-form-item label="记忆条数上限">
+          <a-input-number
+            v-model:value="formData.memoryLimit"
+            :min="1"
+            :max="100"
+            style="width: 100%"
+            @change="handleChange"
+          />
+          <div class="form-hint">
+            按消息条数计（一轮 = 提问+回答 两条），上限 100
+          </div>
+        </a-form-item>
+        <a-form-item label="记忆范围">
+          <a-select
+            v-model:value="formData.memoryScope"
+            :options="MEMORY_SCOPE_OPTIONS"
+            @change="handleChange"
+          />
+        </a-form-item>
+        <a-form-item v-if="formData.memoryScope === 'NODES'" label="记忆节点">
+          <a-select
+            v-model:value="formData.memoryNodes"
+            mode="multiple"
+            :options="memoryNodeOptions"
+            placeholder="选择取哪些大模型节点的历史"
+            @change="handleChange"
+          />
+          <div class="form-hint">
+            只有大模型节点会写入记忆，候选只列画布上的其它大模型节点
+          </div>
+        </a-form-item>
+        <a-form-item label="超限策略">
+          <a-select
+            v-model:value="formData.memoryStrategy"
+            :options="MEMORY_STRATEGY_OPTIONS"
+            @change="handleChange"
+          />
+          <div class="form-hint">{{ memoryStrategyHint }}</div>
+        </a-form-item>
+        <template v-if="formData.memoryStrategy === 'COMPRESS'">
+          <ModelSelect
+            v-model:model-value="formData.memoryCompressModelId"
+            :type-options="[]"
+            :default-type="MT_TEXT_TO_TEXT"
+            placeholder="选择压缩模型（仅文生文）"
+            @change="handleChange"
+          />
+          <div class="form-hint">
+            用一个文生文模型把被丢掉的旧历史摘要成一条；需先申请到该模型的调用权限
+          </div>
+        </template>
       </template>
     </template>
 

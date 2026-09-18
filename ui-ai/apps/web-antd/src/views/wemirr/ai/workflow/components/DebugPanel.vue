@@ -1,7 +1,10 @@
 <script setup lang="ts">
 /**
  * DebugPanel 调试面板组件
- * 采用可调整大小的分栏布局，集成 PreviewRunner、NodeTracePanel、VariableInspector、CheckpointManager
+ * 采用可调整大小的分栏布局，集成 PreviewRunner、NodeTracePanel、VariableInspector
+ *
+ * 审批入口不在本面板：暂停唯一来自 APPROVAL 节点，由 PreviewRunner 内的审批面板
+ * 经 submit-sync 回传结论（断点与无条件 resume 链路已整体废弃）。
  */
 import type { InputField } from '#/api/ai-workflow/types';
 import type {
@@ -15,18 +18,11 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   BugOutlined,
   ClockCircleOutlined,
-  CodeOutlined,
   ColumnHeightOutlined,
   ColumnWidthOutlined,
-  DeleteOutlined,
-  FastForwardOutlined,
-  InfoCircleOutlined,
   QuestionCircleOutlined,
-  SettingOutlined,
 } from '@ant-design/icons-vue';
-import { message, Modal } from 'ant-design-vue';
 
-import { resumeExecution, updateVariable } from '#/api/ai-workflow';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
@@ -70,9 +66,7 @@ const workflowStore = useAiWorkflowStore();
 // ==================== State ====================
 
 /** 当前激活的标签页 */
-const activeTab = ref<'breakpoints' | 'runner' | 'trace' | 'variables'>(
-  'runner',
-);
+const activeTab = ref<'runner' | 'trace' | 'variables'>('runner');
 
 /** 分栏大小 (百分比) */
 const splitSize = ref(50);
@@ -82,11 +76,6 @@ const isDragging = ref(false);
 
 /** 选中的节点追踪数据 */
 const selectedTrace = ref<NodeTrace | null>(null);
-
-/** 条件检查点编辑弹窗 */
-const conditionModalVisible = ref(false);
-const editingBreakpointId = ref<null | string>(null);
-const editingCondition = ref('');
 
 /** PreviewRunner 组件引用 */
 const previewRunnerRef = ref<InstanceType<typeof PreviewRunner>>();
@@ -104,14 +93,8 @@ const isDebugMode = computed({
 /** 是否正在执行 */
 const isRunning = computed(() => debugStore.isRunning);
 
-/** 是否已暂停 */
+/** 是否已暂停（等待人工审批） */
 const isPaused = computed(() => debugStore.isPaused);
-
-/** 检查点列表 */
-const breakpointList = computed(() => [...debugStore.breakpoints.values()]);
-
-/** 检查点数量 */
-const breakpointCount = computed(() => debugStore.breakpointCount);
 
 /** 变量分组列表 */
 const variableGroups = computed(
@@ -130,21 +113,30 @@ const isHorizontalLayout = computed(() => props.layoutMode === 'bottom');
 /** 节点详情子面板仅在「节点追踪」Tab 显示，其他 Tab 占满整栏 */
 const showNodeDetail = computed(() => activeTab.value === 'trace');
 
-/** 需要同步到画布的节点终态（timeout/cancelled 为并行分支被砍后的结果） */
+/** 需要同步到画布的节点状态（awaiting=审批挂起、skipped=恢复提交里本轮沿用） */
 type CanvasSyncStatus =
   | 'cancelled'
   | 'completed'
   | 'failed'
+  | 'paused'
   | 'running'
+  | 'skipped'
   | 'timeout';
 
 const CANVAS_SYNC_STATUSES = new Set<string>([
+  'awaiting',
   'cancelled',
   'completed',
   'failed',
   'running',
+  'skipped',
   'timeout',
 ]);
+
+/** trace 状态 → 画布高亮入参：审批挂起在运行时叫 AWAITING，画布侧统一走 paused */
+function toCanvasStatus(status: string): CanvasSyncStatus {
+  return status === 'awaiting' ? 'paused' : (status as CanvasSyncStatus);
+}
 
 // ==================== Lifecycle ====================
 
@@ -196,7 +188,7 @@ watch(
       if (CANVAS_SYNC_STATUSES.has(trace.status)) {
         workflowStore.highlightNode(
           trace.nodeId,
-          trace.status as CanvasSyncStatus,
+          toCanvasStatus(trace.status),
           trace.duration ?? undefined,
         );
       }
@@ -235,22 +227,11 @@ function handleKeyDown(e: KeyboardEvent) {
   // 只在调试模式下响应
   if (!isDebugMode.value) return;
 
-  switch (e.key) {
-    case 'F5': {
-      // F5 执行
-      e.preventDefault();
-      if (!isRunning.value && previewRunnerRef.value) {
-        previewRunnerRef.value.run();
-      }
-      break;
-    }
-    case 'F8': {
-      // F8 继续执行
-      e.preventDefault();
-      if (isPaused.value) {
-        handleContinue();
-      }
-      break;
+  if (e.key === 'F5') {
+    // F5 执行
+    e.preventDefault();
+    if (!isRunning.value && previewRunnerRef.value) {
+      previewRunnerRef.value.run();
     }
   }
 }
@@ -309,21 +290,6 @@ function handleSplitDragEnd() {
 }
 
 /**
- * 继续执行
- */
-async function handleContinue() {
-  if (!debugStore.executionId) return;
-
-  try {
-    await resumeExecution(debugStore.executionId);
-    debugStore.resumeExecution();
-    message.success('继续执行');
-  } catch (error: any) {
-    message.error(error.message || '继续执行失败');
-  }
-}
-
-/**
  * 选择节点追踪
  */
 function handleSelectTrace(trace: NodeTrace) {
@@ -338,9 +304,10 @@ function handleNodeClick(nodeId: string) {
   emit('node-click', nodeId);
 }
 
-/** 追踪状态中文标签（timeout=已超时、cancelled=已取消） */
+/** 追踪状态中文标签（awaiting=待审批、timeout=已超时、cancelled=已取消） */
 function traceStatusText(status: NodeExecutionStatus): string {
   const labels: Record<string, string> = {
+    awaiting: '待审批',
     cancelled: '已取消',
     completed: '已完成',
     failed: '失败',
@@ -352,111 +319,32 @@ function traceStatusText(status: NodeExecutionStatus): string {
   return labels[status] || status;
 }
 
-/** 追踪状态 Tag 颜色（timeout 用黄色告警，区别于蓝色执行中） */
+/** 追踪状态 Tag 颜色（timeout 用黄色告警，awaiting 用紫色，区别于蓝色执行中） */
 function traceStatusColor(status: NodeExecutionStatus): string {
   const colors: Record<string, string> = {
+    awaiting: 'purple',
     cancelled: 'default',
     completed: 'success',
     failed: 'error',
     running: 'processing',
+    skipped: 'default',
     timeout: 'warning',
   };
   return colors[status] || 'default';
 }
 
 /**
- * 切换检查点启用状态
+ * 处理调试变量编辑。
+ *
+ * 变量编辑不再直连后端（原 update_variable 已随外部暂停链路废弃）：
+ * VariableInspector 已自行维护本地视图，能影响执行的改动必须走审批表单的 edits。
  */
-function handleToggleBreakpoint(nodeId: string) {
-  const bp = debugStore.breakpoints.get(nodeId);
-  if (bp) {
-    debugStore.setBreakpointEnabled(nodeId, !bp.enabled);
-  }
-}
-
-/**
- * 移除检查点
- */
-function handleRemoveBreakpoint(nodeId: string) {
-  debugStore.removeBreakpoint(nodeId);
-  message.success('已移除检查点');
-}
-
-/**
- * 编辑条件检查点
- */
-function handleEditCondition(nodeId: string) {
-  const bp = debugStore.breakpoints.get(nodeId);
-  if (bp) {
-    editingBreakpointId.value = nodeId;
-    editingCondition.value = bp.condition || '';
-    conditionModalVisible.value = true;
-  }
-}
-
-/**
- * 保存条件检查点
- */
-function handleSaveCondition() {
-  if (editingBreakpointId.value) {
-    debugStore.setBreakpointCondition(
-      editingBreakpointId.value,
-      editingCondition.value,
-    );
-    conditionModalVisible.value = false;
-    message.success('条件已保存');
-  }
-}
-
-/**
- * 启用所有检查点
- */
-function handleEnableAllBreakpoints() {
-  debugStore.enableAllBreakpoints();
-  message.success('已启用所有检查点');
-}
-
-/**
- * 禁用所有检查点
- */
-function handleDisableAllBreakpoints() {
-  debugStore.disableAllBreakpoints();
-  message.success('已禁用所有检查点');
-}
-
-/**
- * 清除所有检查点
- */
-function handleClearAllBreakpoints() {
-  Modal.confirm({
-    title: '确认清除',
-    content: '确定要清除所有检查点吗？',
-    okText: '确定',
-    cancelText: '取消',
-    onOk: () => {
-      debugStore.clearAllBreakpoints();
-      message.success('已清除所有检查点');
-    },
-  });
-}
-
-/**
- * 处理调试变量更新。
- */
-async function handleVariableUpdate(
+function handleVariableUpdate(
   _nodeId: string,
-  variableName: string,
-  newValue: any,
+  _variableName: string,
+  _newValue: any,
 ) {
-  if (!debugStore.executionId) return;
-
-  try {
-    await updateVariable(debugStore.executionId, variableName, newValue);
-    // 本地更新已由 VariableInspector 处理
-    message.success('变量已更新');
-  } catch (error: any) {
-    message.error(error.message || '更新变量失败');
-  }
+  // 仅保留事件接入，避免子组件回调签名变动
 }
 
 // ==================== Expose ====================
@@ -481,7 +369,7 @@ defineExpose({
       ...debugStore.nodeTraces.values(),
     ],
   /** 切换到指定标签页 */
-  switchTab: (tab: 'breakpoints' | 'runner' | 'trace' | 'variables') => {
+  switchTab: (tab: 'runner' | 'trace' | 'variables') => {
     activeTab.value = tab;
   },
   /**
@@ -512,18 +400,9 @@ defineExpose({
         <BugOutlined class="header-icon" />
         <span class="header-title">调试面板</span>
         <a-tag v-if="isRunning" color="processing" size="small">执行中</a-tag>
-        <a-tag v-else-if="isPaused" color="warning" size="small">已暂停</a-tag>
+        <a-tag v-else-if="isPaused" color="purple" size="small"> 待审批 </a-tag>
       </div>
       <div class="header-right">
-        <!-- 调试控制按钮 -->
-        <a-space v-if="isPaused" class="debug-controls">
-          <a-tooltip title="继续执行 (F8)">
-            <a-button size="small" type="primary" @click="handleContinue">
-              <template #icon><FastForwardOutlined /></template>
-            </a-button>
-          </a-tooltip>
-        </a-space>
-        <a-divider v-if="isPaused" type="vertical" />
         <!-- 布局切换 -->
         <a-tooltip
           :title="isHorizontalLayout ? '切换为右侧布局' : '切换为底部布局'"
@@ -536,7 +415,7 @@ defineExpose({
           </a-button>
         </a-tooltip>
         <!-- 帮助 -->
-        <a-tooltip title="快捷键: F5 执行, F8 继续">
+        <a-tooltip title="快捷键: F5 执行">
           <a-button type="text" size="small">
             <template #icon><QuestionCircleOutlined /></template>
           </a-button>
@@ -602,6 +481,8 @@ defineExpose({
                     failed: trace.status === 'failed',
                     timeout: trace.status === 'timeout',
                     cancelled: trace.status === 'cancelled',
+                    awaiting: trace.status === 'awaiting',
+                    skipped: trace.status === 'skipped',
                   }"
                   @click="handleSelectTrace(trace)"
                 >
@@ -646,94 +527,6 @@ defineExpose({
               @update="handleVariableUpdate"
             />
           </a-tab-pane>
-          <a-tab-pane key="breakpoints">
-            <template #tab>
-              <span>
-                检查点
-                <a-badge
-                  v-if="breakpointCount > 0"
-                  :count="breakpointCount"
-                  :number-style="{
-                    backgroundColor: '#ff4d4f',
-                    fontSize: '10px',
-                  }"
-                />
-              </span>
-            </template>
-            <div class="breakpoint-section">
-              <!-- 检查点操作栏 -->
-              <div class="breakpoint-toolbar">
-                <a-space>
-                  <a-button size="small" @click="handleEnableAllBreakpoints">
-                    全部启用
-                  </a-button>
-                  <a-button size="small" @click="handleDisableAllBreakpoints">
-                    全部禁用
-                  </a-button>
-                  <a-button
-                    size="small"
-                    danger
-                    @click="handleClearAllBreakpoints"
-                  >
-                    清除全部
-                  </a-button>
-                </a-space>
-              </div>
-              <!-- 检查点列表 -->
-              <div class="breakpoint-list">
-                <a-empty
-                  v-if="breakpointList.length === 0"
-                  description="暂无检查点"
-                />
-                <div
-                  v-for="bp in breakpointList"
-                  :key="bp.nodeId"
-                  class="breakpoint-item"
-                  :class="{ disabled: !bp.enabled }"
-                >
-                  <a-checkbox
-                    :checked="bp.enabled"
-                    @change="handleToggleBreakpoint(bp.nodeId)"
-                  />
-                  <span
-                    class="breakpoint-dot"
-                    :class="{ active: bp.enabled }"
-                  ></span>
-                  <span class="breakpoint-name">{{ bp.nodeName }}</span>
-                  <a-tag size="small">{{ bp.nodeType }}</a-tag>
-                  <span v-if="bp.condition" class="breakpoint-condition">
-                    <CodeOutlined />
-                  </span>
-                  <div class="breakpoint-actions">
-                    <a-tooltip title="编辑条件">
-                      <a-button
-                        type="link"
-                        size="small"
-                        @click="handleEditCondition(bp.nodeId)"
-                      >
-                        <SettingOutlined />
-                      </a-button>
-                    </a-tooltip>
-                    <a-tooltip title="删除">
-                      <a-button
-                        type="link"
-                        size="small"
-                        danger
-                        @click="handleRemoveBreakpoint(bp.nodeId)"
-                      >
-                        <DeleteOutlined />
-                      </a-button>
-                    </a-tooltip>
-                  </div>
-                </div>
-              </div>
-              <!-- 检查点提示 -->
-              <div class="breakpoint-hint">
-                <InfoCircleOutlined />
-                <span>右键点击节点可添加/移除检查点；当前智能体运行时使用检查点继续执行，不支持旧式单步</span>
-              </div>
-            </div>
-          </a-tab-pane>
         </a-tabs>
       </div>
 
@@ -771,25 +564,6 @@ defineExpose({
         <NodeTracePanel :trace="selectedTrace" />
       </div>
     </div>
-
-    <!-- 条件检查点编辑弹窗 -->
-    <a-modal
-      v-model:open="conditionModalVisible"
-      title="条件检查点"
-      @ok="handleSaveCondition"
-    >
-      <a-form layout="vertical">
-        <a-form-item label="条件表达式">
-          <a-input
-            v-model:value="editingCondition"
-            placeholder="例如: {{start.input}} === 'test'"
-          />
-          <div class="condition-help">
-            当条件为 true 时在节点边界暂停执行，支持变量引用语法。
-          </div>
-        </a-form-item>
-      </a-form>
-    </a-modal>
   </div>
 </template>
 
@@ -999,6 +773,18 @@ defineExpose({
     opacity: 0.7;
   }
 
+  // 审批节点挂起：紫色等待态
+  &.awaiting {
+    background-color: #f9f0ff;
+    border-left: 3px solid #722ed1;
+  }
+
+  // 恢复提交里本轮沿用的已完成节点：置灰不加粗
+  &.skipped {
+    border-left: 3px solid #d9d9d9;
+    opacity: 0.75;
+  }
+
   .trace-item-header {
     display: flex;
     align-items: center;
@@ -1023,94 +809,6 @@ defineExpose({
   }
 }
 
-// 检查点区域样式
-.breakpoint-section {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.breakpoint-toolbar {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--ant-color-border-secondary);
-}
-
-.breakpoint-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-.breakpoint-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 4px;
-  background-color: var(--ant-color-error-bg);
-  border-radius: 6px;
-  transition: opacity 0.2s;
-
-  &.disabled {
-    opacity: 0.5;
-    background-color: var(--ant-color-bg-layout);
-  }
-
-  .breakpoint-dot {
-    width: 8px;
-    height: 8px;
-    background-color: var(--ant-color-text-quaternary);
-    border-radius: 50%;
-    transition: background-color 0.2s;
-
-    &.active {
-      background-color: var(--ant-color-error);
-    }
-  }
-
-  .breakpoint-name {
-    flex: 1;
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .breakpoint-condition {
-    color: var(--ant-color-warning);
-    font-size: 12px;
-  }
-
-  .breakpoint-actions {
-    display: flex;
-    gap: 0;
-    opacity: 0;
-    transition: opacity 0.2s;
-  }
-
-  &:hover .breakpoint-actions {
-    opacity: 1;
-  }
-}
-
-.breakpoint-hint {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--ant-color-text-secondary);
-  border-top: 1px solid var(--ant-color-border-secondary);
-}
-
-// 条件检查点帮助文本
-.condition-help {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--ant-color-text-secondary);
-}
-
 // 暗色模式适配
 html[class='dark'] {
   .debug-panel-header {
@@ -1128,14 +826,6 @@ html[class='dark'] {
 
     &.active {
       background-color: rgba(24, 144, 255, 0.15);
-    }
-  }
-
-  .breakpoint-item {
-    background-color: rgba(255, 77, 79, 0.1);
-
-    &.disabled {
-      background-color: var(--ant-color-bg-elevated);
     }
   }
 }

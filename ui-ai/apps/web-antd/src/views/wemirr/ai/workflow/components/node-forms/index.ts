@@ -4,6 +4,8 @@
  */
 
 export { default as AgentNodeForm } from './AgentNodeForm.vue';
+// 控制流节点（人工审批）
+export { default as ApprovalNodeForm } from './ApprovalNodeForm.vue';
 // 能力节点
 export { default as CodeNodeForm } from './CodeNodeForm.vue';
 export { default as DocExtractorNodeForm } from './DocExtractorNodeForm.vue';

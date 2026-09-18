@@ -1,16 +1,20 @@
 /**
- * 工作流「预览运行」WebSocket 事件接收 Composable
+ * 工作流「预览运行 / 预览再提交」WebSocket 事件接收 Composable
  *
  * 取代原 execute-async + SSE(订阅 Redis) 链路：连接建立后即向 execute-sync 端点
- * 发送 WorkflowExecutionReq 入参触发执行，执行事件（node.started / node.delta /
- * workflow.completed 等）由服务端经同一 socket 实时回推。
+ * 发送 WorkflowExecutionReq 入参触发执行（或向 submit-sync 发 WorkflowSubmitReq 带
+ * 审批结论继续跑），执行事件（node.started / node.delta / workflow.completed 等）
+ * 由服务端经同一 socket 实时回推。
  *
  * 事件对象结构与 SSE data 完全一致（{type, executionId, timestamp, ...payload}），
  * 因此复用 debugStore.handleSSEEvent 做统一分发，回调签名沿用 use-sse。
  */
 import type { SSEConnectionState, SSEEventCallbacks } from './use-sse';
 
-import type { WorkflowExecutionReq } from '#/api/ai-workflow/types';
+import type {
+  WorkflowExecutionReq,
+  WorkflowSubmitReq,
+} from '#/api/ai-workflow/types';
 
 import { getCurrentInstance, onBeforeUnmount, ref, shallowRef } from 'vue';
 
@@ -18,7 +22,10 @@ import { useAccessStore } from '@vben/stores';
 
 import { message } from 'ant-design-vue';
 
-import { getWorkflowExecuteSyncWsUrl } from '#/api/ai-workflow';
+import {
+  getWorkflowExecuteSyncWsUrl,
+  getWorkflowSubmitSyncWsUrl,
+} from '#/api/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
 /** 终态事件：收到后主动关闭连接 */
@@ -74,19 +81,39 @@ export function useWorkflowWs(
   /**
    * 建立连接并触发执行
    * @param workflowId 工作流ID
-   * @param body 执行入参（inputs / breakpoints）
+   * @param body 执行入参（inputs）
    */
   function connect(workflowId: number | string, body: WorkflowExecutionReq) {
+    open(getWorkflowExecuteSyncWsUrl(workflowId, baseUrl), {
+      Authorization: buildAuth(),
+      ...body,
+    });
+  }
+
+  /**
+   * 建立连接并再提交（预览页审批入口）
+   * @param executionId 执行ID（与首跑同一 id，会话语义连续）
+   * @param body 提交入参（mode / inputs / approval）
+   */
+  function connectSubmit(executionId: string, body: WorkflowSubmitReq) {
+    open(getWorkflowSubmitSyncWsUrl(executionId, baseUrl), {
+      Authorization: buildAuth(),
+      ...body,
+    });
+  }
+
+  /** 浏览器 WebSocket 无法自定义握手头，token 随首帧 JSON 透传给网关 */
+  function buildAuth(): string {
+    return accessStore.accessToken ? `Bearer ${accessStore.accessToken}` : '';
+  }
+
+  /** 拨号并发送首帧（execute-sync / submit-sync 共用） */
+  function open(url: string, body: Record<string, any>) {
     disconnect();
     setState('connecting');
-    // 浏览器 WebSocket 无法自定义握手头，token 随首帧 JSON 透传给网关：
-    // 网关读取 Authorization 解析登录态后注入 login_user 再转发下游。
-    const auth = accessStore.accessToken
-      ? `Bearer ${accessStore.accessToken}`
-      : '';
-    pendingBody = JSON.stringify({ ...body, Authorization: auth });
+    // 网关读取 Authorization 解析登录态后注入 login_user 再转发下游
+    pendingBody = JSON.stringify(body);
 
-    const url = getWorkflowExecuteSyncWsUrl(workflowId, baseUrl);
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);
@@ -172,6 +199,10 @@ export function useWorkflowWs(
         callbacks?.onNodeError?.(data);
         break;
       }
+      case 'node.paused': {
+        callbacks?.onNodePaused?.(data);
+        break;
+      }
       case 'node.started': {
         callbacks?.onNodeStarted?.(data);
         break;
@@ -193,7 +224,7 @@ export function useWorkflowWs(
         break;
       }
       case 'workflow.paused': {
-        callbacks?.onBreakpointHit?.(data);
+        callbacks?.onApprovalPaused?.(data);
         break;
       }
     }
@@ -220,6 +251,7 @@ export function useWorkflowWs(
   return {
     connectionState,
     connect,
+    connectSubmit,
     disconnect,
   };
 }

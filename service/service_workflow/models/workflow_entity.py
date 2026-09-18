@@ -65,8 +65,8 @@ class WorkflowExecution(Base):
     trigger_type: Mapped[str] = mapped_column(String(16), nullable=False, default="DEBUG")
     inputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     outputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    variables: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="全局变量（断点恢复用）")
-    node_states: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="节点状态聚合")
+    variables: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="执行快照（仅暂停/终态写入，排障与详情用）")
+    node_states: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="节点状态聚合（跨轮恢复的权威源）")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -75,6 +75,13 @@ class WorkflowExecution(Base):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     current_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # 本轮（最近一次）提交模式：RETRY 全部重跑 / CONTINUE 审批后恢复。空=首次执行
+    submit_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="提交模式 RETRY/CONTINUE")
+    # 正在等待审批的节点 id（状态 PAUSED 时非空），提交接口据此定位审批上下文
+    awaiting_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="等待审批节点ID")
+    # 图拓扑指纹（节点 id + 边集合）：再提交时不一致即拒绝，防止按旧状态续跑改过的画布
+    graph_hash: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="图拓扑指纹")
+    # 已废弃：断点功能整体下线（由「审批节点 + 再提交」承接），列保留不再读写
     breakpoints: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -92,6 +99,7 @@ class WorkflowNodeExecution(Base):
     node_id: Mapped[str] = mapped_column(String(64), nullable=False)
     node_type: Mapped[str] = mapped_column(String(32), nullable=False)
     # RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT（后两个由并行分支被砍时收敛写入）
+    # AWAITING=等待人工审批（非终态，恢复提交时该节点必然重跑）
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="RUNNING")
     node_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     input: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

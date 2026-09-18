@@ -56,10 +56,10 @@ class LoopNodeExecutor(BaseNodeExecutor):
             raise ValueError(f"循环节点达到最大迭代次数上限: {max_iter}")
 
         output_var = cfg.get("outputVariable") or "loopResult"
-        return NodeResult(
-            output={output_var: last_outputs, "iterations": iterations},
-            branch_id=None,  # 走默认 output 端口（退出）
-        )
+        # 循环计数变量一并进 output：跨轮恢复时 global_vars 由「已落库的节点输出」重放
+        # 得到（快照不再存 global 副本），只写 ctx.global_vars 会让恢复后的计数归零
+        output = {output_var: last_outputs, "iterations": iterations, loop_var: iterations}
+        return NodeResult(output=output, branch_id=None)  # 走默认 output 端口（退出）
 
     def _eval_exit(self, ctx: ExecutionContext, condition: Optional[str]) -> bool:
         if not condition:

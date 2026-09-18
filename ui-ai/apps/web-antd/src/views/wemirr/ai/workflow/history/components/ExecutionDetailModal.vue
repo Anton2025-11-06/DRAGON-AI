@@ -37,7 +37,7 @@ const statusConfig: Record<string, { color: string; icon: any; text: string }> =
     RUNNING: { color: 'processing', text: '执行中', icon: LoadingOutlined },
     COMPLETED: { color: 'success', text: '已完成', icon: CheckCircleOutlined },
     FAILED: { color: 'error', text: '失败', icon: CloseCircleOutlined },
-    PAUSED: { color: 'warning', text: '已暂停', icon: PauseCircleOutlined },
+    PAUSED: { color: 'purple', text: '待审批', icon: PauseCircleOutlined },
     CANCELLED: { color: 'default', text: '已取消', icon: StopOutlined },
     // 并行分支等待超时被停止（非失败），黄色告警
     TIMEOUT: { color: 'warning', text: '已超时', icon: ClockCircleOutlined },
@@ -94,6 +94,8 @@ function getNodeStatusColor(status?: string): string {
     // 超时用黄色，不再按蓝色执行中展示
     TIMEOUT: 'gold',
     CANCELLED: 'gray',
+    // 审批节点停在 AWAITING（等人工决策），与整条流的 PAUSED 同色系
+    AWAITING: 'purple',
   };
   return colors[status || 'PENDING'] || 'gray';
 }
@@ -107,8 +109,29 @@ function getNodeStatusText(status?: string): string {
     PENDING: '等待中',
     TIMEOUT: '已超时',
     CANCELLED: '已取消',
+    AWAITING: '待审批',
   };
   return texts[status || 'PENDING'] || status || '-';
+}
+
+/** 审批结论文本：未给结论时不能误判成不同意 */
+function getReviewText(review?: boolean): string {
+  if (review === true) return '同意';
+  if (review === false) return '不同意';
+  return '待决策';
+}
+
+/** diff 里的值可能是对象，展示前统一成一行文本 */
+function formatValue(value: any): string {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 /** 超时/取消不是执行失败，错误条用黄色告警 */
@@ -231,6 +254,13 @@ function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
                   <Tag :color="getNodeStatusColor(node.status)" size="small">
                     {{ getNodeStatusText(node.status) }}
                   </Tag>
+                  <!-- 恢复提交里本轮沿用的节点：不是重跑，不能画成正常完成 -->
+                  <Tag v-if="node.skip" color="cyan" size="small">
+                    本轮沿用
+                  </Tag>
+                  <span v-if="node.branch" class="node-type">
+                    分支 {{ node.branch }}
+                  </span>
                   <span
                     v-if="node.duration !== null && node.duration !== undefined"
                     class="node-duration"
@@ -244,6 +274,32 @@ function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
                     :message="node.error"
                     size="small"
                   />
+                </div>
+                <!-- 审批留痕：结论 / 审批人 / 意见 / 编辑 diff -->
+                <div v-if="node.nodeType === 'APPROVAL'" class="node-approval">
+                  <div class="approval-line">
+                    <Tag :color="node.review === false ? 'red' : 'green'">
+                      {{ getReviewText(node.review) }}
+                    </Tag>
+                    <span v-if="node.reviewBy" class="approval-by">
+                      审批人：{{ node.reviewBy }}
+                    </span>
+                  </div>
+                  <div v-if="node.reviewOpinion" class="approval-opinion">
+                    {{ node.reviewOpinion }}
+                  </div>
+                  <div
+                    v-for="row in node.reviewDiff || []"
+                    :key="`${row.nodeId}:${row.varName}`"
+                    class="approval-diff"
+                  >
+                    <div class="diff-key">
+                      {{ row.nodeId }}.{{ row.varName }}
+                    </div>
+                    <div class="diff-old">{{ formatValue(row.oldValue) }}</div>
+                    <div class="diff-arrow">→</div>
+                    <div class="diff-new">{{ formatValue(row.newValue) }}</div>
+                  </div>
                 </div>
                 <Collapse
                   v-if="node.input || node.output"
@@ -371,6 +427,56 @@ function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
 
       .node-error {
         margin-bottom: 8px;
+      }
+
+      // 审批留痕：浅紫底与暂停态同色系，和普通节点的输入/输出区分
+      .node-approval {
+        padding: 8px 10px;
+        margin-bottom: 8px;
+        font-size: 12px;
+        background: #f9f0ff;
+        border: 1px solid #efdbff;
+        border-radius: 4px;
+
+        .approval-line {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .approval-by {
+          color: #722ed1;
+        }
+
+        .approval-opinion {
+          margin-top: 4px;
+          color: #595959;
+          white-space: pre-wrap;
+        }
+
+        .approval-diff {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          margin-top: 4px;
+
+          .diff-key {
+            color: #262626;
+          }
+
+          .diff-old {
+            color: #bfbfbf;
+            text-decoration: line-through;
+          }
+
+          .diff-arrow {
+            color: #bfbfbf;
+          }
+
+          .diff-new {
+            color: #389e0d;
+          }
+        }
       }
 
       .node-detail-collapse {

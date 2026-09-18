@@ -8,6 +8,9 @@ from service.service_workflow.workflow_engine.nodes.ai_nodes import (
     AgentNodeExecutor, LLMNodeExecutor, ParameterExtractorNodeExecutor,
     QuestionClassifierNodeExecutor,
 )
+from service.service_workflow.workflow_engine.nodes.approval_nodes import (
+    ApprovalNodeExecutor,
+)
 from service.service_workflow.workflow_engine.nodes.base import BaseNodeExecutor
 from service.service_workflow.workflow_engine.nodes.compound_nodes import (
     IterationNodeExecutor, LoopNodeExecutor, ParallelNodeExecutor,
@@ -40,6 +43,8 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     ParallelNodeExecutor.node_type: ParallelNodeExecutor,
     VariableAssignerNodeExecutor.node_type: VariableAssignerNodeExecutor,
     VariableAggregatorNodeExecutor.node_type: VariableAggregatorNodeExecutor,
+    # 人工审批（业务逻辑：在节点边界暂停，由「指定 executionId 再提交」接口恢复）
+    ApprovalNodeExecutor.node_type: ApprovalNodeExecutor,
     # 数据
     TemplateNodeExecutor.node_type: TemplateNodeExecutor,
     ReplyNodeExecutor.node_type: ReplyNodeExecutor,
@@ -58,5 +63,5 @@ ALL_NODE_TYPES = [
     "START", "END", "LLM", "AGENT", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
     "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "MCP_TOOL", "KNOWLEDGE_RETRIEVAL",
     "PARAMETER_EXTRACTOR", "QUESTION_CLASSIFIER", "LIST_OPERATOR",
-    "VARIABLE_AGGREGATOR", "VARIABLE_ASSIGNER", "DOC_EXTRACTOR",
+    "VARIABLE_AGGREGATOR", "VARIABLE_ASSIGNER", "DOC_EXTRACTOR", "APPROVAL",
 ]

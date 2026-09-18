@@ -67,6 +67,22 @@ export const MODEL_TYPES_STREAMABLE: string[] = [
   MT_VIDEO_UNDERSTAND,
 ];
 
+/**
+ * 支持记忆（历史注入）的能力类型（与后端 workflow_engine/memory.py MEMORY_SUPPORT_CATEGORIES 对齐）。
+ *
+ * 文生文走独立 messages 段；其余有文本提示词槽的类型把历史拼成提示词前缀。
+ * 向量/重排/音频转文字/文生音频四类没有可注入的文本位（表单不展示，后端 validate 直接 ERROR）。
+ */
+export const MODEL_TYPES_MEMORY: string[] = [
+  MT_TEXT_TO_TEXT,
+  MT_IMAGE_UNDERSTAND,
+  MT_VIDEO_UNDERSTAND,
+  MT_OCR,
+  MT_TEXT_TO_IMAGE,
+  MT_TEXT_TO_VIDEO,
+  MT_IMAGE_TO_VIDEO,
+];
+
 // ==================== 供应商 provider（common_model 实现的 3 家） ====================
 export const PROVIDER_OPENAI = 'openai'; // 通用 OpenAI 兼容客户端（base_url 可配置）
 export const PROVIDER_DASHSCOPE = 'dashscope'; // 通义千问
@@ -116,5 +132,8 @@ export const LLM_TYPE_OPTIONS: { label: string; value: string }[] =
 
 /** 对话族节点（问题分类器 / 参数提取器）仅文生文 */
 export const CHAT_TYPE_OPTIONS: { label: string; value: string }[] = [
-  { label: MODEL_CATEGORY_LABELS[MT_TEXT_TO_TEXT] as string, value: MT_TEXT_TO_TEXT },
+  {
+    label: MODEL_CATEGORY_LABELS[MT_TEXT_TO_TEXT] as string,
+    value: MT_TEXT_TO_TEXT,
+  },
 ];

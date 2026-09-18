@@ -12,7 +12,11 @@
 import type { ChatRun, ChatStep } from './useChatExecution';
 
 import type { ApiKeyListResp } from '#/api/ai-workflow';
-import type { InputField, WorkflowPageResp } from '#/api/ai-workflow/types';
+import type {
+  ApprovalDecisionReq,
+  InputField,
+  WorkflowPageResp,
+} from '#/api/ai-workflow/types';
 
 import {
   computed,
@@ -33,14 +37,16 @@ import {
   KeyOutlined,
   LoadingOutlined,
   PartitionOutlined,
+  RedoOutlined,
   RightOutlined,
   RobotOutlined,
   SendOutlined,
 } from '@ant-design/icons-vue';
 import { message, Tooltip } from 'ant-design-vue';
 
-import { cancelExecution, getWorkflowDetail } from '#/api/ai-workflow';
+import { getWorkflowDetail } from '#/api/ai-workflow';
 
+import ApprovalPanel from '../debug/ApprovalPanel.vue';
 import DynamicInputForm from '../debug/DynamicInputForm.vue';
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
 import { copyToClipboard, formatDuration, toCopyText } from './chat-output';
@@ -401,26 +407,72 @@ function watchRun(run: ChatRun) {
   const stop = watch(
     () => run.status,
     (status) => {
-      if (status !== 'running') {
-        scrollToBottom();
-        stop();
-      }
+      // 暂停不是终态：提交审批结论后同一轮会回到 running，这里提前停表就丢掉了后续滚动
+      if (status === 'paused') return;
+      if (status !== 'running') scrollToBottom();
+      stop();
     },
     { deep: false },
   );
 }
 
 async function handleStop() {
-  const last = messages.value.toReversed().find((item) => item.run);
-  const run = last?.run;
+  const run = lastRun();
   if (!run) return;
   try {
     // 前端断开不等于后台停下，跳过这一步会让工作流继续跑完
-    await cancelExecution(run.executionId);
+    // 取消要带本轮的 API Key：网关按 Key 的归属校验执行权限
+    await chatExecution.cancelRun(run);
   } catch {
     // 已经结束的执行，取消会报错，不影响本地收流
   }
   chatExecution.abort(run);
+}
+
+// ==================== 审批与再提交 ====================
+
+const approvalSubmitting = ref(false);
+
+function lastRun(): ChatRun | null {
+  return messages.value.toReversed().find((item) => item.run)?.run || null;
+}
+
+/** 本轮已收尾（可 RETRY）：非 running、非 paused 的状态都是后端认可的终态 */
+function isSettled(run: ChatRun): boolean {
+  return run.status !== 'running' && run.status !== 'paused';
+}
+
+async function handleApprovalSubmit(
+  msg: ChatMessage,
+  decisions: ApprovalDecisionReq[],
+) {
+  const run = msg.run;
+  if (!run || approvalSubmitting.value) return;
+  approvalSubmitting.value = true;
+  try {
+    await chatExecution.submitApproval(run, decisions);
+    message.success('审批结论已提交，继续执行');
+    scrollToBottom();
+  } catch (error: any) {
+    message.error(error?.message || '提交审批结论失败');
+  } finally {
+    approvalSubmitting.value = false;
+  }
+}
+
+async function handleRetry(run: ChatRun) {
+  if (approvalSubmitting.value) return;
+  approvalSubmitting.value = true;
+  try {
+    // 不传 inputs：后端沿用执行行里记录的上轮入参
+    await chatExecution.retryRun(run);
+    message.success('已按原入参重新提交');
+    scrollToBottom();
+  } catch (error: any) {
+    message.error(error?.message || '重新提交失败');
+  } finally {
+    approvalSubmitting.value = false;
+  }
 }
 
 function handleClear() {
@@ -447,6 +499,7 @@ function runStateText(run: ChatRun): string {
   const map: Record<string, string> = {
     cancelled: '已取消',
     error: '执行失败',
+    paused: '待审批',
     running: '执行中',
     success: '已完成',
   };
@@ -658,11 +711,29 @@ onBeforeUnmount(() =>
                 正在排队执行…
               </div>
 
+              <!-- 审批入口：本轮因待决审批节点停下时，直接在气泡里给出结论 -->
+              <ApprovalPanel
+                v-if="
+                  msg.run.status === 'paused' && msg.run.awaiting.length > 0
+                "
+                :contexts="msg.run.awaiting"
+                :submitting="approvalSubmitting"
+                @submit="(decisions) => handleApprovalSubmit(msg, decisions)"
+              />
+
               <!-- 执行过程入口：右下角蓝色高亮，点开弹窗逐级下钻输入 / 输出 -->
               <div v-if="msg.run.steps.length > 0" class="bubble-foot">
                 <a class="steps-btn" @click="openSteps(msg.run)">
                   <PartitionOutlined />
                   执行过程 · {{ msg.run.steps.length }} 段
+                </a>
+                <a
+                  v-if="isSettled(msg.run)"
+                  class="steps-btn steps-btn-ghost"
+                  @click="handleRetry(msg.run)"
+                >
+                  <RedoOutlined />
+                  按原入参重跑
                 </a>
               </div>
             </template>
@@ -693,6 +764,12 @@ onBeforeUnmount(() =>
         <a-button v-if="running" danger size="small" @click="handleStop">
           停止
         </a-button>
+        <a-tooltip
+          v-else-if="lastRun()?.status === 'paused'"
+          title="取消本轮执行并结束挂起（待审批状态下同样生效）"
+        >
+          <a-button size="small" @click="handleStop">取消挂起</a-button>
+        </a-tooltip>
         <a-tooltip title="Ctrl / ⌘ + Enter 发送">
           <a-button
             :loading="running"
@@ -954,6 +1031,16 @@ onBeforeUnmount(() =>
       &.cancelled {
         background: #bfbfbf;
       }
+
+      // 审批挂起（等人工决策）与本轮沿用完成（skip）都要和正常跑完区分开
+      &.awaiting,
+      &.paused {
+        background: #722ed1;
+      }
+
+      &.skipped {
+        background: #13c2c2;
+      }
     }
 
     .block-title {
@@ -1030,6 +1117,7 @@ onBeforeUnmount(() =>
 
 .bubble-foot {
   display: flex;
+  gap: 8px;
   justify-content: flex-end;
   margin-top: 10px;
 
@@ -1049,6 +1137,18 @@ onBeforeUnmount(() =>
     &:hover {
       color: #fff;
       background: #40a9ff;
+    }
+
+    // 次要动作（重跑）：不抢「执行过程」的视觉权重
+    &.steps-btn-ghost {
+      color: #1890ff;
+      background: #fff;
+      border: 1px solid #91d5ff;
+
+      &:hover {
+        color: #096dd9;
+        background: #e6f7ff;
+      }
     }
   }
 }

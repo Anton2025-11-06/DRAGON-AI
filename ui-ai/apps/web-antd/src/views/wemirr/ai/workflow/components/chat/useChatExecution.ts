@@ -5,6 +5,10 @@
  * executionId 后订阅 GET /workflow-executions/{id}/subscribe 的 SSE 事件流，
  * 按事件类型原地更新这个 ChatRun。
  *
+ * 审批：收到 node.paused / workflow.paused 后本轮结束（SSE 关掉、气泡不转圈），
+ * 待审批上下文挂在 ChatRun.awaiting 上供面板渲染；结论经 /submit 回传后重新订阅
+ * 同一 executionId 的事件流，后续节点补写进同一个气泡（会话历史不断层）。
+ *
  * 不复用 components/debug/use-sse.ts：那份实现把事件写进全局 debugStore，
  * 对话是多轮并存的历史，同一条流写全局会把上一轮的状态串掉。
  */
@@ -14,12 +18,19 @@ import type {
   NodeCompletedEvent,
   NodeDeltaEvent,
   NodeFailedEvent,
+  NodePausedEvent,
   NodeStartedEvent,
   NodeTimeoutEvent,
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
+  WorkflowPausedEvent,
   WorkflowRuntimeEvent,
 } from '../../domain/runtime-events';
+
+import type {
+  ApprovalContext,
+  ApprovalDecisionReq,
+} from '#/api/ai-workflow/types';
 
 import { reactive, ref } from 'vue';
 
@@ -28,9 +39,11 @@ import { useAccessStore } from '@vben/stores';
 import { SSE } from 'sse.js';
 
 import {
+  cancelExecution,
   executeWorkflowAsync,
   getExecution,
   getExecutionSubscribeUrl,
+  submitExecution,
 } from '#/api/ai-workflow';
 
 /** 单个节点的执行痕迹 */
@@ -45,11 +58,13 @@ export interface ChatStep {
   nodeType?: string;
   output?: any;
   status:
+    | 'awaiting'
     | 'cancelled'
     | 'completed'
     | 'failed'
     | 'paused'
     | 'running'
+    | 'skipped'
     | 'timeout';
 }
 
@@ -62,10 +77,14 @@ export interface ChatRun {
   outputs: Record<string, any>;
   /** 思维链增量，按节点聚合 */
   reasoning: Record<string, string>;
-  status: 'cancelled' | 'error' | 'running' | 'success';
+  status: 'cancelled' | 'error' | 'paused' | 'running' | 'success';
   steps: ChatStep[];
   /** 流式正文增量，按节点聚合 */
   streams: Record<string, string>;
+  /** 待审批节点上下文（空=无挂起） */
+  awaiting: ApprovalContext[];
+  /** 本轮使用的 API Key（再提交/取消要带同一个 key） */
+  apiKey?: string;
 }
 
 export interface ChatExecutionOptions {
@@ -89,6 +108,7 @@ function parseFrame<T>(raw: unknown): null | T {
  */
 export function createChatRun(executionId: string): ChatRun {
   return reactive({
+    awaiting: [],
     executionId,
     outputs: {},
     reasoning: {},
@@ -194,7 +214,8 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
   function onNodeCompleted(run: ChatRun, data: NodeCompletedEvent) {
     const step = ensureStep(run, data.nodeId);
-    step.status = 'completed';
+    // skip：恢复提交里本轮沿用的上轮已完成节点，不能画成正常完成
+    step.status = data.skip ? 'skipped' : 'completed';
     step.duration = data.duration;
     step.output = data.output;
   }
@@ -235,6 +256,60 @@ export function useChatExecution(options: ChatExecutionOptions) {
     finish();
   }
 
+  /** 把审批上下文按节点 id 合并入库（node.paused 先到、workflow.paused 补全） */
+  function upsertAwaiting(run: ChatRun, context?: ApprovalContext) {
+    if (!context?.nodeId) return;
+    const existed = run.awaiting.find((item) => item.nodeId === context.nodeId);
+    if (existed) {
+      Object.assign(existed, context);
+    } else {
+      run.awaiting.push(context);
+    }
+  }
+
+  /** 单个审批节点挂起：本轮还会跑无关分支，先记住待决态 */
+  function onNodePaused(run: ChatRun, data: NodePausedEvent) {
+    if (!data.nodeId) return;
+    ensureStep(run, data.nodeId, data.nodeType as string | undefined).status =
+      'awaiting';
+    upsertAwaiting(
+      run,
+      data.approvalContext || {
+        nodeId: data.nodeId,
+        pauseScope: data.pauseScope,
+      },
+    );
+  }
+
+  /**
+   * 整条流本轮跑完但还有未决策的审批节点：停住转圈、关流，等面板提交。
+   *
+   * 不算终态（不记入 settled=false 的口径），但也要把看门狗拆掉：
+   * 后端已经退出 run()，再轮询只会拿到 PAUSED。
+   */
+  function onWorkflowPaused(run: ChatRun, data: WorkflowPausedEvent) {
+    upsertAwaiting(run, data.approvalContext);
+    (data.awaitingNodeIds || []).forEach((id) => {
+      ensureStep(run, id).status = 'awaiting';
+      upsertAwaiting(run, { nodeId: id });
+    });
+    if (data.nodeId) ensureStep(run, data.nodeId).status = 'awaiting';
+    run.duration = data.duration;
+    run.status = 'paused';
+    clearAwaitingStepsAsPaused(run);
+    finish();
+  }
+
+  /** 未给上下文的挂起步骤统一标 paused，避免面板进不了审批入口时看不出异常 */
+  function clearAwaitingStepsAsPaused(run: ChatRun) {
+    const known = new Set(run.awaiting.map((item) => item.nodeId));
+    run.steps.forEach((step) => {
+      if (step.status === 'awaiting' && !known.has(step.nodeId)) {
+        step.status = 'paused';
+      }
+    });
+  }
+
   // ==================== 断流回落 ====================
 
   /**
@@ -256,6 +331,19 @@ export function useChatExecution(options: ChatExecutionOptions) {
       if (status === 'FAILED' || status === 'CANCELLED') {
         run.error = detail.errorMessage || '执行未正常结束';
         run.status = status === 'CANCELLED' ? 'cancelled' : 'error';
+        finish();
+        return true;
+      }
+      if (status === 'PAUSED') {
+        // 断流后探到暂停：从行内 approvalContext 重建待审批面板数据
+        const contexts = detail.approvalContext || {};
+        run.awaiting = Object.values(contexts) as ApprovalContext[];
+        (
+          detail.awaitingNodeIds || run.awaiting.map((item) => item.nodeId)
+        ).forEach((id) => {
+          ensureStep(run, id).status = 'awaiting';
+        });
+        run.status = 'paused';
         finish();
         return true;
       }
@@ -350,9 +438,19 @@ export function useChatExecution(options: ChatExecutionOptions) {
       onFailed(run, data as WorkflowFailedEvent),
     );
     listen('workflow.cancelled', () => onCancelled(run));
-    listen('workflow.paused', (data) => {
-      const paused = data as { nodeId?: string };
-      if (paused?.nodeId) ensureStep(run, paused.nodeId).status = 'paused';
+    listen('node.paused', (data) => onNodePaused(run, data as NodePausedEvent));
+    listen('workflow.paused', (data) =>
+      onWorkflowPaused(run, data as WorkflowPausedEvent),
+    );
+    // 恢复提交的首帧：上一轮的挂起标记已被本轮重跑，待决列表清空
+    listen('workflow.resumed', () => {
+      run.awaiting.splice(0);
+      run.steps.forEach((step) => {
+        if (step.status === 'awaiting' || step.status === 'paused') {
+          step.status = 'running';
+        }
+      });
+      run.status = 'running';
     });
 
     // 服务端正常收尾也会走这里：没有终态就轮询补
@@ -383,8 +481,54 @@ export function useChatExecution(options: ChatExecutionOptions) {
       apiKey,
     );
     const run = createChatRun(executionId);
+    run.apiKey = apiKey;
     subscribe(executionId, run);
     return run;
+  }
+
+  /**
+   * 再提交（需求 3）：同一个 executionId 带上本次结论/输入，提交成功后重新订阅。
+   *
+   * @param run 本轮对话的运行句柄（携带 executionId / apiKey）
+   * @param body 提交体
+   * @param body.approval 各待审批节点的结论（传了即按 CONTINUE 恢复）
+   * @param body.inputs 可选覆盖的 START 入参
+   */
+  async function resubmit(
+    run: ChatRun,
+    body: { approval?: ApprovalDecisionReq[]; inputs?: Record<string, any> },
+  ) {
+    if (!run?.executionId) return;
+    await submitExecution(
+      run.executionId,
+      { ...body, mode: body.approval ? 'CONTINUE' : 'RETRY' },
+      run.apiKey,
+    );
+    if (body.approval) {
+      run.awaiting.splice(0);
+    }
+    run.error = undefined;
+    // 重新订阅同一 executionId：后续节点补写进同一个气泡
+    subscribe(run.executionId, run);
+  }
+
+  /** 提交审批结论（CONTINUE） */
+  async function submitApproval(
+    run: ChatRun,
+    decisions: ApprovalDecisionReq[],
+  ) {
+    await resubmit(run, { approval: decisions });
+  }
+
+  /** 全量重跑（RETRY）：不传 inputs 则沿用上轮行内输入 */
+  async function retryRun(run: ChatRun, inputs?: Record<string, any>) {
+    await resubmit(run, inputs ? { inputs } : {});
+  }
+
+  /** 主动取消后端执行（引擎在下一个检查点生效；PAUSED 下直接写终态） */
+  async function cancelRun(run: ChatRun) {
+    if (!run?.executionId) return;
+    await cancelExecution(run.executionId, run.apiKey);
   }
 
   /** 主动停止（关闭连接并标记取消） */
@@ -395,8 +539,11 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
   return {
     abort,
+    cancelRun,
     disconnect: finish,
+    retryRun,
     running,
     send,
+    submitApproval,
   };
 }

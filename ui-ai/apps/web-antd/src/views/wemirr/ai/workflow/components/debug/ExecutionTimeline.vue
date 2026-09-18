@@ -23,6 +23,7 @@ import {
   MinusCircleOutlined,
   PlayCircleOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   ThunderboltOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
@@ -156,6 +157,7 @@ function getNodeIcon(nodeType: string) {
     QUESTION_CLASSIFIER: MessageOutlined,
     PARAMETER_EXTRACTOR: FunctionOutlined,
     AGENT: RobotOutlined,
+    APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: ThunderboltOutlined,
     ITERATION: LoadingOutlined,
     VARIABLE_AGGREGATOR: FunctionOutlined,
@@ -181,6 +183,9 @@ function getStatusColor(status: string): string {
     completed: '#52c41a',
     failed: '#ff4d4f',
     skipped: '#d9d9d9',
+    awaiting: '#722ed1',
+    timeout: '#faad14',
+    cancelled: '#bfbfbf',
   };
   return colorMap[status] || '#d9d9d9';
 }
@@ -193,6 +198,9 @@ function getStatusBgColor(status: string): string {
     completed: '#f6ffed',
     failed: '#fff2f0',
     skipped: '#f5f5f5',
+    awaiting: '#f9f0ff',
+    timeout: '#fffbe6',
+    cancelled: '#fafafa',
   };
   return colorMap[status] || '#f5f5f5';
 }
@@ -205,6 +213,9 @@ function getStatusIcon(status: string) {
     completed: CheckCircleOutlined,
     failed: CloseCircleOutlined,
     skipped: MinusCircleOutlined,
+    awaiting: SafetyCertificateOutlined,
+    timeout: ClockCircleOutlined,
+    cancelled: MinusCircleOutlined,
   };
   return iconMap[status] || ClockCircleOutlined;
 }

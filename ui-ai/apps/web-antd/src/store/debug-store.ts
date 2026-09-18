@@ -1,10 +1,12 @@
 /**
  * 工作流调试状态 Store
- * 管理调试面板的状态，包括执行状态、节点追踪、检查点和变量等。
+ * 管理调试面板的状态，包括执行状态、节点追踪、审批挂起和变量等。
  *
+ * 已随外部暂停链路废弃：断点（breakpoints）与「暂停/恢复接口」。暂停唯一来源
+ * 是审批节点（node.paused / workflow.paused），恢复走 submit 接口。
  */
 
-import type { NodeType } from '#/api/ai-workflow/types';
+import type { ApprovalContext, NodeType } from '#/api/ai-workflow/types';
 import type { WorkflowDebugErrorType as WorkflowDebugErrorTypeValue } from '#/views/wemirr/ai/workflow/domain/debug-errors';
 import type { WorkflowRuntimeEventType } from '#/views/wemirr/ai/workflow/domain/runtime-events';
 
@@ -19,8 +21,11 @@ import { WorkflowDebugErrorType } from '#/views/wemirr/ai/workflow/domain/debug-
 /**
  * 节点执行状态
  * cancelled / timeout 为并行分支被砍后的终态（后端 node.cancelled / node.timeout）
+ * skipped 为「再提交-恢复」本轮沿用的已完成节点
+ * awaiting 为审批节点挂起等人工结论（非终态，恢复后必然重跑该节点）
  */
 export type NodeExecutionStatus =
+  | 'awaiting'
   | 'cancelled'
   | 'completed'
   | 'failed'
@@ -74,22 +79,8 @@ export interface NodeTrace {
   streamingContent?: string;
   /** 流式思维链内容（reasoning 增量，与正文分开累加） */
   streamingReasoning?: string;
-}
-
-/**
- * 检查点信息
- */
-export interface Breakpoint {
-  /** 节点ID */
-  nodeId: string;
-  /** 节点名称 */
-  nodeName: string;
-  /** 节点类型 */
-  nodeType: NodeType;
-  /** 是否启用 */
-  enabled: boolean;
-  /** 条件表达式(可选) */
-  condition?: string;
+  /** 本轮未重跑（沿用上一轮输出） */
+  skip?: boolean;
 }
 
 /**
@@ -204,6 +195,14 @@ export interface DebugSSEEvent {
   };
   /** node.timeout / node.cancelled：节点所属的并行分支 id */
   branchId?: string;
+  /** node.completed：本轮未重跑（沿用上一轮结果） */
+  skip?: boolean;
+  /** node.paused / workflow.paused：审批上下文 */
+  approvalContext?: ApprovalContext;
+  /** workflow.paused：全部待审批节点 id */
+  awaitingNodeIds?: string[];
+  /** node.paused：审批节点的暂停范围 */
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
 }
 
 /**
@@ -220,8 +219,6 @@ export interface DebugState {
   nodeTraces: Map<string, NodeTrace>;
   /** 当前执行节点ID */
   currentNodeId: null | string;
-  /** 断点集合 */
-  breakpoints: Map<string, Breakpoint>;
   /** 变量数据 */
   variables: Map<string, any>;
   /** 执行结果 */
@@ -298,8 +295,11 @@ export const useDebugStore = defineStore('debug', () => {
   /** 当前执行节点ID */
   const currentNodeId = ref<null | string>(null);
 
-  /** 断点集合 */
-  const breakpoints = ref<Map<string, Breakpoint>>(new Map());
+  /**
+   * 待审批节点及其审批上下文（node_id -> context）
+   * 面板的审批表单数据源；提交成功后由提交方的事件流重建
+   */
+  const awaitingApprovals = ref<Map<string, ApprovalContext>>(new Map());
 
   /** 变量数据 */
   const variables = ref<Map<string, any>>(new Map());
@@ -321,18 +321,13 @@ export const useDebugStore = defineStore('debug', () => {
 
   // ==================== 计算属性 ====================
 
-  /** 断点数量 */
-  const breakpointCount = computed(() => breakpoints.value.size);
+  /** 待审批节点列表（按后端的 awaitingNodeIds 语义，多个 = 并行下同时挂起） */
+  const awaitingApprovalList = computed(() => [
+    ...awaitingApprovals.value.values(),
+  ]);
 
-  /** 启用的断点列表 */
-  const enabledBreakpoints = computed(() =>
-    [...breakpoints.value.values()].filter((bp) => bp.enabled),
-  );
-
-  /** 启用的断点ID列表 */
-  const enabledBreakpointIds = computed(() =>
-    enabledBreakpoints.value.map((bp) => bp.nodeId),
-  );
+  /** 是否在等待人工审批（收尾时存在未决策审批节点） */
+  const isAwaitingApproval = computed(() => awaitingApprovals.value.size > 0);
 
   /** 节点追踪列表(按开始时间排序) */
   const sortedNodeTraces = computed(() =>
@@ -435,20 +430,45 @@ export const useDebugStore = defineStore('debug', () => {
     currentNodeId.value = null;
     result.value = null;
     timelineItems.value = [];
+    clearAwaitingApprovals();
   }
 
   /**
-   * 暂停执行
+   * 审批挂起（workflow.paused 的节点级对应：单个审批节点停在 AWAITING）
+   * @param nodeId 审批节点ID
+   * @param context 审批上下文（可编辑数据 + 审批人配置）
+   */
+  function markNodeAwaiting(nodeId: string, context?: ApprovalContext) {
+    const trace = nodeTraces.value.get(nodeId);
+    if (trace) {
+      trace.status = 'awaiting';
+      trace.endTime = new Date();
+    }
+    if (context) awaitingApprovals.value.set(context.nodeId || nodeId, context);
+    else awaitingApprovals.value.set(nodeId, { nodeId });
+    currentNodeId.value = nodeId;
+  }
+
+  /**
+   * 已提交审批结论（或新一轮执行开始）：清掉待审批登记，面板收起审批表单
+   */
+  function clearAwaitingApprovals() {
+    awaitingApprovals.value.clear();
+  }
+
+  /**
+   * 暂停执行（只有审批节点会造成，语义 = 等待人工审批）
    */
   function pauseExecution() {
     isPaused.value = true;
   }
 
   /**
-   * 恢复执行
+   * 提交后恢复推进（清审批残留 + 回到执行中）
    */
   function resumeExecution() {
     isPaused.value = false;
+    clearAwaitingApprovals();
   }
 
   /**
@@ -629,12 +649,15 @@ export const useDebugStore = defineStore('debug', () => {
    * 处理节点完成事件
    */
   function handleNodeComplete(event: DebugSSEEvent) {
-    const { nodeId, output, duration, tokenUsage, httpDetails } = event;
+    const { nodeId, output, duration, tokenUsage, httpDetails, skip } = event;
     if (!nodeId) return;
 
     const trace = nodeTraces.value.get(nodeId);
     if (trace) {
-      trace.status = 'completed';
+      // skip：恢复提交里本轮沿用的上轮已完成节点——不能画成正常完成，
+      // 否则耗时看起来像 0ms 的真跑，也看不出「这一轮没重跑」
+      trace.status = skip ? 'skipped' : 'completed';
+      trace.skip = Boolean(skip);
       trace.endTime = new Date();
       // 0ms（轻量节点）也是有效耗时，不能当作“无数据”清掉
       trace.duration = duration ?? null;
@@ -643,7 +666,7 @@ export const useDebugStore = defineStore('debug', () => {
       trace.httpDetails = httpDetails;
 
       // 更新时间线
-      updateTimelineItem(nodeId, 'completed', duration ?? 0);
+      updateTimelineItem(nodeId, trace.status, duration ?? 0);
     }
   }
 
@@ -736,18 +759,34 @@ export const useDebugStore = defineStore('debug', () => {
   }
 
   /**
-   * 处理断点命中事件
+   * 处理审批节点挂起事件（node.paused）
    */
-  function handleBreakpointHit(event: DebugSSEEvent) {
-    const { nodeId, variables: eventVariables } = event;
-    if (!nodeId) return;
+  function handleNodePaused(event: DebugSSEEvent) {
+    if (!event.nodeId) return;
+    markNodeAwaiting(event.nodeId, event.approvalContext);
+  }
 
+  /**
+   * 处理执行暂停事件（workflow.paused：本轮跑完但存在未决策审批节点）
+   */
+  function handleApprovalPaused(event: DebugSSEEvent) {
     isPaused.value = true;
-    currentNodeId.value = nodeId;
+    const context = event.approvalContext;
+    const nodeId = event.nodeId;
+    if (nodeId) {
+      markNodeAwaiting(nodeId, context || { nodeId });
+    } else if (context) {
+      markNodeAwaiting(context.nodeId, context);
+    }
+    (event.awaitingNodeIds || []).forEach((id) => {
+      if (!awaitingApprovals.value.has(id)) {
+        markNodeAwaiting(id, { nodeId: id });
+      }
+    });
 
-    // 更新变量
-    if (eventVariables) {
-      Object.entries(eventVariables).forEach(([key, value]) => {
+    // 更新变量（暂停时的全局变量快照，仅供排障展示）
+    if (event.variables) {
+      Object.entries(event.variables).forEach(([key, value]) => {
         variables.value.set(key, value);
       });
     }
@@ -774,108 +813,6 @@ export const useDebugStore = defineStore('debug', () => {
    */
   function getNodeTrace(nodeId: string): NodeTrace | undefined {
     return nodeTraces.value.get(nodeId);
-  }
-
-  // ==================== 断点管理 ====================
-
-  /**
-   * 添加断点
-   */
-  function addBreakpoint(
-    nodeId: string,
-    nodeName: string,
-    nodeType: NodeType,
-    condition?: string,
-  ) {
-    breakpoints.value.set(nodeId, {
-      nodeId,
-      nodeName,
-      nodeType,
-      enabled: true,
-      condition,
-    });
-  }
-
-  /**
-   * 移除断点
-   */
-  function removeBreakpoint(nodeId: string) {
-    breakpoints.value.delete(nodeId);
-  }
-
-  /**
-   * 切换断点
-   */
-  function toggleBreakpoint(
-    nodeId: string,
-    nodeName: string,
-    nodeType: NodeType,
-  ) {
-    if (breakpoints.value.has(nodeId)) {
-      removeBreakpoint(nodeId);
-    } else {
-      addBreakpoint(nodeId, nodeName, nodeType);
-    }
-  }
-
-  /**
-   * 启用/禁用断点
-   */
-  function setBreakpointEnabled(nodeId: string, enabled: boolean) {
-    const bp = breakpoints.value.get(nodeId);
-    if (bp) {
-      bp.enabled = enabled;
-    }
-  }
-
-  /**
-   * 设置条件检查点
-   */
-  function setBreakpointCondition(nodeId: string, condition: string) {
-    const bp = breakpoints.value.get(nodeId);
-    if (bp) {
-      bp.condition = condition;
-    }
-  }
-
-  /**
-   * 清除所有断点
-   */
-  function clearAllBreakpoints() {
-    breakpoints.value.clear();
-  }
-
-  /**
-   * 启用所有断点
-   */
-  function enableAllBreakpoints() {
-    breakpoints.value.forEach((bp) => {
-      bp.enabled = true;
-    });
-  }
-
-  /**
-   * 禁用所有断点
-   */
-  function disableAllBreakpoints() {
-    breakpoints.value.forEach((bp) => {
-      bp.enabled = false;
-    });
-  }
-
-  /**
-   * 检查节点是否有断点
-   */
-  function hasBreakpoint(nodeId: string): boolean {
-    return breakpoints.value.has(nodeId);
-  }
-
-  /**
-   * 检查节点断点是否启用
-   */
-  function isBreakpointEnabled(nodeId: string): boolean {
-    const bp = breakpoints.value.get(nodeId);
-    return bp?.enabled ?? false;
   }
 
   // ==================== 变量管理 ====================
@@ -1128,6 +1065,10 @@ export const useDebugStore = defineStore('debug', () => {
         handleNodeError(event);
         break;
       }
+      case 'node.paused': {
+        handleNodePaused(event);
+        break;
+      }
       case 'node.started': {
         handleNodeStart(event);
         break;
@@ -1149,7 +1090,12 @@ export const useDebugStore = defineStore('debug', () => {
         break;
       }
       case 'workflow.paused': {
-        handleBreakpointHit(event);
+        handleApprovalPaused(event);
+        break;
+      }
+      case 'workflow.resumed': {
+        // 恢复提交的首帧：本轮从 START 重进，上一轮的挂起登记必须失效
+        resumeExecution();
         break;
       }
     }
@@ -1166,7 +1112,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId.value = null;
     nodeTraces.value.clear();
     currentNodeId.value = null;
-    breakpoints.value.clear();
+    clearAwaitingApprovals();
     variables.value.clear();
     result.value = null;
     timelineItems.value = [];
@@ -1176,7 +1122,7 @@ export const useDebugStore = defineStore('debug', () => {
   }
 
   /**
-   * 清除执行状态(保留断点和错误历史)
+   * 清除执行状态(保留错误历史)
    */
   function clearExecutionState() {
     isRunning.value = false;
@@ -1184,6 +1130,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId.value = null;
     nodeTraces.value.clear();
     currentNodeId.value = null;
+    clearAwaitingApprovals();
     variables.value.clear();
     result.value = null;
     timelineItems.value = [];
@@ -1200,7 +1147,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId,
     nodeTraces,
     currentNodeId,
-    breakpoints,
+    awaitingApprovals,
     variables,
     result,
     timelineItems,
@@ -1209,9 +1156,8 @@ export const useDebugStore = defineStore('debug', () => {
     currentError,
 
     // 计算属性
-    breakpointCount,
-    enabledBreakpoints,
-    enabledBreakpointIds,
+    awaitingApprovalList,
+    isAwaitingApproval,
     sortedNodeTraces,
     variableGroups,
     totalDuration,
@@ -1235,21 +1181,12 @@ export const useDebugStore = defineStore('debug', () => {
     handleNodeTimeout,
     handleNodeCancelled,
     handleStreamingToken,
-    handleBreakpointHit,
+    handleNodePaused,
+    handleApprovalPaused,
+    markNodeAwaiting,
+    clearAwaitingApprovals,
     getNodeTrace,
     setNodeNameResolver,
-
-    // 断点管理
-    addBreakpoint,
-    removeBreakpoint,
-    toggleBreakpoint,
-    setBreakpointEnabled,
-    setBreakpointCondition,
-    clearAllBreakpoints,
-    enableAllBreakpoints,
-    disableAllBreakpoints,
-    hasBreakpoint,
-    isBreakpointEnabled,
 
     // 变量管理
     setVariable,

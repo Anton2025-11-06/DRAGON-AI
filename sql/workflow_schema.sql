@@ -55,9 +55,10 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `trigger_type`     VARCHAR(16)  NOT NULL DEFAULT 'DEBUG' COMMENT '触发来源',
   `inputs`           JSON                  DEFAULT NULL COMMENT '输入参数',
   `outputs`          JSON                  DEFAULT NULL COMMENT '输出结果',
-  `variables`        JSON                  DEFAULT NULL COMMENT '全局变量快照（暂停/快照恢复用）',
-  -- 节点执行状态聚合 {nodeId: {order,status,input,output,error,duration}}
-  `node_states`      JSON                  DEFAULT NULL COMMENT '节点执行状态聚合',
+  `variables`        JSON                  DEFAULT NULL COMMENT '执行快照（仅暂停/终态写入，排障与详情用；恢复以 node_states 为准）',
+  -- 节点执行状态聚合 {nodeId: {order,status,input,output,error,duration,branch,llmMessages,review*}}
+  -- 跨轮恢复的权威源（大模型记忆与审批留痕都存在这里）
+  `node_states`      JSON                  DEFAULT NULL COMMENT '节点状态聚合（跨轮恢复权威源）',
   `error_message`    TEXT                  DEFAULT NULL COMMENT '错误信息',
   `input_tokens`     INT          NOT NULL DEFAULT 0 COMMENT '输入Token数',
   `output_tokens`    INT          NOT NULL DEFAULT 0 COMMENT '输出Token数',
@@ -66,7 +67,12 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `started_at`       DATETIME              DEFAULT NULL COMMENT '开始时间',
   `completed_at`     DATETIME              DEFAULT NULL COMMENT '结束时间',
   `current_node_id`  VARCHAR(64)           DEFAULT NULL COMMENT '当前节点（暂停时）',
-  `breakpoints`      JSON                  DEFAULT NULL COMMENT '断点节点ID列表',
+  -- 再提交（RETRY 重新执行 / CONTINUE 审批后恢复）相关三列，见 sql/approval_memory_columns.sql
+  `submit_mode`      VARCHAR(16)           DEFAULT NULL COMMENT '本轮提交模式 RETRY/CONTINUE，空=首次执行',
+  `awaiting_node_id` VARCHAR(64)           DEFAULT NULL COMMENT '等待人工审批的节点ID（PAUSED 时非空）',
+  `graph_hash`       VARCHAR(16)           DEFAULT NULL COMMENT '图拓扑指纹（节点id+边集合），再提交前漂移校验',
+  -- 已废弃：断点功能整体下线（暂停改由审批节点唯一驱动），列保留不再读写
+  `breakpoints`      JSON                  DEFAULT NULL COMMENT '已废弃：断点节点ID列表',
   `user_id`          INT          NOT NULL DEFAULT 0 COMMENT '执行人',
   `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
@@ -80,7 +86,7 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_node_execution` (
   `execution_id`  VARCHAR(36)  NOT NULL COMMENT '执行ID',
   `node_id`       VARCHAR(64)  NOT NULL COMMENT '节点ID',
   `node_type`     VARCHAR(32)  NOT NULL COMMENT '节点类型',
-  -- RUNNING/COMPLETED/FAILED/SKIPPED
+  -- RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT/AWAITING（后三个分别对应分支被砍、等待人工审批）
   `status`        VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '节点状态',
   `node_order`    INT          NOT NULL DEFAULT 0 COMMENT '执行顺序',
   `input`         JSON                  DEFAULT NULL COMMENT '输入数据',

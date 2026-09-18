@@ -13,7 +13,13 @@ import type { InputField, InputFieldType } from '#/api/ai-workflow/types';
 /** 归一后的字段类型（画布配置表单与动态输入表单实际使用的类型集合） */
 export type NormalizedInputFieldType = Extract<
   InputFieldType,
-  'CHECKBOX' | 'FILE_LIST' | 'NUMBER' | 'SELECT' | 'SINGLE_FILE' | 'TEXT'
+  | 'APPROVER'
+  | 'CHECKBOX'
+  | 'FILE_LIST'
+  | 'NUMBER'
+  | 'SELECT'
+  | 'SINGLE_FILE'
+  | 'TEXT'
 >;
 
 /** 归一后的类型全集（同时作为未知类型的兜底依据） */
@@ -24,6 +30,8 @@ export const NORMALIZED_INPUT_FIELD_TYPES: NormalizedInputFieldType[] = [
   'CHECKBOX',
   'SINGLE_FILE',
   'FILE_LIST',
+  // 审批人入参：仅在画布存在 APPROVAL 节点时有意义（元素为数字或字符串）
+  'APPROVER',
 ];
 
 /** 新增字段时的默认类型 */
@@ -42,6 +50,7 @@ const INPUT_FIELD_TYPE_LABELS: Record<NormalizedInputFieldType, string> = {
   CHECKBOX: '开关',
   SINGLE_FILE: '单文件',
   FILE_LIST: '多文件',
+  APPROVER: '审批人',
 };
 
 const INPUT_FIELD_TYPE_COLORS: Record<NormalizedInputFieldType, string> = {
@@ -51,6 +60,7 @@ const INPUT_FIELD_TYPE_COLORS: Record<NormalizedInputFieldType, string> = {
   CHECKBOX: 'orange',
   SINGLE_FILE: 'magenta',
   FILE_LIST: 'red',
+  APPROVER: 'cyan',
 };
 
 /**
@@ -66,6 +76,11 @@ export function normalizeInputFieldType(
     return matched;
   }
   return DEFAULT_INPUT_FIELD_TYPE;
+}
+
+/** 是否为数组形态的字段（审批人：值永远是数组，元素可为数字或字符串） */
+export function isArrayInputType(type?: null | string): boolean {
+  return normalizeInputFieldType(type) === 'APPROVER';
 }
 
 /** 是否为（归一后的）文本类型 */

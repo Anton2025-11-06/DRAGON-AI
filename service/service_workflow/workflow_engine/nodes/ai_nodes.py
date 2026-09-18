@@ -18,6 +18,7 @@ from common.common_constants.model_constant import (
 from common.common_model import entry as cm_entry
 from common.common_model.base import ModelResult
 from common.common_log.log_init import log
+from service.service_workflow.workflow_engine import memory
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.model_client import (
     ChatMessage, WorkflowModelClient,
@@ -35,15 +36,21 @@ class LLMNodeExecutor(BaseNodeExecutor):
       向量输入(inputVariable)、重排(queryVariable/documentsVariable) —— 均支持 {{节点.变量}} 引用；
     - 对话类可选 Vision（visionEnabled + imageVariables → user 消息拼多模态 content，
       每项按 _ref_list 解析：变量引用/文件数组/直接 URL）；
-      平台无会话级存储，因此不提供“对话记忆”能力（节点不配 memoryEnabled）；
     - 下游输出：文本类产出 text、向量类产出 vectors/dimension、重排产出 scores、
       生成类产出 url/urls，供下游节点参数引用。
     - 模型调用参数（温度/max_tokens 等）在 12 类上都不占节点字段：全部来自模型管理
       「常用参数」（tb_model.model_params）+ 节点 params 覆盖，合并后由 common_model 注入；
-    - 支持 stream 的三类（文生文/图片理解/视频理解）流式逐 token 发 node.delta。
+    - 支持 stream 的三类（文生文/图片理解/视频理解）流式逐 token 发 node.delta；
+    - 记忆（需求 1）：memoryEnabled 时执行前按范围/策略拼装历史（**不回写节点 input**），
+      执行后把本轮 user/assistant 写回 node_states[nid].llmMessages 供下一轮使用。
     """
 
     node_type = "LLM"
+
+    # 本轮记忆注入结果（每次 execute 重新赋值；先给类属性默认值，避免单测直接调子方法时报 AttributeError）
+    _memory_user: Optional[str] = None
+    _hist_msgs: list = []
+    _hist_prefix: str = ""
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
@@ -77,11 +84,27 @@ class LLMNodeExecutor(BaseNodeExecutor):
         self._merge_node_params(client, cfg.get("params"))
         _, inst = client.acall(category)
 
+        # 记忆注入（需求 1）：执行前算出「本轮要拼进去的历史」，执行后写回本轮。
+        # 不支持记忆的类型（向量/重排/ASR/TTS）即使历史图数据里残留开关也直接忽略，
+        # 静态校验只能拦住新保存的图，老图/直接调 API 提交的图还得靠这里兜底。
+        self._memory_user = self._memory_user_text(ctx) if cfg.get("memoryEnabled") is True else None
+        hist_msgs, hist_prefix, mem_warning = await memory.build_injection(
+            self.runtime, self.node.id, cfg, category, self._compress_call)
+        self._hist_msgs = hist_msgs
+        self._hist_prefix = hist_prefix
+
         # 文生文走对话族（保留 system/上下文/结构化输出等完整能力）
         if category == MT_TEXT_TO_TEXT:
-            return await self._run_text_to_text(ctx, inst, output_var)
+            result = await self._run_text_to_text(ctx, inst, output_var)
+        else:
+            # 其余 11 类：按类型翻译入参 → 类型化调用 → 映射产出
+            result = await self._invoke_typed(ctx, inst, category, output_var, cfg)
+        if mem_warning:
+            result.output["memoryWarning"] = mem_warning
+        self._record_memory(result.output)
+        return result
 
-        # 其余 11 类：按类型翻译入参 → 类型化调用 → 映射产出
+    async def _invoke_typed(self, ctx, inst, category, output_var, cfg) -> NodeResult:
         kwargs = self._build_kwargs(ctx, category)
         streaming = (bool(cfg.get("streaming", False))
                      and category in MODEL_TYPES_STREAMABLE)
@@ -103,8 +126,62 @@ class LLMNodeExecutor(BaseNodeExecutor):
         if r.usage:
             self.runtime.bump_usage(r.usage.get("prompt_tokens", 0),
                                     r.usage.get("completion_tokens", 0))
-        output = self._map_output(category, r, output_var)
-        return NodeResult(output=output)
+        return NodeResult(output=self._map_output(category, r, output_var))
+
+    # ---------- 记忆（需求 1） ----------
+
+    def _memory_user_text(self, ctx) -> str:
+        """本轮记进记忆的 user 侧内容：渲染后的提示词。
+
+        媒体入参（图片/音频/视频 URL）不入记忆——下一轮这些 URL 很可能已过期，
+        存进去只会让历史里塞满无法复现的链接。
+        """
+        raw = self.cfg("promptTemplate")
+        if isinstance(raw, (list, tuple)):
+            raw = "\n".join(str(x) for x in raw)
+        return (ctx.render(str(raw)) if raw else "").strip()
+
+    def _record_memory(self, output: dict) -> None:
+        """把本轮问答写回 node_states；未开记忆（`_memory_user` 为 None）直接跳过。
+
+        节点失败时走不到这里（execute 抛异常），因此不会在历史里留下「助手答了个空」
+        这种会把后续轮带偏的记录。
+        """
+        if self._memory_user is None:
+            return
+        assistant = ""
+        for key in ("text", "url"):
+            value = (output or {}).get(key)
+            if isinstance(value, str) and value:
+                assistant = value
+                break
+        else:
+            urls = (output or {}).get("urls")
+            if isinstance(urls, (list, tuple)) and urls:
+                assistant = str(urls[0])
+        memory.append_round(self.runtime.node_states.get(self.node.id),
+                            self.runtime.round, self._memory_user, assistant,
+                            # 循环体/迭代体/并行分支内的节点每轮覆盖：一个 LOOP 跑 3 轮就把
+                            # limit=10 的额度用掉 6 条同一轮的历史，真正跨轮的信息反而被顶掉
+                            overwrite=memory.is_compound_body(self.graph, self.node.id))
+
+    async def _compress_call(self, prompt: str) -> str:
+        """COMPRESS 策略的摘要调用：用节点指定的压缩模型（必须是文生文）。
+
+        模型不存在/已停用/调用失败都会抛出，由 memory.build_injection 统一降级为
+        DROP_OLDEST —— 记忆是增强项，不能因为摘要挂掉把业务节点弄失败。
+        """
+        model_id = self.cfg("memoryCompressModelId")
+        if not model_id:
+            raise ValueError("未配置记忆压缩模型")
+        client = await WorkflowModelClient.create(
+            int(model_id), provider=self.runtime.model_provider,
+            http=self.runtime.http_client)
+        r = await client.chat(prompt=prompt, temperature=0.0)
+        # 压缩消耗计入本执行（用户口径），否则 llm_call_count 会少算一次真实调用
+        self.runtime.bump_usage(r.usage.get("prompt_tokens", 0),
+                                r.usage.get("completion_tokens", 0))
+        return r.content
 
     @staticmethod
     def _merge_node_params(client, params) -> None:
@@ -279,6 +356,11 @@ class LLMNodeExecutor(BaseNodeExecutor):
             kw["thinking"] = True
         # 不再从节点 config 透传 temperature/maxTokens（含理解族）：
         # 调用参数统一走 model_params（模型管理常用参数 + 节点 params）
+        # 记忆注入（非对话族形态）：历史压成前缀拼到提示词前面。
+        # 只拼已有 prompt 的情况：OCR/图生视频的提示词是可选项，原本为空时硬塞一段
+        # 对话记录反而会让厂商拿到一份没预期过的输入（图生视频会把它当画面描述）。
+        if self._hist_prefix and kw.get("prompt"):
+            kw["prompt"] = memory.render_prompt(self._hist_prefix, kw["prompt"])
         # 剔除 None/空列表，避免覆盖 common_model 内部默认
         return {k: v for k, v in kw.items()
                 if v is not None and not (isinstance(v, (list, str)) and len(v) == 0)}
@@ -347,6 +429,14 @@ class LLMNodeExecutor(BaseNodeExecutor):
                                           content=messages[0].content + "\n\n" + ctx_block)
             else:
                 messages.insert(0, ChatMessage(role="system", content=ctx_block))
+        # 记忆（对话族形态）：历史整段插在 system 之后、本轮 user 之前。
+        # 插而不是拼到 user content 里：多轮结构是对话模型的原生训练形态，拼成一堆
+        # 文本反而会让它把历史当成「本轮要回答的内容」的一部分。
+        if self._hist_msgs:
+            pos = 0
+            while pos < len(messages) and messages[pos].role == "system":
+                pos += 1
+            messages[pos:pos] = self._hist_msgs
         # 用户提示词
         prompt = self.cfg("promptTemplate") or ""
         content = ctx.render(prompt) if prompt else ""

@@ -31,6 +31,7 @@ import {
   PlayCircleOutlined,
   PlusOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   SearchOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons-vue';
@@ -116,6 +117,7 @@ function getNodeIcon(nodeType: string) {
     QUESTION_CLASSIFIER: MessageOutlined,
     PARAMETER_EXTRACTOR: FunctionOutlined,
     AGENT: RobotOutlined,
+    APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: ThunderboltOutlined,
     ITERATION: LoadingOutlined,
     VARIABLE_AGGREGATOR: FunctionOutlined,
@@ -141,6 +143,8 @@ function getStatusColor(status: string): string {
     completed: 'success',
     failed: 'error',
     skipped: 'default',
+    // 审批挂起：等人工处置，用紫色区别于「未执行」的灰色
+    awaiting: 'purple',
     // 并行分支超时：黄色告警；被其他分支短路：置灰
     timeout: 'warning',
     cancelled: 'default',
@@ -156,6 +160,7 @@ function getStatusIcon(status: string) {
     completed: CheckCircleOutlined,
     failed: CloseCircleOutlined,
     skipped: MinusCircleOutlined,
+    awaiting: SafetyCertificateOutlined,
     timeout: ExclamationCircleOutlined,
     cancelled: MinusCircleOutlined,
   };
@@ -170,6 +175,7 @@ function getStatusText(status: string): string {
     completed: '已完成',
     failed: '失败',
     skipped: '已跳过',
+    awaiting: '待审批',
     timeout: '已超时',
     cancelled: '已取消',
   };

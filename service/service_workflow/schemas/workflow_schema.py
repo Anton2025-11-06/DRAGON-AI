@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ==================== 通用 ====================
@@ -36,9 +36,35 @@ class WorkflowSaveReq(BaseModel):
 
 class WorkflowExecutionReq(BaseModel):
     inputs: Optional[dict] = None
-    breakpoints: Optional[list[str]] = Field(None, description="断点节点ID列表")
-    breakpointConditions: Optional[dict[str, str]] = Field(
-        None, description="条件断点：nodeId → 表达式（{{ref}} 变量引用 + 比较/逻辑运算，true 才暂停）")
+
+
+class ApprovalEditReq(BaseModel):
+    """审批表单里被改过的一行：(源节点 id, 变量名, 新值) 三元组。"""
+    nodeId: str = Field(..., description="源节点 id（三元组第一项）")
+    varName: str = Field(..., description="源节点输出里的变量名")
+    value: Any = Field(None, description="改后的新值（任意 JSON 形态）")
+
+
+class ApprovalDecisionReq(BaseModel):
+    """本轮审批结论（只针对一个审批节点）。"""
+    nodeId: Optional[str] = Field(None, description="审批节点 id；仅有一个待审批节点时可省略")
+    approved: bool = Field(..., description="true=同意，false=不同意（取消下游）")
+    opinion: Optional[str] = Field(None, max_length=2000, description="审批意见")
+    edits: Optional[list[ApprovalEditReq]] = Field(None, description="同意时对上游数据的编辑")
+
+
+class WorkflowSubmitReq(BaseModel):
+    """指定 executionId 的再提交入参（需求 3：暂停后恢复 / 重新执行）。"""
+    mode: str = Field(..., description="RETRY 重新执行（全量重跑）/ CONTINUE 暂停后恢复（已完成节点跳过）")
+    inputs: Optional[dict] = Field(None, description="本轮输入；不传沿用上轮行内 inputs")
+    approval: Optional[list[ApprovalDecisionReq]] = Field(
+        None, description="审批结论列表（存在待审批节点时必填；并行多个待审批时每节点一条）")
+
+    @field_validator("approval", mode="before")
+    @classmethod
+    def _wrap_approval(cls, v):
+        # 只有一个待审批节点时允许直接传对象，省掉前端数组包装
+        return [v] if isinstance(v, dict) else v
 
 
 class TemplateSaveReq(BaseModel):

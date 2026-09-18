@@ -35,6 +35,30 @@ class NodeExecutionError(Exception):
     """节点执行失败（引擎捕获后发 node.failed 并终止/走异常分支）。"""
 
 
+class AwaitingApproval(Exception):
+    """审批节点本轮拿不到人工结论：请求引擎在**节点边界**落暂停。
+
+    控制流信号而非错误：引擎捕获后把节点置 AWAITING、登记 awaiting_nodes，
+    本分支终止且不路由下游；run() 收尾发现有待审批节点就把工作流置 PAUSED。
+    绝不在 execute() 内部挂起协程等审批——那会占住 worker 任务槽并受节点超时约束。
+
+    - node_id: 发起审批的节点 id
+    - context: 审批上下文（可编辑输入项三元组 + 审批人配置），随事件与快照外发
+    - scope: ALL=整条流一起停 / DOWNSTREAM=仅本节点及下游等待
+    """
+
+    def __init__(self, node_id: str, context: Optional[dict] = None,
+                 scope: str = "DOWNSTREAM"):
+        super().__init__(f"节点 {node_id} 等待人工审批")
+        self.node_id = node_id
+        self.context: dict = context or {}
+        self.scope = scope or "DOWNSTREAM"
+
+
+# 审批暂停范围（节点配置 pauseScope 取值，引擎据此决定是否砍在跑分支）
+APPROVAL_SCOPE_ALL = "ALL"
+APPROVAL_SCOPE_DOWNSTREAM = "DOWNSTREAM"
+
 # 节点「返回内容」开关字段名(画布 data 中):显式 false 时该节点的数据事件不广播给客户端
 EMIT_OUTPUT_KEY = "emitOutput"
 

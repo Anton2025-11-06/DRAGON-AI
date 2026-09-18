@@ -85,7 +85,7 @@ class WorkflowService:
     async def create(req, user_id: int = 0) -> int:
         graph = req.graph
         if graph:
-            WorkflowService._validate_graph_soft(graph)
+            await WorkflowService._validate_graph_soft(graph)
         async with mysql_client.get_session() as session:
             wf = Workflow(name=req.name, description=req.description, graph=graph,
                           input_variables=[v.model_dump() for v in req.inputVariables or []],
@@ -99,7 +99,7 @@ class WorkflowService:
     async def update(workflow_id: int, req, user_id: int = 0) -> bool:
         graph = req.graph
         if graph:
-            WorkflowService._validate_graph_soft(graph)
+            await WorkflowService._validate_graph_soft(graph)
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
@@ -150,7 +150,8 @@ class WorkflowService:
                 raise ValueError("工作流不存在")
             if not r.graph:
                 raise ValueError("工作流图为空，无法发布")
-            issues = WorkflowGraph(r.graph).validate()
+            issues = WorkflowGraph(r.graph).validate(
+                await WorkflowService._model_categories(r.graph, session))
             errors = [i for i in issues if i.severity == "ERROR"]
             if errors:
                 raise WorkflowGraphError(errors)
@@ -246,10 +247,35 @@ class WorkflowService:
     # ==================== 校验 ====================
 
     @staticmethod
-    def _validate_graph_soft(graph: dict) -> list[dict]:
+    async def _model_categories(graph: dict, session) -> dict:
+        """取图内开记忆节点所用模型的能力类型 {str(model_id): category}。
+
+        只为记忆校验服务（哪类模型能开记忆、压缩模型是不是文生文），没开记忆的
+        工作流一次库也不查。其他校验填不上这个参数（拿 None 走降级分支）。
+        """
+        ids: set[int] = set()
+        for n in (graph or {}).get("nodes") or []:
+            data = n.get("data") or {}
+            if n.get("type") != "LLM" or data.get("memoryEnabled") is not True:
+                continue
+            for key in ("modelId", "memoryCompressModelId"):
+                mid = data.get(key)
+                if mid:
+                    ids.add(int(mid))
+        if not ids:
+            return {}
+        from service.service_system.models.model import Model
+        rows = (await session.execute(
+            select(Model.id, Model.category).where(Model.id.in_(ids)))).all()
+        return {str(r[0]): r[1] for r in rows}
+
+    @staticmethod
+    async def _validate_graph_soft(graph: dict) -> list[dict]:
         """保存草稿时的宽松校验（ERROR 只提示不阻断保存）。"""
         try:
-            issues = WorkflowGraph(graph).validate()
+            async with mysql_client.get_session() as session:
+                cats = await WorkflowService._model_categories(graph, session)
+            issues = WorkflowGraph(graph).validate(cats)
         except Exception as e:  # noqa: BLE001
             log.warning("graph 解析失败: {}", e)
             return []
@@ -261,7 +287,9 @@ class WorkflowService:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 raise ValueError("工作流不存在")
-            issues = WorkflowGraph(r.graph or {}).validate() if r.graph else []
+            issues = (WorkflowGraph(r.graph or {}).validate(
+                await WorkflowService._model_categories(r.graph or {}, session))
+                if r.graph else [])
             return {"valid": not any(i.severity == "ERROR" for i in issues),
                     "issues": [i.to_dict() for i in issues]}
 

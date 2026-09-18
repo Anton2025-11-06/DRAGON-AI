@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""arq 任务实现:工作流执行/恢复 + worker 进程生命周期钩子。
+"""arq 任务实现:工作流执行(首跑 + 再提交) + worker 进程生命周期钩子。
 
 与旧 celery 方案的本质差异:
 - arq worker 进程本身就是 asyncio 事件循环,任务函数直接写 async def 并 await,
   不再需要 celery 时代的线程适配层(AsyncLoopRunner)与每任务幂等 bootstrap;
 - 任务函数只负责「从 DB 重建运行时并驱动引擎」,执行记录/状态/快照全程以 DB 为权威:
-  engine 在每个节点执行前调用状态检查钩子,读到 CANCELLED/PAUSED 就按 DB 状态收尾;
+  engine 在每个节点执行前调用状态检查钩子,读到 CANCELLED 就按取消收尾(暂停只由
+  审批节点在节点边界触发,不存在外部触发的暂停/恢复任务);
+- 首跑与「指定 executionId 再提交」共用 execute_workflow 一个任务函数(差异全在 DB 行里),
+  已废弃的 resume_workflow 不再注册;
 - bootstrap 在 worker 进程启动时执行一次(等价 FastAPI 的 lifespan):
   加载 Nacos 配置 → 初始化 MySQL/Redis/httpx 连接池。事件不再需要后台桥:
   engine 节点执行时经 EventBus 的 pub hook 实时 PUBLISH 到 Redis 频道(含
@@ -133,18 +136,11 @@ async def shutdown(ctx: dict) -> None:
 
 
 async def execute_workflow(ctx: dict, execution_id: str) -> None:
-    """执行工作流(execute-async 接口投递的任务入口)。
+    """执行工作流(execute-async 与 submit 两个接口共用唯一任务入口)。
 
-    执行记录已在 API 进程创建(状态 RUNNING),这里从 DB 重建运行时并驱动引擎;
-    引擎各节点执行前会检查 DB 状态,取消/暂停由 DB 状态控制(需求 5)。
+    执行记录已在 API 进程创建/改写(状态 RUNNING),这里从 DB 重建运行时并驱动引擎;
+    重新执行(RETRY)与审批后恢复(CONTINUE)的分歧在 submit_mode/node_states 里,由
+    service._build_runtime 读取;任务入口本身不区分(避免两个入口两套守卫)。
+    引擎各节点执行前会检查 DB 状态,取消由 DB 状态控制(需求 5)。
     """
     await WorkflowExecutionService.run_in_worker(execution_id)
-
-
-async def resume_workflow(ctx: dict, execution_id: str) -> None:
-    """恢复暂停的工作流(resume 接口投递的任务入口)。
-
-    恢复语义(需求 5):resume 接口已把 DB 状态改回 RUNNING、并合并 edit 数据写入
-    variables 快照;这里从 DB 重建运行时 → restore 快照 → run() 从 pending 节点继续。
-    """
-    await WorkflowExecutionService.resume_in_worker(execution_id)

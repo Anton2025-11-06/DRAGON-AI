@@ -17,10 +17,13 @@ import {
   HolderOutlined,
   NumberOutlined,
   PlusOutlined,
+  SafetyCertificateOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 import draggable from 'vuedraggable';
+
+import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import {
   DEFAULT_MAX_FILE_COUNT,
@@ -46,6 +49,20 @@ const emit = defineEmits<{
 // 表单数据
 const formData = reactive<StartNodeConfig>({
   fields: [],
+});
+
+const workflowStore = useAiWorkflowStore();
+
+/**
+ * 画布上是否存在审批节点
+ * 审批入参只在有审批节点时有意义（没审批人可校时它只是一个多余入参），
+ * 因此默认不展示该类型，避免无审批的画布误配。
+ */
+const hasApprovalNode = computed(() => {
+  const canvas = workflowStore.canvasRef;
+  if (!canvas) return false;
+  const nodes = canvas.getNodes() || [];
+  return nodes.some((node: any) => node.data?.nodeType === 'APPROVAL');
 });
 
 // 字段编辑弹窗
@@ -447,8 +464,17 @@ function handleChange() {
             <a-select-option value="FILE_LIST">
               <FolderOutlined /> 多文件
             </a-select-option>
+            <a-select-option
+              v-if="hasApprovalNode || editingField.type === 'APPROVER'"
+              value="APPROVER"
+            >
+              <SafetyCertificateOutlined /> 审批人
+            </a-select-option>
           </a-select>
           <div class="form-hint">短文本与长文本已合并为「文本」类型</div>
+          <div v-if="editingField.type === 'APPROVER'" class="form-hint">
+            提交时传审批人标识数组（元素为数字或字符串），与审批节点的审批人配置取交集判定权限
+          </div>
         </a-form-item>
 
         <a-form-item label="字段描述">

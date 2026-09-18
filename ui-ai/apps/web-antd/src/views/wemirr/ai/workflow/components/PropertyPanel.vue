@@ -26,6 +26,7 @@ import {
   FileTextOutlined,
   PlayCircleOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   StopOutlined,
   SyncOutlined,
   ToolOutlined,
@@ -37,6 +38,8 @@ import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 // 节点配置表单组件 - 智能体节点
 import AgentNodeForm from './node-forms/AgentNodeForm.vue';
+// 节点配置表单组件 - 控制流节点（人工审批）
+import ApprovalNodeForm from './node-forms/ApprovalNodeForm.vue';
 // 节点配置表单组件 - 能力节点
 import CodeNodeForm from './node-forms/CodeNodeForm.vue';
 import DocExtractorNodeForm from './node-forms/DocExtractorNodeForm.vue';
@@ -123,6 +126,7 @@ const iconComponents: Record<NodeType, Component> = {
   PARAMETER_EXTRACTOR: ApiOutlined,
   AGENT: UserOutlined,
   // 控制流节点
+  APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
   ITERATION: SyncOutlined,
@@ -156,6 +160,7 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   PARAMETER_EXTRACTOR: ParameterExtractorNodeForm,
   AGENT: AgentNodeForm,
   // 控制流节点
+  APPROVAL: ApprovalNodeForm,
   IF_ELSE: IfElseNodeForm,
   ITERATION: IterationNodeForm,
   VARIABLE_AGGREGATOR: VariableAggregatorNodeForm,

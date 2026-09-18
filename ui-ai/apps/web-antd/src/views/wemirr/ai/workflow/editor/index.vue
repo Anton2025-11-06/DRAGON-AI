@@ -17,14 +17,13 @@ import { useRoute, useRouter } from 'vue-router';
 
 import {
   ArrowLeftOutlined,
+  AuditOutlined,
   BugOutlined,
   CheckCircleOutlined,
-  ClearOutlined,
   CompressOutlined,
   ExpandOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
-  PlayCircleOutlined,
   SaveOutlined,
   SendOutlined,
   StopOutlined,
@@ -39,7 +38,6 @@ import {
   cancelExecution,
   createWorkflow,
   publishWorkflow,
-  resumeExecution,
   updateWorkflow,
 } from '#/api/ai-workflow';
 import { useAiWorkflowStore } from '#/store/ai-workflow';
@@ -109,7 +107,6 @@ const isDebugRunning = computed(() => debugStore.isRunning);
 const isDebugPaused = computed(() => debugStore.isPaused);
 const hasCurrentError = computed(() => debugStore.hasCurrentError);
 const currentError = computed(() => debugStore.currentError);
-const breakpointCount = computed(() => debugStore.breakpointCount);
 const diagnostics = computed(() => {
   void workflowStore.graphRevision;
   return workflowStore.validateWorkflowGraph(workflowStore.exportGraph());
@@ -449,35 +446,9 @@ async function handleStopDebug() {
 }
 
 /**
- * 继续执行 (从断点)
+ * 继续执行不在工具栏：暂停唯一来自 APPROVAL 节点，
+ * 结论要在调试面板「预览运行」页里随审批表单一起提交（走 submit-sync）。
  */
-async function handleContinueDebug() {
-  if (!debugStore.executionId) return;
-
-  try {
-    await resumeExecution(debugStore.executionId);
-    debugStore.resumeExecution();
-    message.success('继续执行');
-  } catch (error: any) {
-    message.error(error.message || '继续执行失败');
-  }
-}
-
-/**
- * 清除所有断点
- */
-function handleClearBreakpoints() {
-  Modal.confirm({
-    title: '确认清除',
-    content: '确定要清除所有断点吗？',
-    okText: '确定',
-    cancelText: '取消',
-    onOk: () => {
-      debugStore.clearAllBreakpoints();
-      message.success('已清除所有断点');
-    },
-  });
-}
 
 /**
  * 显示错误详情面板
@@ -741,18 +712,6 @@ onBeforeUnmount(() => {
           <a-space>
             <!-- 调试控制按钮组 -->
             <template v-if="workflowStore.isDebugMode">
-              <!-- 断点计数 -->
-              <Tooltip v-if="breakpointCount > 0" title="断点数量">
-                <Badge
-                  :count="breakpointCount"
-                  :number-style="{ backgroundColor: '#ff4d4f' }"
-                >
-                  <a-button type="text" @click="handleClearBreakpoints">
-                    <template #icon><ClearOutlined /></template>
-                  </a-button>
-                </Badge>
-              </Tooltip>
-
               <!-- 错误提示 -->
               <Tooltip v-if="hasCurrentError" title="查看错误详情">
                 <a-button type="text" danger @click="handleShowErrorPanel">
@@ -769,10 +728,11 @@ onBeforeUnmount(() => {
                 </Tooltip>
               </template>
 
+              <!-- 暂停：去预览运行页的审批面板提交结论 -->
               <template v-if="isDebugPaused">
-                <Tooltip title="继续执行 (F8)">
-                  <a-button type="primary" ghost @click="handleContinueDebug">
-                    <template #icon><PlayCircleOutlined /></template>
+                <Tooltip title="等待人工审批：请在调试面板的预览运行页提交结论">
+                  <a-button type="primary" ghost @click="showDebugPanel = true">
+                    <template #icon><AuditOutlined /></template>
                   </a-button>
                 </Tooltip>
               </template>
@@ -794,11 +754,11 @@ onBeforeUnmount(() => {
                 </Tag>
                 <Tag
                   v-else-if="isDebugPaused"
-                  color="warning"
+                  color="purple"
                   size="small"
                   style="margin-left: 4px"
                 >
-                  已暂停
+                  待审批
                 </Tag>
               </a-button>
             </a-tooltip>

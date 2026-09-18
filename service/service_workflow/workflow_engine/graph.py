@@ -156,8 +156,13 @@ class WorkflowGraph:
 
     # ---------------- 校验 ----------------
 
-    def validate(self) -> list[GraphIssue]:
-        """保存/发布前的静态校验。ERROR 级问题阻断发布。"""
+    def validate(self, model_categories: Optional[dict] = None) -> list[GraphIssue]:
+        """保存/发布前的静态校验。ERROR 级问题阻断发布。
+
+        model_categories：{str(model_id): category}，由调用方查库后传入（只有大模型
+        记忆需要它——「哪类模型能开记忆」是模型能力属性，图自身看不出来）。缺省则
+        跳过依赖模型类型的判断，不做硬性报错。
+        """
         issues: list[GraphIssue] = []
 
         def add(code, severity, message, node: Optional[Node] = None, suggestion=None):
@@ -226,7 +231,25 @@ class WorkflowGraph:
                         f"节点「{n.label}」存在来自同一出口端口的重复入边", n,
                         suggestion="同一出口的重复连线请只保留一条；不同分支出口连到同一节点是允许的")
 
-        # 7. 类型级校验（由节点注册表补充）
+        # 7. 审批节点 ↔ 开始节点「审批入参」字段的双向联动（需求 2 决策 ⑧）
+        approvals = [n for n in self.nodes if n.type == "APPROVAL"]
+        approver_fields = []
+        if start is not None:
+            approver_fields = [f for f in ((start.data or {}).get("fields") or [])
+                               if str(f.get("type") or "").upper() == "APPROVER"]
+        if approvals and not approver_fields:
+            add("APPROVER_FIELD_MISSING", "ERROR", "画布存在审批节点，但开始节点未添加「审批入参」字段",
+                approvals[0],
+                suggestion="在开始节点新增一个类型为 APPROVER 的输入字段（值为数组），"
+                           "提交时用它与审批人列表比对权限")
+        if approver_fields and not approvals:
+            add("APPROVER_FIELD_ORPHAN", "ERROR",
+                "开始节点配置了「审批入参」字段，但画布上没有审批节点", start,
+                suggestion="删除该字段，或添加审批节点（审批入参只在有审批节点时才有意义）")
+        if len(approver_fields) > 1:
+            add("APPROVER_FIELD_DUP", "ERROR", "开始节点只允许一个「审批入参」字段", start)
+
+        # 8. 类型级校验（由节点注册表补充）
         from service.service_workflow.workflow_engine.nodes import NODE_REGISTRY
         for n in self.nodes:
             validator = NODE_REGISTRY.get(n.type)
@@ -235,11 +258,17 @@ class WorkflowGraph:
             elif hasattr(validator, "validate_node") and callable(getattr(validator, "validate_node")):
                 issues.extend(validator.validate_node(n, self))
 
+        # 9. 大模型记忆配置校验（需要模型能力类型，不进 validate_node 的纯函数协议）
+        from service.service_workflow.workflow_engine.memory import validate_memory
+        for n in self.nodes:
+            if n.type == "LLM":
+                issues.extend(validate_memory(n, self, model_categories) or [])
+
         return issues
 
-    def validate_strict(self) -> None:
+    def validate_strict(self, model_categories: Optional[dict] = None) -> None:
         """发布用校验：存在 ERROR 即抛 WorkflowGraphError。"""
-        issues = self.validate()
+        issues = self.validate(model_categories)
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:
             raise WorkflowGraphError(errors)
@@ -256,6 +285,31 @@ class WorkflowGraph:
             for e in self.get_out_edges(nid):
                 stack.append(e.target)
         return seen
+
+    def compound_body_node_ids(self) -> set[str]:
+        """复合节点子图（LOOP/ITERATION 循环体、PARALLEL 分支体）内的节点 id 集合。
+
+        画布上没有父子节点字段，子图成员关系完全由拓扑决定：从复合节点的 branch:*
+        端口出边出发正向可达，回边（指回复合节点自身）即止。output 端口是复合节点的
+        正常出口，不算子图。
+        """
+        result: set[str] = set()
+        for n in self.nodes:
+            if n.type not in ("LOOP", "ITERATION", "PARALLEL"):
+                continue
+            for edge in self.get_out_edges(n.id):
+                if not is_branch_handle(edge.source_handle):
+                    continue
+                stack = [edge.target]
+                while stack:
+                    nid = stack.pop()
+                    if nid in result or nid == n.id:
+                        continue
+                    result.add(nid)
+                    for nxt in self.get_out_edges(nid):
+                        if nxt.target != n.id:
+                            stack.append(nxt.target)
+        return result
 
     def has_cycle(self) -> bool:
         """DFS 三色标记检测环（LOOP 循环体回到 LOOP 节点的边不算环，由 LOOP 语义豁免：环上仅含 LOOP 入边的 target）。

@@ -164,7 +164,7 @@ class WorkflowModelClient:
                      http=None) -> "WorkflowModelClient":
         prov = provider
         if prov is None:
-            raise ModelNotFoundError("模型配置源未初始化（生产环境应在服务启动时 set_default_provider）")
+            raise ModelNotFoundError("模型配置源未初始化（应在服务启动时 set_default_provider）")
         config = await prov.get_model_config(model_id)
         if config is None:
             raise ModelNotFoundError(f"模型不存在: model_id={model_id}")

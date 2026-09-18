@@ -3,7 +3,7 @@ import type { UploadFile } from 'ant-design-vue';
 /**
  * DynamicInputForm 动态输入表单组件
  * 根据 START 节点的字段定义动态生成表单
- * 支持 TEXT（文本）、NUMBER、SELECT、CHECKBOX（开关）、SINGLE_FILE、FILE_LIST 类型；
+ * 支持 TEXT（文本）、NUMBER、SELECT、CHECKBOX（开关）、SINGLE_FILE、FILE_LIST、APPROVER（审批人数组）类型；
  * 旧图的 SHORT_TEXT / PARAGRAPH 经 normalizeInputFieldType 归一为 TEXT
  *
  */
@@ -27,6 +27,7 @@ import { uploadWorkflowFile } from '#/api/ai-workflow';
 import {
   getMaxFileCount,
   getTextMaxLength,
+  isArrayInputType,
   isTextInputType,
   normalizeInputFieldType,
 } from '../../domain/input-field-type';
@@ -87,11 +88,21 @@ const formRules = computed(() => {
 
     // 必填验证
     if (field.required) {
-      fieldRules.push({
-        required: true,
-        message: `${field.label}不能为空`,
-        trigger: field.type === 'SELECT' ? 'change' : 'blur',
-      });
+      // 数组类字段（审批人）空数组也算未填，需显式声明 type 才能被 async-validator 拦住
+      fieldRules.push(
+        isArrayInputType(field.type)
+          ? {
+              type: 'array',
+              required: true,
+              message: `${field.label}不能为空`,
+              trigger: 'change',
+            }
+          : {
+              required: true,
+              message: `${field.label}不能为空`,
+              trigger: field.type === 'SELECT' ? 'change' : 'blur',
+            },
+      );
     }
 
     // 文本类型的正则验证（短/长文本已合并为 TEXT）
@@ -208,6 +219,10 @@ function initDefaultValues(fields: InputField[]) {
       (afterDefault === undefined || afterDefault === null) &&
       (field.type === 'FILE_LIST' || field.type === 'SINGLE_FILE')
     ) {
+      formValues.value[field.name] = [];
+    }
+    // 审批人字段语义上永远是数组，未填时给空数组而不是空串
+    if (isArrayInputType(field.type) && !Array.isArray(afterDefault)) {
       formValues.value[field.name] = [];
     }
   });
@@ -437,6 +452,25 @@ function fieldType(field: InputField) {
 }
 
 /**
+ * 审批人输入归一：纯数字字面量转 number，其余保留字符串并去空白去重。
+ * 后端 normalize_approvers 会统一 str 化后取交集，故两种元素类型都安全。
+ */
+function normalizeApproverList(value: any): Array<number | string> {
+  const list = (Array.isArray(value) ? value : [])
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => item !== '')
+    .map((item) => (/^-?\d+$/.test(item) ? Number(item) : item));
+  return [...new Set(list.map(String))].map((item) => {
+    const matched = list.find((v) => String(v) === item);
+    return matched as number | string;
+  });
+}
+
+function handleApproversChange(field: InputField, value: any) {
+  formValues.value[field.name] = normalizeApproverList(value);
+}
+
+/**
  * 验证表单
  */
 async function validate(): Promise<boolean> {
@@ -545,6 +579,9 @@ defineExpose({
             {{ fieldType(field) === 'FILE_LIST' ? '，' : ''
             }}{{ getFileLimitsText(field) }}
           </template>
+        </span>
+        <span v-if="fieldType(field) === 'APPROVER'" class="field-description">
+          可填写多个（用户 ID 或账号），提交时与审批节点的审批人取交集判定权限
         </span>
       </template>
 
@@ -659,6 +696,19 @@ defineExpose({
           </div>
         </template>
       </a-upload>
+
+      <!-- 审批人 APPROVER（值永远是数组，元素可数字可字符串） -->
+      <a-select
+        v-else-if="fieldType(field) === 'APPROVER'"
+        mode="tags"
+        :value="(formValues[field.name] || []).map((item: any) => String(item))"
+        :placeholder="
+          fieldPlaceholder(field, '请输入审批人 ID / 账号，回车确认')
+        "
+        :token-separators="[',', ' ', ';']"
+        style="width: 100%"
+        @change="(val: any) => handleApproversChange(field, val)"
+      />
     </a-form-item>
   </a-form>
 </template>

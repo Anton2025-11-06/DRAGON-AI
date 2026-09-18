@@ -27,6 +27,7 @@ import {
   getWorkflowNodeDefinitions,
   updateWorkflow,
 } from '#/api/ai-workflow';
+import { MODEL_TYPES_MEMORY } from '#/api/ai-workflow/const';
 import { generateUUID } from '#/utils/uuid';
 import { useSSE } from '#/views/wemirr/ai/workflow/components/debug/use-sse';
 import { mapBackendNodeDefinitions } from '#/views/wemirr/ai/workflow/domain/node-definition-mapper';
@@ -38,12 +39,13 @@ import {
 } from '#/views/wemirr/ai/workflow/domain/ports';
 
 type CanvasNodeExecutionStatus =
+  | 'awaiting'
   | 'cancelled'
   | 'completed'
   | 'failed'
   | 'running'
+  | 'skipped'
   | 'timeout'
-  | 'waiting'
   | null;
 
 /** Vue Flow 画布引用类型 */
@@ -64,10 +66,12 @@ export interface VueFlowCanvasRef {
 
 /**
  * 节点执行状态
+ * skipped = 恢复提交里本轮沿用上一轮结果的节点；awaiting = 审批节点挂起等人工结论
  */
 export interface NodeExecutionState {
   /** 执行状态 */
   status:
+    | 'awaiting'
     | 'cancelled'
     | 'completed'
     | 'failed'
@@ -159,9 +163,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
   /** 是否有未保存的更改 */
   const isDirty = ref(false);
 
-  /** 检查点集合 */
-  const breakpoints = ref<Set<string>>(new Set());
-
   /** 是否处于调试模式 */
   const isDebugMode = ref(false);
 
@@ -198,11 +199,16 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       if (!executionState.value) return;
       const nodeState = executionState.value.nodeStates.get(data.nodeId);
       if (nodeState) {
-        nodeState.status = 'completed';
+        // skip：本轮没重跑，只是沿用上一轮输出（画布/面板都要区别于真跑完）
+        nodeState.status = data.skip ? 'skipped' : 'completed';
         nodeState.output = data.output;
         nodeState.duration = data.duration;
       }
-      highlightNode(data.nodeId, 'completed', data.duration);
+      highlightNode(
+        data.nodeId,
+        data.skip ? 'skipped' : 'completed',
+        data.duration,
+      );
     },
     onNodeError: (data) => {
       if (!executionState.value) return;
@@ -246,12 +252,31 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         }
       }
     },
-    onBreakpointHit: (data) => {
+    onNodePaused: (data) => {
+      if (!executionState.value) return;
+      const nodeState = executionState.value.nodeStates.get(data.nodeId);
+      if (nodeState) nodeState.status = 'awaiting';
+      else
+        executionState.value.nodeStates.set(data.nodeId, {
+          status: 'awaiting',
+        });
+      executionState.value.currentNodeId = data.nodeId;
+      highlightNode(data.nodeId, 'paused');
+    },
+    onApprovalPaused: (data) => {
       if (!executionState.value) return;
       executionState.value.status = 'PAUSED';
-      executionState.value.currentNodeId = data.nodeId;
+      executionState.value.currentNodeId = data.nodeId || null;
       executionState.value.variables = data.variables || {};
-      highlightNode(data.nodeId, 'paused');
+      // 后端只在收尾时给出首个待审批节点；其余待审批节点已由 node.paused 逐个登记
+      (data.awaitingNodeIds || []).forEach((id) => {
+        const nodeState = executionState.value?.nodeStates.get(id);
+        if (nodeState && nodeState.status !== 'completed') {
+          nodeState.status = 'awaiting';
+          highlightNode(id, 'paused');
+        }
+      });
+      if (data.nodeId) highlightNode(data.nodeId, 'paused');
     },
     onExecutionCompleted: (data) => {
       if (executionState.value) {
@@ -584,6 +609,42 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       return names;
     };
     const inputNames = collectInputNames();
+    /** 开始节点的审批入参字段（提交时审批身份的唯一来源，后端同一口径强校验） */
+    const approverFields: any[] = [];
+    for (const node of startNodes) {
+      const fields = node.data?.fields || node.data?.config?.fields || [];
+      if (Array.isArray(fields)) {
+        for (const field of fields) {
+          if (String(field?.type || '').toUpperCase() === 'APPROVER') {
+            approverFields.push(field);
+          }
+        }
+      }
+    }
+    const approvalNodes = nodes.filter((node) => node.type === 'APPROVAL');
+    if (approvalNodes.length > 0 && approverFields.length === 0) {
+      addIssue(
+        'ERROR',
+        'APPROVER_FIELD_MISSING',
+        '画布存在审批节点，但开始节点未添加「审批人」入参字段',
+        undefined,
+        '在开始节点新增一个类型为 APPROVER 的输入字段（值为数组），提交时带上审批人标识',
+      );
+    }
+    if (approverFields.length > 0 && approvalNodes.length === 0) {
+      addIssue(
+        'ERROR',
+        'APPROVER_FIELD_ORPHAN',
+        '开始节点配了「审批人」入参，但画布上没有审批节点',
+      );
+    }
+    if (approverFields.length > 1) {
+      addIssue(
+        'ERROR',
+        'APPROVER_FIELD_DUP',
+        '开始节点只允许一个「审批人」入参字段',
+      );
+    }
     const variablePattern = /\{\{\s*([^}]+?)\s*\}\}/g;
     const collectRefs = (value: any, refs: string[]) => {
       if (typeof value === 'string') {
@@ -684,6 +745,41 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
           node,
         );
       }
+      if (node.type === 'LLM' && node.data?.memoryEnabled === true) {
+        // 向量/重排/语音识别/语音合成没有可注入历史的文本位（后端 validate 同为 ERROR）
+        const modelType = node.data?.modelType;
+        if (modelType && !MODEL_TYPES_MEMORY.includes(String(modelType))) {
+          addIssue(
+            'ERROR',
+            'LLM_MEMORY_CATEGORY_UNSUPPORTED',
+            `大模型节点 ${node.label || node.id} 的能力类型「${node.data?.modelTypeLabel || modelType}」不支持记忆注入`,
+            node,
+            '关掉记忆开关，或换成文生文/理解/生成类能力',
+          );
+        }
+        if (
+          node.data?.memoryStrategy === 'COMPRESS' &&
+          !node.data?.memoryCompressModelId
+        ) {
+          addIssue(
+            'ERROR',
+            'LLM_MEMORY_COMPRESS_MODEL_REQUIRED',
+            `大模型节点 ${node.label || node.id} 选了「自动压缩」但未指定压缩模型`,
+            node,
+          );
+        }
+        if (
+          node.data?.memoryScope === 'NODES' &&
+          (node.data?.memoryNodes || []).length === 0
+        ) {
+          addIssue(
+            'ERROR',
+            'LLM_MEMORY_NODES_REQUIRED',
+            `大模型节点 ${node.label || node.id} 的记忆范围是「指定节点」但未选择节点`,
+            node,
+          );
+        }
+      }
       if (node.type === 'AGENT' && !node.data?.agentId) {
         addIssue(
           'ERROR',
@@ -774,6 +870,27 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
             'WARNING',
             'MCP_OUTPUT_VARIABLE_EMPTY',
             `MCP 工具节点 ${node.label || node.id} 未配置输出变量`,
+            node,
+          );
+        }
+      }
+      if (node.type === 'APPROVAL') {
+        const scope = String(
+          node.data?.pauseScope || 'DOWNSTREAM',
+        ).toUpperCase();
+        if (scope !== 'ALL' && scope !== 'DOWNSTREAM') {
+          addIssue(
+            'ERROR',
+            'APPROVAL_SCOPE_INVALID',
+            `审批节点 ${node.label || node.id} 的暂停范围取值非法`,
+            node,
+          );
+        }
+        if (!(incomingByNode.get(node.id)?.length || 0)) {
+          addIssue(
+            'ERROR',
+            'APPROVAL_NO_INPUT',
+            `审批节点 ${node.label || node.id} 没有上游输入，无数据可审`,
             node,
           );
         }
@@ -967,27 +1084,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
   }
 
   /**
-   * 切换检查点
-   */
-  function toggleBreakpoint(nodeId: string) {
-    if (breakpoints.value.has(nodeId)) {
-      breakpoints.value.delete(nodeId);
-    } else {
-      breakpoints.value.add(nodeId);
-    }
-    // 触发响应式更新
-    breakpoints.value = new Set(breakpoints.value);
-  }
-
-  /**
-   * 清除所有检查点
-   */
-  function clearBreakpoints() {
-    breakpoints.value.clear();
-    breakpoints.value = new Set();
-  }
-
-  /**
    * 执行工作流
    */
   async function executeWorkflow(inputs: Record<string, any> = {}) {
@@ -997,7 +1093,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
     try {
       const executionId = await executeWorkflowAsync(currentWorkflow.value.id, {
         inputs,
-        breakpoints: isDebugMode.value ? [...breakpoints.value] : undefined,
       });
 
       // 初始化执行状态
@@ -1049,6 +1144,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       | 'failed'
       | 'paused'
       | 'running'
+      | 'skipped'
       | 'timeout',
     duration?: null | number,
   ) {
@@ -1058,10 +1154,13 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       running: 'running',
       completed: 'completed',
       failed: 'failed',
-      paused: 'waiting',
+      // 审批挂起：画布置为等待态（与节点追踪面板的 awaiting 同一口径）
+      paused: 'awaiting',
       // 并行分支超时/取消：画布黄色告警态 / 置灰态，不再停在蓝色执行中
       timeout: 'timeout',
       cancelled: 'cancelled',
+      // 本轮沿用：不重跑，不占用「执行中」的蓝色
+      skipped: 'skipped',
     };
     canvasRef.value.updateNodeData(nodeId, {
       executionStatus: statusMap[status] || null,
@@ -1105,7 +1204,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
     selectedNode.value = null;
     executionState.value = null;
     isDirty.value = false;
-    breakpoints.value = new Set();
     isDebugMode.value = false;
     loading.value = false;
     executing.value = false;
@@ -1134,7 +1232,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
     selectedNode,
     executionState,
     isDirty,
-    breakpoints,
     isDebugMode,
     loading,
     executing,
@@ -1168,8 +1265,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
     resetEditorSession,
     updateNodeConfig,
     updateNodeLabel,
-    toggleBreakpoint,
-    clearBreakpoints,
     executeWorkflow,
     subscribeExecution,
     closeEventSource,

@@ -26,9 +26,10 @@ class WorkerSettings:
     health_check_key = worker_health_key(queue_name)
 
     # 本 worker 能执行的任务函数(按模块路径注册,worker 进程按名解析)
+    # 只留 execute_workflow:首跑与再提交(重新执行/审批后恢复)共用它,resume_workflow
+    # 随外部暂停链路一起废弃(保留会让旧投递的 job 找不到函数名而报错)
     functions = [
         "arq_tasks.tasks.workflow.execute_workflow",
-        "arq_tasks.tasks.workflow.resume_workflow",
     ]
 
     on_startup = bootstrap

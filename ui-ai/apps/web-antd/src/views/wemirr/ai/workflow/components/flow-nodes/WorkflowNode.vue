@@ -21,6 +21,7 @@ import {
   FileTextOutlined,
   PlayCircleOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   StopOutlined,
   SyncOutlined,
   ToolOutlined,
@@ -44,11 +45,13 @@ interface NodeData {
   label: string;
   config: Record<string, any>;
   executionStatus?:
+    | 'awaiting'
     | 'cancelled'
     | 'completed'
     | 'failed'
     | 'pending'
     | 'running'
+    | 'skipped'
     | 'timeout'
     | null;
   executionDuration?: null | number;
@@ -91,6 +94,7 @@ const iconComponent = computed(() => {
     QUESTION_CLASSIFIER: BranchesOutlined,
     PARAMETER_EXTRACTOR: ApiOutlined,
     AGENT: UserOutlined,
+    APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: BranchesOutlined,
     ITERATION: SyncOutlined,
     VARIABLE_AGGREGATOR: ApartmentOutlined,
@@ -176,6 +180,11 @@ const llmCategoryLabel = computed(() => {
 /** 输入摘要 */
 const inputSummary = computed(() => {
   switch (nodeType.value) {
+    case 'APPROVAL': {
+      return config.value.pauseScope === 'ALL'
+        ? '暂停整条工作流'
+        : '暂停本节点及下游';
+    }
     case 'IF_ELSE': {
       const conditions =
         config.value.branches?.reduce(
@@ -203,6 +212,9 @@ const inputSummary = computed(() => {
 /** 输出摘要 */
 const outputSummary = computed(() => {
   switch (nodeType.value) {
+    case 'APPROVAL': {
+      return '审批结论';
+    }
     case 'CODE': {
       return '代码执行结果';
     }
@@ -277,6 +289,8 @@ function getBranchHandleY(index: number): number {
         'has-branches': hasBranches,
         'status-timeout': data.executionStatus === 'timeout',
         'status-cancelled': data.executionStatus === 'cancelled',
+        'status-awaiting': data.executionStatus === 'awaiting',
+        'status-skipped': data.executionStatus === 'skipped',
       },
     ]"
     :data-node-id="id"
@@ -457,6 +471,29 @@ function getBranchHandleY(index: number): number {
     background: #fafafa;
     border-color: #d9d9d9;
     opacity: 0.8;
+
+    .node-header {
+      background: #f5f5f5;
+      border-bottom-color: #e8e8e8;
+    }
+  }
+
+  // 审批节点挂起：紫色等待态，整条流停在 PAUSED 时便于一眼定位
+  &.status-awaiting {
+    background: #f9f0ff;
+    border-color: #d3adf7;
+    box-shadow: 0 2px 8px rgba(114, 46, 209, 0.18);
+
+    .node-header {
+      background: linear-gradient(135deg, #efdbff 0%, #f9f0ff 100%);
+      border-bottom-color: #d3adf7;
+    }
+  }
+
+  // 恢复提交里本轮沿用的已完成节点：淡化为背景态，不与正常完成的绿色抢视觉
+  &.status-skipped {
+    background: #fafafa;
+    border-color: #e8e8e8;
 
     .node-header {
       background: #f5f5f5;

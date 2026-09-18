@@ -6,7 +6,7 @@
 
 import type { WorkflowRuntimeEventType } from '../../domain/runtime-events';
 
-import type { NodeType } from '#/api/ai-workflow/types';
+import type { ApprovalContext, NodeType } from '#/api/ai-workflow/types';
 
 import {
   computed,
@@ -90,6 +90,8 @@ export interface NodeCompletedEventData {
     statusCode: number;
     url: string;
   };
+  /** true = 本轮未重跑（恢复提交里沿用上一轮结果） */
+  skip?: boolean;
 }
 
 /**
@@ -123,10 +125,25 @@ export interface StreamTokenEventData {
 }
 
 /**
- * 断点命中事件数据
+ * 审批节点挂起事件数据（node.paused）
  */
-export interface BreakpointHitEventData {
+export interface NodePausedEventData {
   nodeId: string;
+  nodeType?: NodeType;
+  duration?: number;
+  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  approvalContext?: ApprovalContext;
+}
+
+/**
+ * 执行暂停事件数据（workflow.paused：本轮跑完但存在未决策的审批节点）
+ * 原「断点命中」语义已随断点功能废弃
+ */
+export interface ApprovalPausedEventData {
+  nodeId?: string;
+  awaitingNodeIds?: string[];
+  approvalContext?: ApprovalContext;
+  duration?: number;
   variables?: Record<string, any>;
 }
 
@@ -164,7 +181,10 @@ export interface SSEEventCallbacks {
   /** 并行分支被其他分支先完成短路的节点 */
   onNodeCancelled?: (data: NodeAbortedEventData) => void;
   onStreamToken?: (data: StreamTokenEventData) => void;
-  onBreakpointHit?: (data: BreakpointHitEventData) => void;
+  /** 单个审批节点挂起（面板可先据此展开表单） */
+  onNodePaused?: (data: NodePausedEventData) => void;
+  /** 整条流暂停等人工审批 */
+  onApprovalPaused?: (data: ApprovalPausedEventData) => void;
   onExecutionCompleted?: (data: ExecutionCompletedEventData) => void;
   onExecutionFailed?: (data: ExecutionFailedEventData) => void;
   onExecutionCancelled?: (data: ExecutionCancelledEventData) => void;
@@ -411,6 +431,7 @@ export function useSSE(
           duration: data.duration,
           tokenUsage: data.tokenUsage,
           httpDetails: data.httpDetails,
+          skip: data.skip,
         });
         callbacks?.onNodeCompleted?.(data);
       }
@@ -474,17 +495,41 @@ export function useSSE(
       }
     });
 
-    // 工作流暂停事件
-    addEventListener('workflow.paused', (e) => {
-      const data = parseEventData<BreakpointHitEventData>(e);
+    // 审批节点挂起事件（节点停在 AWAITING，不路由下游）
+    addEventListener('node.paused', (e) => {
+      const data = parseEventData<NodePausedEventData>(e);
       if (data) {
-        debugStore.handleBreakpointHit({
+        debugStore.handleNodePaused({
+          type: 'node.paused',
+          nodeId: data.nodeId,
+          nodeType: data.nodeType,
+          duration: data.duration,
+          pauseScope: data.pauseScope,
+          approvalContext: data.approvalContext,
+        });
+        callbacks?.onNodePaused?.(data);
+      }
+    });
+
+    // 工作流暂停事件（存在未决策的审批节点）
+    addEventListener('workflow.paused', (e) => {
+      const data = parseEventData<ApprovalPausedEventData>(e);
+      if (data) {
+        debugStore.handleApprovalPaused({
           type: 'workflow.paused',
           nodeId: data.nodeId,
+          awaitingNodeIds: data.awaitingNodeIds,
+          approvalContext: data.approvalContext,
           variables: data.variables,
         });
-        callbacks?.onBreakpointHit?.(data);
+        callbacks?.onApprovalPaused?.(data);
       }
+    });
+
+    // 恢复提交首帧：上一轮的挂起登记失效，面板回到执行中
+    addEventListener('workflow.resumed', (e) => {
+      const data = parseEventData<{ executionId?: string }>(e);
+      debugStore.handleSSEEvent({ type: 'workflow.resumed', ...data });
     });
 
     // 工作流完成事件
