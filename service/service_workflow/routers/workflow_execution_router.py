@@ -67,8 +67,9 @@ async def submit_execution(request: Request, body: WorkflowSubmitReq,
     """
     try:
         if request.headers.__contains__("X-Workflow-Token"):
-            await WorkflowExecutionService.check_api_key_scope(body.executionId,
-                                                               request.headers.get("X-Workflow-Token"))
+            await WorkflowExecutionService.check_api_key_scope(exec_id=body.executionId,
+                                                               workflow_id=body.workflowId,
+                                                               api_key=request.headers.get("X-Workflow-Token"))
 
         result = await WorkflowExecutionService.submit(
             body,
@@ -260,8 +261,9 @@ async def cancel_execution(request: Request, execution_id: str):
     """
     try:
         if request.headers.__contains__("X-Workflow-Token"):
-            await WorkflowExecutionService.check_api_key_scope(execution_id,
-                                                               request.headers.get("X-Workflow-Token"))
+            await WorkflowExecutionService.check_api_key_scope(exec_id=execution_id,
+                                                               workflow_id=None,
+                                                               api_key=request.headers.get("X-Workflow-Token"))
         ok = await WorkflowExecutionService.cancel(execution_id)
         if not ok:
             return ApiResponse.error(400, "执行不存在或已结束")

@@ -111,7 +111,7 @@ async def resolve_submit(req: WorkflowSubmitReq, *, load_graph: GraphLoader,
                               workflow_id=context.workflow_id, duplicated=True)
         return await _plan_continue(context, conclusions, load_graph, user_id)
     if not req.restart:
-        _reject(context.open_approvals, "存在未答复的审批，请先答复或传 restart 重开")
+        _reject(context.open_approvals, "存在未答复的审批，请先答复或传 restart 重新提交")
     return await _plan_retry(req, context, load_graph)
 
 

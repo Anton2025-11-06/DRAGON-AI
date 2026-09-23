@@ -41,7 +41,7 @@ from service.service_workflow.execution.submit_resolver import (
     SubmitPlan, SubmitRejected, resolve_child_submit, resolve_submit,
 )
 from service.service_workflow.models.workflow_entity import (
-    Workflow, WorkflowExecution, WorkflowNodeExecution,
+    Workflow, WorkflowExecution, WorkflowNodeExecution, WorkflowApiKey,
 )
 from service.service_workflow.schemas.workflow_schema import WorkflowSubmitReq
 from service.service_workflow.services.event_pubsub import (
@@ -250,6 +250,7 @@ class WorkflowExecutionService:
         写在转发**成功之后**：先写后转的话，转发失败会留下一个永远等不来的标记，
         消费方就要白等一轮才退回原口径。本级已不在 PAUSED 就不写。
         """
+
         def mark(pause: PauseState) -> bool:
             changed = False
             for token in approval_tokens:
@@ -742,7 +743,7 @@ class WorkflowExecutionService:
         return await ExecutionStateStore.mark_cancelled(execution_id)
 
     @staticmethod
-    async def check_api_key_scope(execution_id: str, api_key: str) -> int:
+    async def check_api_key_scope(exec_id: Optional[str], workflow_id: Optional[int], api_key: str):
         """API Key 模式下的执行控制鉴权:key 有效,且其绑定的工作流 == 该执行所属工作流。
 
         submit / cancel 是「拿到 executionId 就能推进别人家的流程」的高危口,
@@ -758,17 +759,23 @@ class WorkflowExecutionService:
         cfg = await WorkflowApiKeyService.verify((api_key or "").strip())
         if not cfg:
             raise ValueError("无效的 API Key")
-        async with mysql_client.get_session() as session:
-            row = await session.get(WorkflowExecution, execution_id)
-            if row is None:
-                raise ValueError("执行记录不存在")
-            workflow_id = row.workflow_id
-        if int(cfg.get("workflowId") or 0) != int(workflow_id):
-            raise ValueError("API Key 无权操作该工作流的执行")
-        return workflow_id
+        if exec_id is not None:
+            # 已有的执行实例的操作
+            async with mysql_client.get_session() as session:
+                row = await session.get(WorkflowExecution, exec_id)
+                if row is None:
+                    raise ValueError("执行记录不存在")
+                workflow_id = row.workflow_id
+            # 防越权
+            if int(cfg.get("workflowId") or 0) != int(workflow_id):
+                raise ValueError("API Key 无权操作该工作流的执行")
+        else:
+            # 新的执行
+            if workflow_id is not None:
+                if int(cfg.get("workflowId") or 0) != int(workflow_id):
+                    raise ValueError("API Key 无权操作该工作流的执行")
 
     # ==================== 调试:快照 ====================
-
     @staticmethod
     async def get_snapshot(execution_id: str) -> Optional[dict]:
         """读这一行的两段跨轮状态（roundRequest + pauseState），只给排障与详情看。
