@@ -94,4 +94,6 @@ service_workflow:
 
 
 arq_workflow:
-  
+  redis:
+    url: redis://10.88.128.15:26379/0
+    #password: Jzh@616294
