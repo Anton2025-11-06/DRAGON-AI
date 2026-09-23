@@ -1,0 +1,11 @@
+# 启动脚本必须在 Linux/容器里直接执行，CRLF 会让 bash 报
+# “/bin/bash^M: bad interpreter”，所以强制按 LF 检出。
+*.sh text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+docker-compose*.yml text eol=lf
+*.conf text eol=lf
+*.template text eol=lf
+# .dockerignore 里的模式带 CR 会静默失效，.env 里的值带 CR 会连错地址
+.dockerignore text eol=lf
+*.env.example text eol=lf

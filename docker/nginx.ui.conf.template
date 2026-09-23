@@ -1,0 +1,65 @@
+# 前端容器的 nginx 站点配置模板。占位符由 scripts/run_ui.sh 用 sed 替换：
+#   __LISTEN_PORT__   监听端口（环境变量 LISTEN_PORT）
+#   __GATEWAY_URL__   后端网关地址（环境变量 GATEWAY_URL）
+# 本文件被 include 进 nginx 的 http 段，所以开头的 map 是合法的。
+
+# WebSocket 升级握手：非 WS 请求时要把 Connection 置为 close，写死 "upgrade" 会打断普通 keepalive
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen __LISTEN_PORT__;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # 构建产物里有 .mjs，基础镜像的 mime.types 不一定认，不补上浏览器会当二进制拒绝执行
+    types {
+        application/javascript mjs;
+    }
+
+    # 单页应用：静态资源直出，路由交给前端（hash 模式，history 模式也靠这条兜底）
+    location / {
+        try_files $uri $uri/ /index.html;
+        # index.html 不能缓存，否则发版后浏览器还拿着旧的资源清单
+        add_header Cache-Control "no-store";
+    }
+
+    # 带内容 hash 的构建产物可以长期强缓存
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # 后端统一入口。前端只发 /api/**，这里整段透传给网关（保留 /api 前缀，
+    # 网关路由规范是 /api/{service_name}/{path}）
+    location /api/ {
+        proxy_pass __GATEWAY_URL__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # 工作流调试用 WebSocket / SSE 推事件：必须关缓冲，否则 nginx 会把事件攒到
+        # 响应结束才吐，前端看到的就是一坨而不是实时流
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        # 长任务（含等待审批挂起）不能被 nginx 先掐断
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # 工作流文件上传上限，和后端 MAX_DOC_SIZE(50MB) 留出余量
+        client_max_body_size 100m;
+    }
+
+    # vite 构建已产出 .gz（VITE_COMPRESS=gzip），有预压缩文件就直接发，省 CPU
+    gzip_static on;
+    gzip_vary on;
+}

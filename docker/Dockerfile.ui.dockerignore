@@ -1,0 +1,20 @@
+# docker/Dockerfile.ui 专用的忽略清单（BuildKit 会优先读 <dockerfile>.dockerignore）。
+# 前端镜像的上下文同样是仓库根目录，但只有三样东西进得来：
+#   ui-ai/    待构建的前端工程
+#   scripts/  run_ui.sh 启动脚本
+#   docker/   nginx.ui.conf.template 站点配置模板
+# 根目录那份 .dockerignore 把 ui-ai 整个排除了（后端镜像不需要它），所以这里必须另写一份。
+**
+
+!ui-ai
+!ui-ai/**
+!scripts
+!scripts/**
+!docker
+!docker/**
+
+# 本机装出来的依赖树进不了镜像，容器里由 pnpm install 重装
+ui-ai/node_modules
+ui-ai/**/node_modules
+.git
+.idea

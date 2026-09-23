@@ -1,0 +1,99 @@
+# 一键起「后端能用的四个服务 + arq worker + 前端」。
+#
+# MySQL / Redis / Nacos 不在这里：中台的业务配置全部存在 Nacos（data_id = 服务名，
+# 见 sql/init_nacos.yaml），库里还得先执行 sql/v2_init.sql 建表灌种子。
+# 所以起之前提是这三样已经就绪，NACOS_ADDR 指向它。
+#
+#   cd docker
+#   NACOS_ADDR=10.0.0.9:8848 docker compose up -d --build
+#
+# 常用覆盖：WORKERS（每个服务的 gunicorn worker 数）、ARQ_WORKERS、SPLIT_NUMBER、TAG、UI_PORT
+
+name: dragon-ai
+
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: dragon-ai-backend:${TAG:-latest}
+  # init=true：信号由 tini 代收再转给脚本，否则 docker stop 时 worker 会被直接打死
+  init: true
+  restart: unless-stopped
+  # 日志一律走 stdout/stderr，由 json-file 限行，容器内不落盘
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+x-backend-env: &backend-env
+  NACOS_ADDR: ${NACOS_ADDR:?要先有 Nacos，业务配置全在里面}
+  NACOS_NAME: ${NACOS_NAME:-nacos}
+  NACOS_PASSWD: ${NACOS_PASSWD:-}
+  NACOS_NS_ID: ${NACOS_NS_ID:-}
+  WORKERS: ${WORKERS:-4}
+
+services:
+  gateway:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: service_gateway
+    ports:
+      - "${GATEWAY_PORT:-18000}:18000"
+
+  login:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: service_login
+    depends_on:
+      - gateway
+
+  system:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: service_system
+    depends_on:
+      - gateway
+
+  workflow:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: service_workflow
+    depends_on:
+      - gateway
+
+  # 工作流的异步执行进程。多扩几个实例时给每个不同的 SPLIT_NUMBER（消费不同切片队列），
+  # 并把监控页里的「切片数」改成同样的份数，生产端才会把任务轮询到这些队列上。
+  arq_workflow:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: arq_workflow
+      ARQ_WORKERS: ${ARQ_WORKERS:-4}
+      SPLIT_NUMBER: ${SPLIT_NUMBER:-1}
+
+  ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ui
+    image: dragon-ai-ui:${TAG:-latest}
+    init: true
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    environment:
+      # 走 compose 网络，用服务名访问网关；nginx 只在启动时解析一次，
+      # 所以 gateway 必须先起来（depends_on 保证顺序）
+      GATEWAY_URL: http://gateway:18000
+      LISTEN_PORT: "80"
+    ports:
+      - "${UI_PORT:-8080}:80"
+    depends_on:
+      - gateway

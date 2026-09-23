@@ -1,0 +1,36 @@
+# 后端镜像的构建上下文（仓库根目录）。前端有自己的镜像，见 docker/Dockerfile.ui。
+# 这里只保证：进镜像的是「能跑的 Python 代码 + 启动脚本 + SQL」，不带本机状态与前端源码。
+
+# 版本库与 IDE
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+
+# 本机虚拟环境与缓存
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# 前端单独出镜像，后端镜像里不需要（node_modules 更是几个 G）
+ui-ai
+
+# 本机运行产物（loguru 与 nacos sdk 会在每个服务的运行目录下各写一份，所以要递归排）
+**/logs
+**/nacos_log
+**/*.log
+data
+tmp
+site
+test
+service/service_workflow/sandbox_root
+docker/*.tar
+
+# 文档图片不参与运行（README 里的截图从仓库看即可，镜像里不需要）
+docs

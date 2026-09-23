@@ -1,6 +1,8 @@
 # FastAPI Web主框架
 fastapi>=0.104.1
 uvicorn[standard]>=0.24.0
+# 生产进程管理：gunicorn 拉多 worker，worker 类用 uvicorn.workers.UvicornWorker（见 scripts/run_service.sh）
+gunicorn>=21.2.0
 
 # 异步HTTP客户端（服务间HTTP调用）
 httpx>=0.25.2
