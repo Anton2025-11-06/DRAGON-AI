@@ -155,6 +155,33 @@ export function formatDuration(ms?: number): string {
 }
 
 /**
+ * 工具来源文案（与后端 ai_nodes 的 TOOL_KIND_* 逐字对齐）。
+ * 子工作流不写成「工作流」：在 LLM 节点的调用过程里它是被当工具调的那一条，
+ * 写成同名容易让人误以为是图里另一个独立节点。
+ */
+export function toolKindText(kind?: string): string {
+  if (kind === 'MCP') return 'MCP';
+  if (kind === 'WORKFLOW') return '子工作流';
+  if (kind === 'TOOL') return '工具';
+  return kind || '未知来源';
+}
+
+/** 一次工具调用的状态标签：没收到结果帧就是「调用中」，不能默认成成功 */
+export function toolCallState(
+  call: { error?: null | string; result?: string },
+  resumed?: boolean,
+): { color: string; text: string } {
+  if (call.error) return { color: 'red', text: '失败' };
+  if (call.result === undefined) {
+    return { color: 'processing', text: '调用中' };
+  }
+  return {
+    color: resumed ? 'gold' : 'green',
+    text: resumed ? '审批后补记' : '已返回',
+  };
+}
+
+/**
  * 任意值的可复制文本：字符串原样给（正文就是要抄走的内容），
  * 其余走 JSON 序列化，保证复制结果和屏幕上看到的是同一份数据。
  */

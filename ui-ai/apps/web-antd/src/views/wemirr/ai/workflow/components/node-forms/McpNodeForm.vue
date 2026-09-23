@@ -99,10 +99,42 @@ function genParamId(): string {
   return `param_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// 监听配置变化（不回写 inputs，避免用户在面板里的编辑被自身提交结果冲掉）
+/**
+ * 本地刚 emit 出去的配置快照（nodeId + 配置内容），与参数提取器/代码节点同一套守卫口径。
+ * 父层（PropertyPanel / selectedNode.data）会把自己刚收到的配置原样回传，不拦住的话
+ * 下方 watch 会重建 formData.inputs，用户正在编的那一行被新对象替掉（光标丢失、编辑态被
+ * 自身提交结果冲掉），与「不回写 inputs」的本意相左。
+ */
+let emittedSignature = '';
+
+/** 配置内容签名（含参数行 id，既识别自己的回传，也不吞单字段的外部变更） */
+function signatureOf(config: McpNodeConfig | undefined): string {
+  return JSON.stringify([
+    config?.mcpServerId ?? null,
+    config?.toolName || '',
+    config?.outputVariable || '',
+    config?.timeout ?? null,
+    (config?.inputs || []).map((p) => [
+      p.id || '',
+      p.name || '',
+      p.type || 'string',
+      !!p.required,
+      p.sourceType || 'REFERENCE',
+      p.sourceVariable ?? null,
+      p.value ?? null,
+    ]),
+  ]);
+}
+
+// 监听配置变化（自己刚提交的回声不回写 inputs，避免用户在面板里的编辑被自身提交结果冲掉）
 watch(
   () => props.config,
   (config) => {
+    if (`${props.nodeId}|${signatureOf(config)}` === emittedSignature) {
+      // 自己刚 emit 的内容：本地即真源，保留编辑态与行对象身份
+      return;
+    }
+    emittedSignature = '';
     formData.mcpServerId = config.mcpServerId;
     formData.toolName = config.toolName;
     formData.inputs = (config.inputs || []).map((p) => ({
@@ -197,6 +229,7 @@ function handleChange() {
     timeout: formData.timeout,
     toolName: formData.toolName,
   };
+  emittedSignature = `${props.nodeId}|${signatureOf(config)}`;
   emit('update:config', config);
 }
 

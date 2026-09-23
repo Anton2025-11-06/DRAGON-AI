@@ -24,6 +24,7 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   FileTextOutlined,
+  MergeCellsOutlined,
   PlayCircleOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
@@ -31,13 +32,10 @@ import {
   SyncOutlined,
   ToolOutlined,
   UnorderedListOutlined,
-  UserOutlined,
 } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
-// 节点配置表单组件 - 智能体节点
-import AgentNodeForm from './node-forms/AgentNodeForm.vue';
 // 节点配置表单组件 - 控制流节点（人工审批）
 import ApprovalNodeForm from './node-forms/ApprovalNodeForm.vue';
 // 节点配置表单组件 - 能力节点
@@ -66,6 +64,8 @@ import TemplateNodeForm from './node-forms/TemplateNodeForm.vue';
 import ToolNodeForm from './node-forms/ToolNodeForm.vue';
 import VariableAggregatorNodeForm from './node-forms/VariableAggregatorNodeForm.vue';
 import VariableNodeForm from './node-forms/VariableNodeForm.vue';
+// 节点配置表单组件 - 外部系统节点（嵌套调用子工作流）
+import WorkflowNodeForm from './node-forms/WorkflowNodeForm.vue';
 
 // Props
 interface Props {
@@ -124,7 +124,6 @@ const iconComponents: Record<NodeType, Component> = {
   KNOWLEDGE_RETRIEVAL: BookOutlined,
   QUESTION_CLASSIFIER: BranchesOutlined,
   PARAMETER_EXTRACTOR: ApiOutlined,
-  AGENT: UserOutlined,
   // 控制流节点
   APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
@@ -142,6 +141,7 @@ const iconComponents: Record<NodeType, Component> = {
   HTTP_REQUEST: ApiOutlined,
   TOOL: ToolOutlined,
   MCP_TOOL: CloudServerOutlined,
+  WORKFLOW: MergeCellsOutlined,
 };
 
 /**
@@ -158,7 +158,6 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   KNOWLEDGE_RETRIEVAL: KnowledgeNodeForm,
   QUESTION_CLASSIFIER: QuestionClassifierNodeForm,
   PARAMETER_EXTRACTOR: ParameterExtractorNodeForm,
-  AGENT: AgentNodeForm,
   // 控制流节点
   APPROVAL: ApprovalNodeForm,
   IF_ELSE: IfElseNodeForm,
@@ -176,6 +175,7 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   HTTP_REQUEST: HttpNodeForm,
   TOOL: ToolNodeForm,
   MCP_TOOL: McpNodeForm,
+  WORKFLOW: WorkflowNodeForm,
 };
 
 // 监听选中节点变化

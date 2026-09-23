@@ -85,20 +85,20 @@ async def proxy(service_name: str, path: str, request: Request):
         headers["X-User-Token"] = request.scope["token"]
     body = await request.body()
 
-    # ===== 工作流 API Key 模式：X-Workflow-Token 鉴权 + QPS 限流（需求 4.1，鉴权限流在网关处执行）=====
+    # ===== 工作流 API Key 模式：X-Workflow-Token 的鉴权与 QPS 限流都在网关做（下游读不到 key 配置）=====
     if service_name == "service_workflow" and request.headers.get("X-Workflow-Token"):
         return await workflow_api_proxy(request, path, url, headers, body)
 
     return await forward_downstream(request, url, headers, body)
 
 
-# ==================== WebSocket 转发（execute-sync 预览运行等） ====================
+# ==================== WebSocket 转发（submit 预览运行等） ====================
 @router.websocket("/api/{service_name}/{path:path}")
 async def ws_proxy(websocket: WebSocket, service_name: str, path: str):
     """WebSocket 透传代理（受理客户端 → 解析登录态 → 注入 login_user → 连下游转发）。
 
-    协议假设与 execute-sync 一致：客户端连上后先发一帧 JSON 入参（内嵌 Authorization），
-    随后服务端事件流经同一连接回推。中间件（TokenCheck/OperateLog）对 WS 不生效，
+    协议：客户端连上后先发一帧 JSON 入参（内嵌 Authorization），随后服务端事件流
+    经同一连接回推。中间件（TokenCheck/OperateLog）对 WS 不生效，
     故鉴权在此显式完成，登录态随首帧下发给下游、由下游写回 scope 供取 user_id。
     """
     target = None
@@ -181,7 +181,7 @@ async def ws_proxy(websocket: WebSocket, service_name: str, path: str):
             async def absorb_client() -> bool:
                 """浏览器 → 网关：只消化应用层心跳并就地回 pong。
 
-                下游 execute-sync 只读一次入参、执行期不再读客户端，故不能把 ping
+                下游 WS submit 只读一次入参、执行期不再读客户端，故不能把 ping
                 转下去（会堆积/无人消费）。返回 True 表示浏览器已断开（用户停止/关页面），
                 属正常收尾，不得按链路异常告警。"""
                 try:
@@ -244,83 +244,112 @@ async def ws_proxy(websocket: WebSocket, service_name: str, path: str):
 
 async def workflow_api_proxy(request: Request, path: str, url: str,
                              headers: dict, body: bytes):
-    """
-    API Key 模式代理：
-    1. 只接受异步执行接口 /workflow-executions/workflows/{id}/execute-async、订阅接口
-       （GET .../subscribe）、以及执行控制接口（POST .../{executionId}/submit|cancel），
-       其余路径返回 403
-    2. 从 Redis 读取 X-Workflow-Token 对应配置（workflowId/rateLimit/expireTime/status）鉴权
-    3. 按 Key 配置 QPS 限流（0=不限）
-    4. 将请求体包装为符合执行接口的格式 {"inputs": ...}（宽松兼容直接传参对象）；
-       执行控制类接口不包装（submit 的 body 自带 mode/inputs/approval）
-    5. 透传 X-Workflow-Token 头，下游据此标记 trigger=API（只执行已发布版本）
+    """第三方拿 API Key 调用工作流时的网关入口：四类请求放行，其余 403。
 
-    执行控制（再提交/取消）的归属校验不在这里做：网关拿不到「这条 executionId 属于
-    哪个工作流」（没有 DB），只放行路径形态，key ↔ 执行的归属关系由下游 service 校验。
+    - POST workflow-executions/submit          唯一提交入口（规则见 workflow_submit_proxy）
+    - GET  workflow-executions/{eid}           单条详情（approvalToken 的唯一出处）
+    - GET  workflow-executions/{eid}/subscribe  SSE 事件流
+    - POST workflow-executions/{eid}/cancel    取消执行
+
+    读口只开到单条详情：事件帧不承载审批内容，不给详情就没法答审批；分页/列表
+    能一次拉到别人的执行，不在 key 的能力范围内。
+
+    key 的校验分两段能做：新建执行时目标工作流由 key 决定，网关就能判；拿着
+    executionId 的动作要先查库才知道这条执行属于谁，网关没有 DB，放行给下游校。
     """
     # 订阅（SSE 长连接）直接放行：executionId 是 UUID 熵足够，TokenCheckMiddleware 本来就
-    # 把 /subscribe 列进了后缀白名单（不校登录态）。若在这里按“只认 execute-async”判掉，
+    # 把 /subscribe 列进了后缀白名单（不校登录态）。若在这里按“只认 submit”判掉，
     # 第三方带着 X-Workflow-Token 订阅反而会吃 403。
     if request.method == "GET" and path.endswith("/subscribe"):
         return await forward_downstream(request, url, headers, body)
 
-    # 再提交（审批恢复/重新执行）与取消：第三方审批方的推进入口（body 原样透传，不包 inputs）
-    if request.method == "POST" and re.match(
-            r"^workflow-executions/[0-9a-fA-F-]{36}/(submit|cancel)$", path):
+    if request.method == "GET" and re.match(
+            r"^workflow-executions/[0-9a-fA-F-]{36}$", path):
         return await forward_downstream(request, url, headers, body)
 
-    match = re.match(r"^workflow-executions/workflows/(\d+)/execute-async$", path)
-    if not match:
-        return JSONResponse(status_code=403,
-                            content=ApiResponse.error(
-                                403, "API Key 仅支持【执行/订阅/再提交/取消】工作流的操作"))
-    workflow_id = int(match.group(1))
+    if request.method == "POST" and re.match(
+            r"^workflow-executions/[0-9a-fA-F-]{36}/cancel$", path):
+        return await forward_downstream(request, url, headers, body)
 
+    if request.method == "POST" and path == "workflow-executions/submit":
+        return await workflow_submit_proxy(request, url, headers, body)
+
+    return JSONResponse(status_code=403,
+                        content=ApiResponse.error(
+                            403, "API Key 仅支持【提交执行/查看现状/订阅事件/取消执行】工作流的操作"))
+
+
+async def _workflow_api_key(request: Request) -> tuple:
+    """取 X-Workflow-Token 对应的 key 配置，返回 (cfg, token, 拒绝响应)。
+
+    有效性、启用状态、过期时间三道一起过；deny 非空时另两项无意义，直接把它回给调用方。
+    """
     token = (request.headers.get("X-Workflow-Token") or "").strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
-
     raw = await client.hget(PREFIX_WORKFLOW_API_KEY, token)
     if not raw:
-        return JSONResponse(status_code=401,
-                            content=ApiResponse.error(401, "无效的 API Key"))
+        return None, None, JSONResponse(status_code=401,
+                                        content=ApiResponse.error(401, "无效的 API Key"))
     try:
         cfg = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        return JSONResponse(status_code=401,
-                            content=ApiResponse.error(401, "无效的 API Key"))
+        return None, None, JSONResponse(status_code=401,
+                                        content=ApiResponse.error(401, "无效的 API Key"))
     if cfg.get("status") != "ACTIVE":
-        return JSONResponse(status_code=403,
-                            content=ApiResponse.error(403, "API Key 已停用"))
-    if int(cfg.get("workflowId") or 0) != workflow_id:
-        return JSONResponse(status_code=403,
-                            content=ApiResponse.error(403, "API Key 无权调用该工作流"))
+        return None, None, JSONResponse(status_code=403,
+                                        content=ApiResponse.error(403, "API Key 已停用"))
     expire_time = cfg.get("expireTime")
     if expire_time:
         try:
             if datetime.now() > datetime.strptime(expire_time, "%Y-%m-%d %H:%M:%S"):
-                return JSONResponse(status_code=403,
-                                    content=ApiResponse.error(403, "API Key 已过期"))
+                return None, None, JSONResponse(
+                    status_code=403,
+                    content=ApiResponse.error(403, "API Key 已过期"))
         except ValueError:
-            return JSONResponse(status_code=401,
-                                content=ApiResponse.error(401, "无效的 API Key"))
+            return None, None, JSONResponse(
+                status_code=401, content=ApiResponse.error(401, "无效的 API Key"))
+    return cfg, token, None
 
+
+async def workflow_submit_proxy(request: Request, url: str, headers: dict,
+                                body: bytes):
+    """submit 的 key 侧规则：已有会话的动作原样透传，新建执行按 key 认工作流。
+
+    新建时调用方可以只发业务参数（{"query":"…"}），也可以发完整契约体；两种都会被
+    整成 {"workflowId": <key 绑定的>, "values": <业务参数>}——工作流 id 不是调用方选的，
+    它传了就必与 key 绑定的一致。只跑已发布版本由下游按 trigger=API 把关。
+    """
+    try:
+        payload = json.loads(body) if body else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if payload.get("executionId"):
+        # 答审批 / 续跑 / 重开：包体就是契约体，key ↔ 执行的归属关系下游校
+        return await forward_downstream(request, url, headers, body)
+
+    cfg, token, denied = await _workflow_api_key(request)
+    if denied is not None:
+        return denied
+    workflow_id = int(cfg.get("workflowId") or 0)
+    if payload.get("workflowId") and int(payload["workflowId"]) != workflow_id:
+        return JSONResponse(status_code=403,
+                            content=ApiResponse.error(403, "API Key 无权调用该工作流"))
     rate_limit = int(cfg.get("rateLimit") or 0)
     if rate_limit > 0 and not await RateLimiter.check_workflow_api_qps(token, rate_limit):
         return JSONResponse(status_code=429,
                             content=ApiResponse.error(429, "请求频率超过 API Key 限制，请稍后再试"))
 
-    # 包装 body 为执行接口格式；非 JSON 或已含 inputs 的原样透传
-    if body:
-        try:
-            parsed = json.loads(body)
-            if isinstance(parsed, dict) and "inputs" not in parsed:
-                body = json.dumps({"inputs": parsed}, ensure_ascii=False).encode()
-        except (json.JSONDecodeError, TypeError):
-            pass
-    else:
-        body = b'{"inputs": {}}'
-    return await forward_downstream(request, url, headers, body)
+    values = payload.get("values")
+    if values is None:
+        values = {k: v for k, v in payload.items() if k != "workflowId"}
+    outbound = {"workflowId": workflow_id, "values": values or {}}
+    return await forward_downstream(
+        request, url, headers,
+        json.dumps(outbound, ensure_ascii=False).encode())
 
 
 # ==================== 通用转发 ====================

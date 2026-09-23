@@ -65,7 +65,7 @@ class WorkflowExecution(Base):
     trigger_type: Mapped[str] = mapped_column(String(16), nullable=False, default="DEBUG")
     inputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     outputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    variables: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="执行快照（仅暂停/终态写入，排障与详情用）")
+    variables: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="两段式跨轮状态：roundRequest + pauseState")
     node_states: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="节点状态聚合（跨轮恢复的权威源）")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -77,12 +77,19 @@ class WorkflowExecution(Base):
     current_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # 本轮（最近一次）提交模式：RETRY 全部重跑 / CONTINUE 审批后恢复。空=首次执行
     submit_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="提交模式 RETRY/CONTINUE")
-    # 正在等待审批的节点 id（状态 PAUSED 时非空），提交接口据此定位审批上下文
+    # 停在审批等待时的那个节点 id（多份待办时记第一个）：列表页展示用，欠谁审批以 variables.pauseState 为准
     awaiting_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="等待审批节点ID")
+    # 挂起代次：每次开跑（含唤醒）+1，事件帧带它，消费方据此丢过期帧
+    pause_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1",
+        comment="挂起代次：第几次开跑（含唤醒），事件过期判定用")
     # 图拓扑指纹（节点 id + 边集合）：再提交时不一致即拒绝，防止按旧状态续跑改过的画布
     graph_hash: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="图拓扑指纹")
-    # 已废弃：断点功能整体下线（由「审批节点 + 再提交」承接），列保留不再读写
-    breakpoints: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # 【工作流】节点发起的子执行：子行指回父行（终态回调按它找到等待中的父执行）
+    parent_exec_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True,
+                                                          comment="父执行ID（工作流节点发起的子执行）")
+    parent_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True,
+                                                          comment="父执行中发起本子执行的节点ID")
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 

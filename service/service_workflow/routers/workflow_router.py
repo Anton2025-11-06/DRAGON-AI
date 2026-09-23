@@ -3,7 +3,7 @@
 
 与前端 ui-ai/.../api/ai-workflow/index.ts 契约一一对应；
 网关 SERVICE_ALIASES 将 /api/workflow/* 剥前缀后转发到本服务 /*。
-注意路由声明顺序：固定路径（/page、/node-definitions、/from-template/{id}）
+注意路由声明顺序：固定路径（/page、/node-definitions、/executable-list、/from-template/{id}）
 必须先于 /{workflow_id}，否则会被动态段吞掉。
 """
 from __future__ import annotations
@@ -36,6 +36,16 @@ async def page_workflows(request: Request, page: int = 1, page_size: int = 10,
 @router.get("/node-definitions", summary="获取节点类型定义（画布组件面板数据源）")
 async def node_definitions(request: Request):
     return ApiResponse.success(data=WorkflowService.node_definitions())
+
+
+@router.get("/executable-list", summary="可调用工作流下拉（【工作流】节点数据源）")
+@has_permission("workflow:workflow:list")
+async def executable_workflows(request: Request):
+    """已发布且配有可用 API Key 的工作流（附可用 key 清单）。
+
+    版本下拉不单独开口：复用 GET /workflows/{id}/versions。
+    """
+    return ApiResponse.success(data=await WorkflowService.list_executable())
 
 
 @router.post("", summary="创建工作流")

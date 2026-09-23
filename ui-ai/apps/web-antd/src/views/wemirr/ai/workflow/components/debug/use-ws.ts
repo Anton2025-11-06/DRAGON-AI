@@ -1,20 +1,16 @@
 /**
- * 工作流「预览运行 / 预览再提交」WebSocket 事件接收 Composable
+ * 工作流执行的 WS 提交通道：连上 /workflow-executions/submit，事件从同一条连接回推
  *
- * 取代原 execute-async + SSE(订阅 Redis) 链路：连接建立后即向 execute-sync 端点
- * 发送 WorkflowExecutionReq 入参触发执行（或向 submit-sync 发 WorkflowSubmitReq 带
- * 审批结论继续跑），执行事件（node.started / node.delta / workflow.completed 等）
- * 由服务端经同一 socket 实时回推。
+ * 发出首帧 WorkflowSubmitReq 即触发执行：新建与答复审批共用同一个地址与同一套帧，
+ * 差别只在首帧给了哪几个键。
+ * 执行事件（node.started / node.delta / workflow.completed 等）由服务端经同一连接实时回推。
  *
  * 事件对象结构与 SSE data 完全一致（{type, executionId, timestamp, ...payload}），
  * 因此复用 debugStore.handleSSEEvent 做统一分发，回调签名沿用 use-sse。
  */
 import type { SSEConnectionState, SSEEventCallbacks } from './use-sse';
 
-import type {
-  WorkflowExecutionReq,
-  WorkflowSubmitReq,
-} from '#/api/ai-workflow/types';
+import type { WorkflowSubmitReq } from '#/api/ai-workflow/types';
 
 import { getCurrentInstance, onBeforeUnmount, ref, shallowRef } from 'vue';
 
@@ -22,10 +18,7 @@ import { useAccessStore } from '@vben/stores';
 
 import { message } from 'ant-design-vue';
 
-import {
-  getWorkflowExecuteSyncWsUrl,
-  getWorkflowSubmitSyncWsUrl,
-} from '#/api/ai-workflow';
+import { getWorkflowSubmitWsUrl } from '#/api/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
 /** 终态事件：收到后主动关闭连接 */
@@ -48,11 +41,17 @@ export function useWorkflowWs(
   /** 连接状态（与 use-sse 共用同一状态枚举，便于 UI 复用） */
   const connectionState = ref<SSEConnectionState>('disconnected');
 
-  /** 待连接建立后发送的执行入参 */
+  /** 待连接建立后发送的提交入参 */
   let pendingBody = '';
 
   /** 心跳定时器：应用层 ping，防反向代理空闲回收（浏览器无法发协议层 ping） */
   let heartbeatTimer: null | ReturnType<typeof setInterval> = null;
+
+  /**
+   * 本次 close 是否由前端主动发起（停止按钮 / 收尾帧 / 新连接顶替）。
+   * 服务端掉线才需要走「待审批收尾」兜底，否则会把用户刚点的停止盖回暂停。
+   */
+  let closedByClient = false;
 
   function setState(state: SSEConnectionState) {
     connectionState.value = state;
@@ -79,24 +78,11 @@ export function useWorkflowWs(
   }
 
   /**
-   * 建立连接并触发执行
-   * @param workflowId 工作流ID
-   * @param body 执行入参（inputs）
+   * 建立连接并提交这一次执行
+   * @param body 提交入参：不带 executionId 即新建，带 decisions 即答复审批
    */
-  function connect(workflowId: number | string, body: WorkflowExecutionReq) {
-    open(getWorkflowExecuteSyncWsUrl(workflowId, baseUrl), {
-      Authorization: buildAuth(),
-      ...body,
-    });
-  }
-
-  /**
-   * 建立连接并再提交（预览页审批入口）
-   * @param executionId 执行ID（与首跑同一 id，会话语义连续）
-   * @param body 提交入参（mode / inputs / approval）
-   */
-  function connectSubmit(executionId: string, body: WorkflowSubmitReq) {
-    open(getWorkflowSubmitSyncWsUrl(executionId, baseUrl), {
+  function connect(body: WorkflowSubmitReq) {
+    open(getWorkflowSubmitWsUrl(baseUrl), {
       Authorization: buildAuth(),
       ...body,
     });
@@ -107,9 +93,10 @@ export function useWorkflowWs(
     return accessStore.accessToken ? `Bearer ${accessStore.accessToken}` : '';
   }
 
-  /** 拨号并发送首帧（execute-sync / submit-sync 共用） */
+  /** 拨号并发送首帧 */
   function open(url: string, body: Record<string, any>) {
     disconnect();
+    closedByClient = false;
     setState('connecting');
     // 网关读取 Authorization 解析登录态后注入 login_user 再转发下游
     pendingBody = JSON.stringify(body);
@@ -136,6 +123,9 @@ export function useWorkflowWs(
     ws.addEventListener('close', () => {
       socket.value = null;
       if (connectionState.value !== 'error') setState('disconnected');
+      // 兜底：审批已挂起但 workflow.paused / 终态帧没送达（网关掐断、后端直接回帧）时，
+      // 本地仍停在「执行中」会让面板拿不到提交入口、按钮始终转圈
+      if (!closedByClient) void debugStore.settleAwaitingRun();
     });
   }
 
@@ -153,12 +143,14 @@ export function useWorkflowWs(
     // 心跳 pong：网关就地回帧，与业务事件无关，直接忽略（不喂给 debugStore）
     if (data.type === 'ping' || data.type === 'pong') return;
 
-    // 后端 execute-sync 收尾帧：{code, message}（无 type 字段）。
+    // 后端 submit 收尾帧：{code, message, data}（无 type 字段）。
     // 2xx 视为正常结束（如暂停后 run() 返回触发的收尾），仅断开不覆盖已有结果；
-    // 其余（如异常兜底 500）按执行失败处理。
+    // 其余（校验没过 400 / 异常兜底 500）按执行失败处理。
     if (!data.type && (data.code !== undefined || data.message)) {
       const code = Number(data.code ?? 200);
       if (code >= 200 && code < 300) {
+        // 本轮跑完（包括因审批暂停而结束）：若 workflow.paused 未送达，在此收敛状态
+        void debugStore.settleAwaitingRun();
         disconnect();
       } else {
         const err = data.message || '执行失败';
@@ -211,6 +203,14 @@ export function useWorkflowWs(
         callbacks?.onNodeTimeout?.(data);
         break;
       }
+      case 'node.tool_call': {
+        callbacks?.onToolCall?.(data);
+        break;
+      }
+      case 'node.tool_result': {
+        callbacks?.onToolResult?.(data);
+        break;
+      }
       case 'workflow.cancelled': {
         callbacks?.onExecutionCancelled?.(data);
         break;
@@ -232,6 +232,7 @@ export function useWorkflowWs(
 
   /** 关闭连接 */
   function disconnect() {
+    closedByClient = true;
     stopHeartbeat();
     if (socket.value) {
       try {
@@ -251,7 +252,6 @@ export function useWorkflowWs(
   return {
     connectionState,
     connect,
-    connectSubmit,
     disconnect,
   };
 }

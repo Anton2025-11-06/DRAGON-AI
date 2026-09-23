@@ -34,7 +34,8 @@ def _field(name: str, label: str, component: str, value_type: str,
 
 def _def(node_type, display, desc, category, icon, color, *, start=False,
          terminal=False, inputs=None, outputs=None, form_component="",
-         required_fields=None, output_variables=None, fields=None, default_config=None) -> dict:
+         required_fields=None, output_variables=None, fields=None, default_config=None,
+         disabled=False) -> dict:
     return {
         "type": node_type,
         "displayName": display,
@@ -44,6 +45,9 @@ def _def(node_type, display, desc, category, icon, color, *, start=False,
         "color": color,
         "start": start,
         "terminal": terminal,
+        # 节点面板置灰：平台能力尚未实现时不给用户拖上画布（执行器与老图保留，
+        # 只在面板侧禁用），否则用户选到一个后端跑不通的节点
+        "disabled": bool(disabled),
         "inputs": inputs or [_port("input", "输入", "input")],
         "outputs": outputs or [_port("output", "输出", "output")],
         "configSchema": {
@@ -97,7 +101,7 @@ def build_node_definitions() -> list[dict]:
         form_component="LlmNodeForm",
         required_fields=["modelId"],
         output_variables=["output", "text", "reasoning", "usage", "memoryWarning",
-                          "vectors", "scores", "urls", "url"],
+                          "toolCalls", "vectors", "scores", "urls", "url"],
         fields=[
             _field("modelId", "模型", "ModelSelect", "number", True, None, "", "模型广场中启用的模型（能力类型决定入参形态）"),
             _field("systemPrompt", "系统提示词", "Textarea", "string", False, ""),
@@ -124,6 +128,13 @@ def build_node_definitions() -> list[dict]:
             _field("thinking", "深度思考", "Switch", "boolean", False, None,
                    "", "仅文生文/图片理解/视频理解且模型管理开启 supports_thinking 时生效"),
             _field("visionEnabled", "图像理解(对话)", "Switch", "boolean", False, False),
+            # 工具插入（需求 6/7）：只记「挂哪个工具/连接/工作流」，参数一律不在画布上配——
+            # 执行时引擎现读工具参数定义 / MCP tools/list / 子工作流开始节点入参，
+            # 封装成 function-call schema 交给模型自己决定调不调、传什么。
+            _field("tools", "工具", "LlmToolList", "array", False, [],
+                   "仅文生文且模型登记了 supports_function_call 时生效：插入 MCP 连接 / 工具 / 工作流"),
+            _field("emitToolResult", "输出工具结果", "Switch", "boolean", False, False,
+                   "勾选后把工具调用结果作为内容一并流给客户端；不勾只记节点输出与调试事件"),
             _field("structuredOutput", "结构化输出", "StructuredOutputForm", "object", False,
                    {"enabled": False}),
             # 记忆（需求 1）：历史存在 node_states[nid].llmMessages，跨轮（同一 execution_id）生效。
@@ -184,17 +195,6 @@ def build_node_definitions() -> list[dict]:
         # 不再提供 inferenceMode 选项：模型未登记的 function-call 通道无法保证可用
         default_config={"parameters": []},
     ))
-    defs.append(_def(
-        "AGENT", "智能体", "调用平台已配置的智能体完成复杂任务", "ai", "UserSwitchOutlined", "#eb2f96",
-        form_component="AgentNodeForm",
-        required_fields=["agentId"],
-        output_variables=["output"],
-        fields=[
-            _field("agentId", "智能体", "AgentSelect", "number", True),
-            _field("outputVariable", "输出变量名", "Input", "string", False, "output"),
-        ],
-    ))
-
     # ---------- 控制流 ----------
     defs.append(_def(
         "IF_ELSE", "条件分支", "按条件路由（IF/ELIF/ELSE 多分支，AND/OR 组合）", "control", "ForkOutlined", "#fa8c16",
@@ -284,9 +284,10 @@ def build_node_definitions() -> list[dict]:
         default_config={"replyType": "TEXT", "text": "", "variableRef": "",
                         "outputVariable": "output"},
     ))
-    # 人工审批：在节点边界暂停整条流，结论由「指定 executionId 再提交」接口带回
+    # 人工审批：在节点边界暂停等结论，只收集审批结论、不控制工作流流转
     defs.append(_def(
-        "APPROVAL", "审批", "暂停等待人工审批：同意则继续（可编辑上游数据），不同意则取消下游", "control",
+        "APPROVAL", "审批", "暂停等待人工审批：同意与不同意都继续执行下游，"
+        "下游拿输出的 review/reviewOpinion/reviewBy 自行做分支", "control",
         "SafetyCertificateOutlined", "#13c2c2",
         form_component="ApprovalNodeForm",
         required_fields=["pauseScope"],
@@ -295,15 +296,15 @@ def build_node_definitions() -> list[dict]:
             _field("approvers", "审批人", "ApproverList", "array", False, [],
                    "允许审批的标识集合（数字或字符串，命中其一即可）；留空=任何持有 api-key 且知道执行 id 者皆可审"),
             _field("pauseScope", "暂停范围", "Select", "string", False, "DOWNSTREAM",
-                   "ALL：整条工作流一起停（在跑分支会被取消，恢复后重跑）；DOWNSTREAM：仅本节点及下游等待",
+                   "ALL：整条工作流一起停（在跑分支会被取消，恢复后重跑）；"
+                   "DOWNSTREAM：仅本节点及下游等待",
                    options=[("DOWNSTREAM", "本节点及下游"), ("ALL", "整条工作流")]),
-            _field("rejectReply", "拒绝回复文案", "Textarea", "string", False, "",
-                   "不同意时作为工作流回复输出兜底（下游 END/回复节点被取消时使用）"),
-            _field("timeoutHours", "审批时限(小时)", "InputNumber", "number", False, 0,
-                   "0=不限；超时自动裁决二期实现"),
+            _field("passThroughInputs", "选择输出参数", "PassThroughSelect", "array", False, [],
+                   "审批放行给下游的输入参数（元素为 {nodeId,varName,path,name}：path 为子路径、"
+                   "name 为下游引用的键名）：留空=全部上游输出透传，选了则只透传选中的几项；"
+                   "审批结论 review/reviewOpinion/reviewBy 始终输出"),
         ],
-        default_config={"approvers": [], "pauseScope": "DOWNSTREAM", "rejectReply": "",
-                        "timeoutHours": 0},
+        default_config={"approvers": [], "pauseScope": "DOWNSTREAM"},
     ))
 
     # ---------- 数据 ----------
@@ -361,8 +362,11 @@ def build_node_definitions() -> list[dict]:
         ],
     ))
     defs.append(_def(
-        "KNOWLEDGE_RETRIEVAL", "知识检索", "从知识库检索相关内容（支持混合检索/重排）", "data", "DatabaseOutlined", "#389e0d",
+        "KNOWLEDGE_RETRIEVAL", "知识检索",
+        "从知识库检索相关内容（知识库流水线尚未实现，暂不可选）", "data",
+        "DatabaseOutlined", "#389e0d",
         form_component="KnowledgeRetrievalForm",
+        disabled=True,
         required_fields=["knowledgeBaseIds", "queryVariable"],
         output_variables=["documents", "text", "count"],
         fields=[
@@ -433,6 +437,31 @@ def build_node_definitions() -> list[dict]:
             _field("outputVariable", "输出变量名", "Input", "string", False, "result"),
         ],
         default_config={"inputs": [], "outputVariable": "result"},
+    ))
+    defs.append(_def(
+        "WORKFLOW", "工作流", "调用平台内另一条已发布工作流（子执行，可随子流程审批一起挂起）", "external",
+        "MergeCellsOutlined", "#2f54eb",
+        form_component="WorkflowNodeForm",
+        required_fields=["workflowId", "apiKeyId"],
+        output_variables=["result", "text"],
+        fields=[
+            _field("workflowId", "子工作流", "ExecutableWorkflowSelect", "number", True,
+                   None, "", "已发布且配有可用 API Key 的工作流（数据源 /workflows/executable-list）"),
+            _field("workflowName", "子工作流名称", "Input", "string", False, "",
+                   "", "仅展示用（执行时以 workflowId 为准）"),
+            _field("apiKeyId", "执行用 API Key", "WorkflowApiKeySelect", "number", True,
+                   None, "", "子工作流以哪套凭证/限流被调用（引擎执行前仍会校验启用状态与限流）"),
+            _field("versionMode", "版本策略", "Select", "string", False, "LATEST",
+                   options=[("LATEST", "始终使用最新版本"), ("SPECIFIC", "指定版本")]),
+            _field("version", "版本号", "InputNumber", "number", False, None,
+                   "", "仅「指定版本」生效：锁定某个已发布版本（发布后不随主版本漂移）"),
+            _field("inputs", "入参", "CodeParameterList", "array", False, [],
+                   "按子工作流开始节点的入参字段绑定：引用上游变量或自定义值，未绑定项由子工作流自己按默认处理"),
+            _field("timeout", "超时(ms)", "InputNumber", "number", False, None,
+                   "", "子工作流整体跑完的等待上限（留空取节点默认超时；含审批挂起时不会一直等待）"),
+            _field("outputVariable", "输出变量名", "Input", "string", False, "result"),
+        ],
+        default_config={"inputs": [], "versionMode": "LATEST", "outputVariable": "result"},
     ))
     return defs
 

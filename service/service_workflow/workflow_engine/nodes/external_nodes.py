@@ -185,7 +185,7 @@ class ToolNodeExecutor(BaseNodeExecutor):
             int(tool_id) if tool_id else None, None if tool_id else str(tool_name))
         timeout = cfg.get("timeout")
         result = await ToolService.run_for_node(
-            tool, cfg.get("inputs") or [], ctx.resolve,
+            tool, cfg.get("inputs") or [], ctx.resolve_ref,
             int(timeout) if timeout else None)
         output_var = cfg.get("outputVariable") or "result"
         return NodeResult(output={output_var: ToolService.json_safe(result)})
@@ -219,7 +219,7 @@ class McpToolNodeExecutor(BaseNodeExecutor):
         tool_name = cfg.get("toolName")
         if not server_id or not tool_name:
             raise ValueError(f"节点「{self.node.label}」未选择 MCP 连接或工具")
-        arguments = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve)
+        arguments = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve_ref)
         result = await McpServerService.call_tool(int(server_id), str(tool_name), arguments)
         if result.get("isError"):
             raise ValueError(f"MCP 工具 {tool_name} 调用失败: {result.get('content') or '未知错误'}")

@@ -6,13 +6,13 @@
 import type {
   AiModelOption,
   DynamicToolOption,
+  ExecutableWorkflowOption,
   KnowledgeBaseOption,
   McpServerOption,
   McpToolOption,
-  WorkflowAgentOption,
+  SubmitResult,
   WorkflowDetailResp,
   WorkflowExecutionPageReq,
-  WorkflowExecutionReq,
   WorkflowExecutionResp,
   WorkflowNodeDefinitionResp,
   WorkflowPageReq,
@@ -66,12 +66,6 @@ export function listAiModels(type = MODEL_TYPE_TEXT) {
   });
 }
 
-export function listWorkflowAgents() {
-  return requestClient.get<WorkflowAgentOption[]>(
-    `${BASE_URL}/chat-agents/mine`,
-  );
-}
-
 export function listKnowledgeBases() {
   return requestClient.get<KnowledgeBaseOption[]>(
     `${BASE_URL}/knowledge-bases/list`,
@@ -106,6 +100,17 @@ export function listMcpServerTools(serverId: number | string) {
  */
 export function listDynamicTools() {
   return requestClient.get<DynamicToolOption[]>(`${BASE_URL}/tools/options`);
+}
+
+/**
+ * 【工作流】节点的子工作流下拉：已发布且至少有一把可用 API Key
+ * 响应里内联了 apiKeys，选完子工作流不用再发一次带 apikey:list 权限的请求；
+ * 版本下拉不单独开口，复用 getWorkflowVersionHistory。
+ */
+export function listExecutableWorkflows() {
+  return requestClient.get<ExecutableWorkflowOption[]>(
+    `${BASE_URL}/workflows/executable-list`,
+  );
 }
 
 /**
@@ -189,22 +194,18 @@ export function createWorkflowFromTemplate(
   );
 }
 
-// ==================== 工作流执行 API ====================
+// ==================== 工作流执行 API（唯一入口 submit） ====================
 
 /**
- * 异步执行工作流（需求 4:后台已取消同步 /execute,统一 execute-async 投递）
- * 返回 executionId,状态/结果通过 SSE 订阅或 GET 执行详情轮询获取。
- * 传了 apiKey 就加 X-Workflow-Token 请求头，走网关的 API Key 模式（Redis 校验 Key
- * + 按 Key 配置的 QPS 限流）；不传走登录态直转。
+ * 提交一次执行：新建会话、答复审批、重开一轮都走这一个函数，
+ * 差别只在 body 给了哪几个键（不带 executionId 即新建）。
+ * 四种意图返回体同形：{executionId, status, pauseGeneration, pendingApprovals}。
+ * 传了 apiKey 就带 X-Workflow-Token 请求头，走网关的 API Key 模式（校 key 有效且绑定同一工作流）。
  */
-export function executeWorkflowAsync(
-  workflowId: number | string,
-  data: WorkflowExecutionReq,
-  apiKey?: string,
-) {
-  return requestClient.post<string>(
-    `${BASE_URL}/workflow-executions/workflows/${workflowId}/execute-async`,
-    data,
+export function submitWorkflow(body: WorkflowSubmitReq, apiKey?: string) {
+  return requestClient.post<SubmitResult>(
+    `${BASE_URL}/workflow-executions/submit`,
+    body,
     { headers: apiKey ? { 'X-Workflow-Token': apiKey } : undefined },
   );
 }
@@ -256,34 +257,11 @@ export function cancelExecution(executionId: string, apiKey?: string) {
   );
 }
 
-/**
- * 再提交（需求 3：指定 executionId 的重新执行 / 审批后恢复，异步）
- * mode=RETRY 全量重跑（终态可用）；mode=CONTINUE 审批后恢复（仅 PAUSED，必带 approval）。
- * 校验失败统一返回 400 + 可读文案（未结束 / 画布漂移 / 无审批权限 / 结论不全）。
- * @param executionId 目标执行 id（同时充当会话 id）
- * @param data 提交体：mode + 可选 inputs / approval 结论
- * @param apiKey 第三方审批方无登录态时传，走 X-Workflow-Token（后端校 key ↔ 工作流归属）
- */
-export function submitExecution(
-  executionId: string,
-  data: WorkflowSubmitReq,
-  apiKey?: string,
-) {
-  return requestClient.post<{
-    executionId: string;
-    id: string;
-    mode: string;
-    status: string;
-  }>(`${BASE_URL}/workflow-executions/${executionId}/submit`, data, {
-    headers: apiKey ? { 'X-Workflow-Token': apiKey } : undefined,
-  });
-}
-
 // ==================== 调试控制 API ====================
 
 /**
  * 获取执行快照（只读，排障与详情展示）
- * 快照不再是恢复输入：权威源是 node_states，恢复入口只有 submit
+ * 快照不是恢复输入：跨轮权威源是 node_states，要继续跑只能再提交一次
  */
 export function getExecutionSnapshot(executionId: string) {
   return requestClient.get<Record<string, any>>(
@@ -321,39 +299,14 @@ function toWsUrl(path: string): string {
 }
 
 /**
- * 同步执行 WebSocket 地址（预览运行专用）：建立连接后即触发执行，
- * 事件流（node.started / node.delta / workflow.completed 等）经该 WS 实时回推，
- * 替代原「execute-async + SSE 订阅 Redis」链路。
- * @param workflowId 工作流ID
+ * 同步(WebSocket) 提交地址：连上即把 WorkflowSubmitReq 当首帧发出去，服务端本进程跑图，
+ * 事件经同一连接回推。预览运行与预览页答复审批共用这一个地址（executionId 也在帧里，
+ * 不在路径上），差别只在首帧给了哪几个键。
  * @param baseUrl 基础地址（如 VITE_GLOB_API_URL=/api）
  */
-export function getWorkflowExecuteSyncWsUrl(
-  workflowId: number | string,
-  baseUrl = '',
-): string {
+export function getWorkflowSubmitWsUrl(baseUrl = ''): string {
   return toWsUrl(
-    resolveApiUrl(
-      `${BASE_URL}/workflow-executions/workflows/${workflowId}/execute-sync`,
-      baseUrl,
-    ),
-  );
-}
-
-/**
- * 同步再提交 WebSocket 地址（预览页审批入口）：首帧带 mode/inputs/approval，
- * 与 execute-sync 同一套握手与事件回推口径（审批人点「同意/不同意」后继续跑完剩余节点）。
- * @param executionId 执行ID
- * @param baseUrl 基础地址（如 VITE_GLOB_API_URL=/api）
- */
-export function getWorkflowSubmitSyncWsUrl(
-  executionId: string,
-  baseUrl = '',
-): string {
-  return toWsUrl(
-    resolveApiUrl(
-      `${BASE_URL}/workflow-executions/${executionId}/submit-sync`,
-      baseUrl,
-    ),
+    resolveApiUrl(`${BASE_URL}/workflow-executions/submit`, baseUrl),
   );
 }
 

@@ -11,10 +11,8 @@
 新增能力（MaxKB 无 / 前端契约要求）：
 - 复合节点子图执行（run_subgraph：LOOP/ITERATION/PARALLEL 的循环体/分支体）
 - 审批暂停（APPROVAL 节点）：节点边界落快照 + run() 以 PAUSED 收尾，恢复由
-  「指定 executionId 再提交」接口驱动（设计冻结 docs/workflow-approval-memory.md）
+  「同一条 executionId 再提交」驱动（对外契约见 docs/workflow-execution-contract.md）
 - 两种提交模式：RETRY 全量重跑 / CONTINUE 命中已完成节点则 skip（发 skip 事件不重跑）
-
-已废弃（勿再引入）：外部接口触发暂停、resume 断点续跑、_pending_nodes、breakpoints。
 """
 from __future__ import annotations
 
@@ -23,23 +21,28 @@ import contextvars
 import hashlib
 import json
 import time
+import traceback
 from typing import Any, Optional
 
-from service.service_workflow.workflow_engine.context import ExecutionContext
-from service.service_workflow.workflow_engine.events import EventBus, WorkflowEvent
-from service.service_workflow.workflow_engine.graph import (
-    OUTPUT_HANDLE, WorkflowGraph, is_branch_handle, branch_id_of,
-)
+from service.service_workflow.workflow_engine.context import (
+    ExecutionContext, set_dig)
+from service.service_workflow.workflow_engine.events import EventBus
+from service.service_workflow.workflow_engine.graph import OUTPUT_HANDLE, WorkflowGraph
 from service.service_workflow.workflow_engine.nodes import NODE_REGISTRY
 from service.service_workflow.workflow_engine.nodes.base import (
     APPROVAL_SCOPE_ALL, EMIT_OUTPUT_KEY, AwaitingApproval, NodeExecutionError,
     NodeResult,
 )
 from common.common_log.log_init import log
-from common.common_httpx.httpx import httpx_pool
 
 MAX_PARALLEL_BRANCHES = 50  # 单执行并行分支上限(防画布错配导致的任务爆炸)
 NODE_TIMEOUT_DEFAULT = 600  # 单节点执行超时(秒):防外部/工具节点永久挂起(MaxKB 无此保护)
+# 审批已挂起且「没有任何节点在执行」时的收敛等待(秒)：留这点宽限是为了躲开节点之间
+# 的正常空隙（查库检查点/明细落库/事件入队），超过它就再也不会自己结束了，必须收尾。
+PAUSE_ORPHAN_GRACE = 5
+# 节点明细落库硬超时(秒)：这是引擎控制流里少数几个被 await 的外部 IO，没限时就能
+# 把「等分支收尾」与「暂停收敛」（_cancel_running 也要落库）整条钉死。
+PERSIST_TIMEOUT = 30
 
 # BUG15：当前任务所属的并行分支 id。asyncio.Task 创建时会复制当时的 contextvars，
 # 所以在分支协程里派生的所有子孙节点任务都自动带上分支标记，兄弟分支看不到 ——
@@ -97,7 +100,8 @@ class NodeState:
 
     __slots__ = ("order", "status", "input", "output", "error", "duration",
                  "started_at", "label", "nodeType", "branch", "llmMessages",
-                 "review", "reviewBy", "reviewOpinion", "reviewDiff", "skip")
+                 "review", "reviewBy", "reviewOpinion", "reviewDiff", "skip",
+                 "childExecutionId", "emitted")
 
     def __init__(self):
         self.order: int = 0
@@ -123,6 +127,14 @@ class NodeState:
         self.reviewDiff: Optional[list] = None
         # 本轮是否为「跳过已执行节点」（CONTINUE 模式），供明细表与前端展示
         self.skip: bool = False
+        # 【工作流】节点发起的子执行 id：子流程落 PAUSED 时父节点跟着挂起，
+        # 恢复轮靠它认出「这个子执行已经跑过了」，避免重新起一份子执行
+        self.childExecutionId: Optional[str] = None
+        # 节点「返回内容」开关（data.emitOutput）的执行时快照：父侧取子执行结果要靠它
+        # 筛出哪些节点的输出允许对外给（见 service.child_result_outputs）。开关本体住在
+        # 图里、node_states 原本没有，取数就得回读一次发布快照再按节点匹配；落一份布尔值
+        # 就不必。默认 True：存量行缺这个字段按「开」处理，语义与图里没配该键时一致。
+        self.emitted: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -141,13 +153,15 @@ class NodeState:
             "reviewOpinion": self.reviewOpinion,
             "reviewDiff": self.reviewDiff,
             "skip": self.skip,
+            "emitted": self.emitted,
+            "childExecutionId": self.childExecutionId,
         }
 
 
 class WorkflowRuntime:
     """单次执行运行时（角色对等 MaxKB WorkflowManage）。
 
-    生命周期（需求 4：全部走 execute_async，由 arq worker 任务驱动）：
+    生命周期（图只在 arq worker 进程里被驱动，API 进程不跑图）：
         runtime = WorkflowRuntime(graph, execution_id, inputs, ...)
         await runtime.run()
         # 事件：节点事件(含 node.delta)经 EventBus pub hook 实时 PUBLISH
@@ -183,7 +197,7 @@ class WorkflowRuntime:
         self.node_timeout = node_timeout
 
         # 控制状态:取消由 DB 状态驱动（status_check_hook 每节点前查库）；
-        # 暂停只由审批节点触发（不再有外部暂停接口），见 awaiting_nodes。
+        # 暂停只由审批节点在节点边界抛信号触发，见 awaiting_nodes。
         self.finished = False
         self.status = STATUS_PENDING
 
@@ -212,7 +226,12 @@ class WorkflowRuntime:
         # 不能用 node_states 的终态判断——恢复时里面全是上一轮的陈旧状态。
         self._executed_this_round: set[str] = set()
         self._running_tasks: set[asyncio.Task] = set()
-        # BUG15：并行分支短路所需的登记
+        # _route_next 多目标并行时聚合分支异常的 gather 包装器：它只是「记账任务」，
+        # 不进 _wait_running 的等待集合（子任务本身逐个等），否则会出现「只剩一个
+        # 永不调度的 gather 包装器挂着收尾」的死等（见 _wait_running 说明）。
+        self._route_wrappers: set[asyncio.Task] = set()
+        # 包装器聚合到但无人上抛的分支异常：由 run() 收尾补查，防彻底吞掉
+        self._deferred_errors: list[BaseException] = []
         # _branch_tasks/_branch_wrappers: 分支派生的节点任务与分支协程，用于精确取消
         # _cancelled_nodes: 被「任一完成」短路掉的分支节点（视为不可达，不再执行）
         # _blocked_targets: 因 AND 闸门未就绪而被推迟的汇合节点，闸门变化后重放
@@ -231,8 +250,6 @@ class WorkflowRuntime:
         self.input_tokens = 0
         self.output_tokens = 0
         self.llm_call_count = 0
-        # 审批「不同意」时按配置兜底成工作流回答的文案（下游 END 被砍时启用）
-        self.reject_replies: dict[str, str] = {}
 
         # 持久化钩子(service 层注入:节点明细落库 / 执行状态落库 / DB 状态查询)
         self.node_persist_hook = node_persist_hook
@@ -260,29 +277,42 @@ class WorkflowRuntime:
         - 暂停:唯一来源是审批节点。本轮拿不到结论的审批节点记进 awaiting_nodes
           并终止本分支(暂停范围 ALL 时连在跑分支一起砍),其余分支照常跑完;
           run() 收尾发现 awaiting_nodes 非空 → 状态 PAUSED + 落快照 + workflow.paused;
-        - 恢复与重跑都走「指定 executionId 再提交」接口,两种模式都从 START 遍历:
+        - 恢复与重跑都走「同一条 executionId 再提交」,两种模式都从 START 遍历:
           RETRY 全部重跑;CONTINUE 命中上轮 COMPLETED 的节点走 skip。
         """
         start = time.monotonic()
         self.status = STATUS_RUNNING
         try:
-            # 事件语义（冻结文档第 4 节）：CONTINUE 首帧发 workflow.resumed，与
+            # 事件语义（docs/workflow-approval-memory.md §4）：CONTINUE 首帧发 workflow.resumed，与
             # workflow.started 二选一——两条都发会让订阅方把「恢复」当成新一轮执行重置。
             if self.submit_mode == SUBMIT_MODE_CONTINUE:
                 await self.emit("workflow.resumed", inputs=self.ctx.inputs)
             else:
                 await self.emit("workflow.started", inputs=self.ctx.inputs)
             # 两种提交模式都从 START 走一遍:CONTINUE 靠 _schedule 里的 skip 判据
-            # 续上路由(RETRY 全部重跑),不再依赖已废弃的 _pending_nodes。
+            # 续上路由(RETRY 全部重跑)。
             start_node = self.graph.find_start_node()
             if start_node is None:
                 raise NodeExecutionError("工作流缺少 START 节点")
             await self._schedule(start_node.id)
-            await self._wait_running()
-
-            # 终态检查点:末节点执行期间到达的取消,在收尾前再查一次 DB 状态,
-            # 避免「全部节点已跑完但 DB 已不是 RUNNING」时仍按成功落库。
-            await self._checkpoint()
+            try:
+                await self._wait_running()
+                # 终态检查点:末节点执行期间到达的取消,在收尾前再查一次 DB 状态,
+                # 避免「全部节点已跑完但 DB 已不是 RUNNING」时仍按成功落库。
+                await self._checkpoint()
+                # 并行分支里没被任何等待方取走的异常：与「兄弟分支失败」走完全
+                # 相同的收尾分支（有审批挂起则容忍，不因它丢掉 PAUSED）。
+                if self._deferred_errors and self.status == STATUS_RUNNING:
+                    raise self._deferred_errors[0]
+            except NodeExecutionError as e:
+                # 已有审批节点挂起时，兄弟分支的失败不能顶掉暂停收尾：审批上下文已经
+                # 以 AWAITING 落库，这条执行也只有按 PAUSED 才能被 CONTINUE 提交结论；
+                # 判成 FAILED 会让调用方既收不到 workflow.paused、也再也无法审批
+                # （节点自己在 node_states 里就是 FAILED，详情页看得到失败原因）。
+                if not self.awaiting_nodes:
+                    raise
+                log.warning("workflow sibling branch failed while paused exec={}: {}",
+                            self.execution_id, e)
             # 审批等待收尾:存在未决策的审批节点 → 本轮到此为止,状态 PAUSED。
             # 不能发 workflow.completed——对话页会把「还没跑完的半条流」当成回答定稿,
             # 订阅方也无从得知接下来该提交审批结论。
@@ -290,11 +320,13 @@ class WorkflowRuntime:
                 self.status = STATUS_PAUSED
                 self.duration_ms = self.duration_base_ms + int((time.monotonic() - start) * 1000)
                 self.outputs = {}
-                await self._persist_state(paused=True)
-                nid = next(iter(self.awaiting_nodes))
-                await self.emit("workflow.paused", nodeId=nid,
-                                awaitingNodeIds=list(self.awaiting_nodes),
-                                approvalContext=self.awaiting_nodes[nid],
+                await self._persist_state()
+                # 收尾必须可观测：落库成功但下游没收到 workflow.paused 时，
+                # 有这一行才能把矛头从「引擎没收尾」区分到「事件没送达」
+                log.info("workflow paused exec={} awaiting={}",
+                         self.execution_id, list(self.awaiting_nodes))
+                await self.emit("workflow.paused",
+                                duration=self.duration_ms,
                                 variables=self.ctx.global_vars)
                 return self.outputs
             # 终态兜底:节点失败会把工作流状态置 FAILED,而该异常在并行多目标下
@@ -336,11 +368,23 @@ class WorkflowRuntime:
     async def _wait_running(self, exclude: Optional[set] = None) -> None:
         me = asyncio.current_task()
         excl = exclude or set()
+        # 审批已挂起后的「无进展」收敛上限（秒）。单个节点最坏耗时由 _execute_node 的
+        # wait_for(node_timeout) 兜住，所以正常情况下相邻分支要么在跑完、要么在
+        # node_timeout 内以失败结束；一旦长时间没有任何任务结束，只能是有任务卡在
+        # 节点执行之外（事件发送、外部 IO 永不返回）。此时必须按暂停收敛，绝不能让
+        # run() 永不收尾 —— 那会让执行记录永久停在 RUNNING：既发不出 workflow.paused，
+        # 提交接口也会一直被判「上次任务未结束」。
+        idle_limit = self.node_timeout + 30
+        last_progress = time.monotonic()
         while True:
             # 排除当前任务自身及其祖先复合节点任务（复合节点以 task 形式被调度时自身在
-            # _running_tasks 中，若一并等待会自死锁）
+            # _running_tasks 中，若一并等待会自死锁）；同时排除并行 gather 包装器：
+            # 它等的子任务本身就在集合里被逐个等待/取异常，多等一层只有坏没有好——
+            # 子任务被 _cancel_running 或分支短路从集合摘走后，包装器还在等一个再也
+            # 不会结束的 gather，审批收尾就会被这种空转任务永久拖住。
             pending = [t for t in self._running_tasks
-                       if t is not me and t not in excl]
+                       if t is not me and t not in excl
+                       and t not in self._route_wrappers]
             if not pending:
                 return
             if self.halt_all:
@@ -357,8 +401,89 @@ class WorkflowRuntime:
                 if exc is not None and not isinstance(exc, (WorkflowCancelled,)):
                     # 分支任务里的异常已在其内部处理为 node.failed；此处兜底上抛
                     raise exc
+            if done:
+                last_progress = time.monotonic()
+                continue
+            if not self.awaiting_nodes:
+                continue
+            idle = time.monotonic() - last_progress
+            # 两种「等下去也不会有结果」的形态都要按暂停收敛：
+            # 1) 没有任何节点停在 RUNNING（只剩卡死在节点执行之外的任务/包装器），
+            #    宽限 PAUSE_ORPHAN_GRACE 秒后收敛——这是调试面板不能等 10 分钟的原因；
+            #    同时把卡住任务的栈打到日志，下次再现场能直接定位而不是猜。
+            # 2) 确实有节点在跑但长时间无任务结束：走 idle_limit（各节点自带
+            #    wait_for 兜底，理论上不会到点）。
+            if idle > PAUSE_ORPHAN_GRACE and (
+                    not self._has_live_node() or self._wedged_nodes()):
+                why = ("无节点在执行" if not self._has_live_node()
+                       else f"节点超自身时限仍 RUNNING: {self._wedged_nodes()}")
+                log.warning(
+                    "workflow pause settle exec={}: {} 个审批节点挂起、{}"
+                    "且已 {:.1f}s 无任务结束，收敛剩余 {} 个在跑任务按暂停收尾（卡住任务栈见下）",
+                    self.execution_id, len(self.awaiting_nodes), why, idle, len(pending))
+                log.warning("workflow stuck tasks exec={}\n{}", self.execution_id,
+                            self._tasks_trace(pending))
+                await self._cancel_running(keep={me} | excl)
+                return
+            if idle > idle_limit:
+                log.warning(
+                    "workflow pause settle exec={}: 已有 {} 个审批节点挂起且 >{}s "
+                    "无节点结束，收敛剩余 {} 个在跑任务按暂停收尾（卡住的任务会在"
+                    "恢复提交时重跑）", self.execution_id, len(self.awaiting_nodes),
+                    idle_limit, len(pending))
+                log.warning("workflow stuck tasks exec={}\n{}", self.execution_id,
+                            self._tasks_trace(pending))
+                await self._cancel_running(keep={me} | excl)
+                return
             # 注:取消不在这里打断等待——相关任务会在各自的调度入口检查点
             # (_checkpoint)自行终止,这里只需等所有任务自然结束。
+
+    def _has_live_node(self) -> bool:
+        """是否还有节点停在 RUNNING（唯一「本轮还有真活在跑」的可靠信号）。
+
+        节点执行全程（含复合节点的整个子图）都是 RUNNING，所以只要它是空的，
+        剩下的任务就只能卡在节点执行之外（查库/落库/事件/被摘走后的野任务）。
+        """
+        return any(s.status == STATUS_RUNNING for s in self.node_states.values())
+
+    def _wedged_nodes(self) -> list:
+        """停在 RUNNING 却已超过自身执行时限的节点：[(node_id, 已耗时秒)]。
+
+        _execute_node 里节点本体由 wait_for(node.data.timeout) 兜住，到点就会转成
+        节点失败；所以超时限后仍停在 RUNNING，只能是卡在节点执行之外（明细落库/
+        查库检查点/事件回推这类不受单节点超时约束的位置）。留着它只会把审批
+        收尾一起拖死，必须按暂停收敛，而不是等到 node_timeout+30 的外层兜底。
+        """
+        out: list = []
+        now = time.monotonic()
+        for nid, state in self.node_states.items():
+            if state.status != STATUS_RUNNING:
+                continue
+            node = self.graph.get_node(nid)
+            try:
+                timeout = int((node.data or {}).get("timeout")
+                              or self.node_timeout or NODE_TIMEOUT_DEFAULT)
+            except (AttributeError, TypeError, ValueError):
+                timeout = int(self.node_timeout or NODE_TIMEOUT_DEFAULT)
+            if now - state.started_at > timeout + PAUSE_ORPHAN_GRACE:
+                out.append((node.label if node is not None else nid,
+                            round(now - state.started_at, 1)))
+        return out
+
+    def _tasks_trace(self, tasks: list) -> str:
+        """卡住任务的挂起点栈（只给排障看，取失败不影响收尾）。"""
+        lines: list[str] = []
+        for t in tasks:
+            frame = getattr(getattr(t, "_coro", None), "cr_frame", None)
+            if frame is None:
+                lines.append(f"  {t.get_name()}: 无栈（已结束或未启动）")
+                continue
+            try:
+                stack = "".join(traceback.format_stack(frame, limit=8)).strip()
+            except Exception as e:  # noqa: BLE001
+                stack = f"<取栈失败 {e}>"
+            lines.append(f"  {t.get_name()}:\n    " + stack.replace("\n", "\n    "))
+        return "\n".join(lines) or "  <无>"
 
     async def _cancel_running(self, keep: set) -> None:
         """砍掉仍在跑的节点任务（审批「整条流暂停」），并把停在 RUNNING 的节点收敛成取消态。
@@ -391,11 +516,14 @@ class WorkflowRuntime:
         火忘的迟到写会在「同一 executionId 再提交」时把上一轮数据盖到新一轮上，
         而再提交的唯一互斥手段是 DB 状态，所以落库必须在引擎推进前完成。
         失败只告警：明细表是展示/排障数据，不能因为它丢掉真实执行。
+        必须带硬超时：它是控制流里被 await 的外部写，连接池耗尽/DB 卡住时，
+        没限时就会把收尾（包括审批暂停收敛，_cancel_running 同样走这里）一起钉死。
         """
         if not self.node_persist_hook:
             return
         try:
-            await self.node_persist_hook(self, node, state)
+            await asyncio.wait_for(self.node_persist_hook(self, node, state),
+                                   timeout=PERSIST_TIMEOUT)
         except Exception as e:  # noqa: BLE001
             log.warning("node persist failed exec={} node={}: {}", self.execution_id, node.id, e)
 
@@ -434,7 +562,7 @@ class WorkflowRuntime:
         if result is None:
             return
 
-        # BUG15：并行节点「任一完成」短路取消未命中分支后，重新放行当时被 AND 闸门
+        # 并行节点「任一完成」短路取消未命中分支后，重新放行当时被 AND 闸门
         # 挡下的汇合节点（放在本节点输出已写入之后，下游引用才安全）。
         if self._blocked_targets:
             await self._release_blocked()
@@ -488,6 +616,9 @@ class WorkflowRuntime:
         # 快照节点自定义名称/类型（执行时为准，不受后续画布改名影响）
         state.label = node.label
         state.nodeType = node.type
+        # 「返回内容」开关同样在此快照（不是广播处）：主表 node_states 在节点边界就会落库，
+        # 放到成功分支里写会让 RUNNING 中崩溃的行丢掉这个字段
+        state.emitted = node.data.get(EMIT_OUTPUT_KEY, True) is True
         self.node_states[node.id] = state
 
         input_view = self._node_input_view(node)
@@ -515,7 +646,7 @@ class WorkflowRuntime:
         except AwaitingApproval as a:
             # 审批挂起：不是失败也不是取消。节点停在 AWAITING（非 COMPLETED → 下轮必重跑），
             # 本分支终止且不路由下游，返回 None 让 _schedule 安静收场。
-            return await self._enter_awaiting(node, state, a)
+            return await self._pause_for_human_input(node, state, a)
         except Exception as e:  # noqa: BLE001
             state.status = STATUS_FAILED
             state.error = str(e)
@@ -549,7 +680,7 @@ class WorkflowRuntime:
 
         state.duration = int((time.monotonic() - started) * 1000)
         # 输出开关打开: 广播输出
-        if node.data.get(EMIT_OUTPUT_KEY, True) is True:
+        if state.emitted:
             if node.get_config("streaming", False) is False:
                 await self.emit("node.completed", nodeId=node.id, output=state.output, duration=state.duration)
             else:
@@ -629,23 +760,31 @@ class WorkflowRuntime:
                 raise NodeExecutionError(f"节点「{node.label}」并行分支过多: {len(ready)}")
             inner = [self._spawn(t.id, owned_by_branch=not self._is_convergence(t.id))
                      for t in ready]
-            # gather 兜住多目标：任一目标失败不影响其余目标继续跑完；但失败不能吞，
-            # 全部跑完后仍需上抛第一个异常（见 _await_targets）
+            # gather 兜住多目标：任一目标失败不影响其余目标继续跑完；失败不吞，
+            # 但也不靠这个包装器上抛（它不进 _wait_running 的等待集合），而是记到
+            # _deferred_errors 由 run() 收尾补查，见 _await_targets。
             wrapper = asyncio.ensure_future(self._await_targets(inner))
             self._running_tasks.add(wrapper)
+            self._route_wrappers.add(wrapper)
             wrapper.add_done_callback(self._running_tasks.discard)
+            wrapper.add_done_callback(self._route_wrappers.discard)
 
     async def _await_targets(self, tasks: list) -> None:
-        """等全部并行目标自然结束，再上抛第一个非取消异常。
+        """等全部并行目标自然结束，把第一个非取消异常记入 _deferred_errors。
 
         与 run_branches 里「分支内节点失败不可静默吞掉（否则并行节点会假成功）」
         同一口径：吞掉异常会让 run() 收尾误判状态、丢掉 workflow.failed 事件。
         WorkflowCancelled 是并行短路砍分支的正常信号，不算失败，跳过。
+
+        不再从本协程 raise：等待方已按「节点任务」逐个取异常（_wait_running），
+        而本包装器不在等待集合里，上抛只会变成「Task exception was never retrieved」
+        告警而实际丢异常；改存 _deferred_errors，由 run() 在收尾前统一补上抛。
         """
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for res in results:
             if isinstance(res, Exception) and not isinstance(res, WorkflowCancelled):
-                raise res
+                self._deferred_errors.append(res)
+                return
 
     def _spawn(self, node_id: str, owned_by_branch: bool = True) -> asyncio.Task:
         """派生一个节点调度任务，并在并行分支上下文中登记归属。
@@ -1043,7 +1182,7 @@ class WorkflowRuntime:
                                                 barrier=node, timeout_ms=timeout_ms)
         return results
 
-    # ==================== 状态检查(需求 5:DB 状态驱动控制) ====================
+    # ==================== 状态检查(DB 状态驱动控制) ====================
 
     def _check_cancelled(self) -> None:
         """复合节点（LOOP/ITERATION 等）轮询内的取消检查：
@@ -1058,7 +1197,7 @@ class WorkflowRuntime:
         - DB 状态为 CANCELLED → 抛 WorkflowCancelled,run() 走取消分支统一收尾。
 
         只认 CANCELLED：暂停不再由外部接口触发，唯一来源是审批节点在节点边界的
-        挂起（见 _enter_awaiting）。DB 里残留的 PAUSED 只是「上一轮停在审批等待」的
+        挂起（见 _pause_for_human_input）。DB 里残留的 PAUSED 只是「上一轮停在审批等待」的
         结果标记，提交接口已在校验通过后把它置回 RUNNING，这里再按 PAUSED 自我暂停
         会让恢复任务原地空转。
         """
@@ -1073,15 +1212,18 @@ class WorkflowRuntime:
         if status == STATUS_CANCELLED:
             raise WorkflowCancelled()
 
-    # ==================== 审批：暂停落点与不同意收口 ====================
+    # ==================== 审批：暂停落点与编辑回写 ====================
 
-    async def _enter_awaiting(self, node, state: NodeState,
-                              signal: AwaitingApproval) -> None:
+    async def _pause_for_human_input(self, node, state: NodeState,
+                                     signal: AwaitingApproval) -> None:
         """审批节点挂起：节点停在 AWAITING，本分支终止且不路由下游，返回 None。
 
         AWAITING 不是终态，所以 CONTINUE 恢复时 skip 判据不成立 → 该节点必然重跑，
         本轮带进来的审批结论在审批执行器里覆写它的输出。
         暂停范围为 ALL 时置 halt_all：其余分支不再调度，在跑的由 _wait_running 砍掉。
+
+        帧里不夹审批内容：要审的数据只从详情接口取（一份待办一处形状），
+        这一帧只说「这个节点停下来了」。
         """
         state.status = STATUS_AWAITING
         state.output = None
@@ -1092,73 +1234,10 @@ class WorkflowRuntime:
             self.halt_all = True
         await self._persist_node(node, state)
         await self.emit("node.paused", nodeId=node.id, nodeType=node.type,
-                        duration=state.duration, pauseScope=signal.scope,
-                        approvalContext=signal.context)
+                        duration=state.duration)
         log.info("workflow awaiting approval exec={} node={} scope={}",
                  self.execution_id, node.id, signal.scope)
         return None
-
-    def downstream_closure(self, node_id: str) -> list[str]:
-        """node_id 的下游可达闭包（不含自身）。"""
-        seen: set[str] = set()
-        stack = [node_id]
-        while stack:
-            nid = stack.pop()
-            for e in self.graph.get_out_edges(nid) or []:
-                t = e.target
-                if t == node_id or t in seen:
-                    continue
-                seen.add(t)
-                stack.append(t)
-        return sorted(seen)
-
-    async def cancel_downstream(self, node_id: str, reason: str,
-                               reject_reply: str = "") -> list[str]:
-        """审批「不同意」：把下游可达闭包整体取消（其余分支照常跑完）。
-
-        与并行短路同一口径复用 _cancelled_nodes：_schedule 见到它就跳过，
-        _is_reachable 判它不可达，汇合闸门因此不会死等被砍的分支。
-        已 COMPLETED 的下游不回滚（本轮它先跑完了）；正在跑的节点由自身协程
-        收尾，其下游再靠闭包登记拦住。整条流终态是 COMPLETED（部分取消）。
-        """
-        if reject_reply:
-            self.reject_replies[node_id] = reject_reply
-        targets: list[str] = []
-        for nid in self.downstream_closure(node_id):
-            state = self.node_states.get(nid)
-            if state is not None and state.status == STATUS_COMPLETED:
-                continue
-            targets.append(nid)
-            self._cancelled_nodes.add(nid)
-            self._blocked_targets.pop(nid, None)
-            node = self.graph.get_node(nid)
-            if node is None:
-                continue
-            if state is None:
-                # 尚未被调度过：补一个取消态并落库，否则执行详情里看不到「被拒」的节点。
-                # 事件成对发（started 不带 input），前端才不会停在无响应状态。
-                state = NodeState()
-                self._order_counter += 1
-                state.order = self._order_counter
-                state.label = node.label
-                state.nodeType = node.type
-                state.status = STATUS_CANCELLED
-                state.error = reason
-                self.node_states[nid] = state
-                await self.emit("node.started", nodeId=nid, nodeType=node.type)
-                await self.emit("node.cancelled", nodeId=nid, duration=0, reason=reason)
-            elif state.status == STATUS_RUNNING:
-                state.status = STATUS_CANCELLED
-                state.error = reason
-                state.duration = int((time.monotonic() - state.started_at) * 1000)
-                await self.emit("node.cancelled", nodeId=nid, duration=state.duration,
-                                reason=reason)
-            else:
-                continue
-            await self._persist_node(node, state)
-        log.info("approval rejected exec={} node={} cancelled={}",
-                 self.execution_id, node_id, targets)
-        return targets
 
     async def apply_output_edits(self, node_id: str, edits: list) -> list:
         """审批表单的编辑回写：同时改 node_states[源].output 与 ctx 里的同源输出。
@@ -1166,6 +1245,12 @@ class WorkflowRuntime:
         两处都得改：前者是跨轮恢复的权威源（下轮与详情接口读它），后者是本轮
         下游取数的入口。只改一处会出现「本轮已生效、恢复后又变回旧值」。
         返回带旧值的 diff（审批审计）。
+
+        edit 形如 {nodeId, varName, path?, value}：`path` 是 varName 之下的 JSONPath
+        子路径（与审批透传清单下发的 path 同源，口径同 `_dig`）。带 path 时只替换
+        该子路径，源变量的其余键保持原样；路径取不到（键不存在/中间撞标量/数组越界）
+        就放弃这条编辑并告警——回写失败的编辑宁可整条丢掉，也不能凭空调出一个新键
+        把上游输出改成它本没有的结构，那会让下游按旧结构取数时静默拿到 None。
         """
         diff: list = []
         for edit in edits or []:
@@ -1182,18 +1267,35 @@ class WorkflowRuntime:
                 continue
             output = state.output if isinstance(state.output, dict) else {}
             old = output.get(var)
-            output[var] = edit.get("value")
+            path = edit.get("path") or ""
+            value = edit.get("value")
+            if path:
+                new_var, ok = set_dig(old, path, value)
+                if not ok:
+                    log.warning("approval edit path not writable exec={} node={} "
+                                "var={} path={}", self.execution_id, src, var, path)
+                    continue
+                output[var] = new_var
+            else:
+                output[var] = value
             state.output = output
             self.ctx.set_node_output(src, output)
-            diff.append({"nodeId": src, "varName": var,
-                         "oldValue": old, "newValue": edit.get("value")})
+            diff.append({"nodeId": src, "varName": var, "path": path,
+                         "oldValue": old, "newValue": value})
         return diff
 
-    async def _persist_state(self, paused: bool = False) -> None:
-        """执行状态落库钩子(service 层注入,引擎不直接依赖 ORM)。"""
+    async def _persist_state(self) -> None:
+        """执行状态落库钩子（service 层注入，引擎不直接依赖 ORM）。
+
+        与 _persist_node 同一口径带硬超时：收尾路径上的 state_persist_hook 是最后一个
+        可被外部 IO 钉死的 await——它一挂住，workflow.paused / workflow.completed
+        就永远发不出去，执行记录停在 RUNNING。宁可状态行晚一帧由详情接口兜底，
+        也不能让它挡住事件。
+        """
         if self.state_persist_hook:
             try:
-                await self.state_persist_hook(self, paused)
+                await asyncio.wait_for(self.state_persist_hook(self),
+                                       timeout=PERSIST_TIMEOUT)
             except Exception as e:  # noqa: BLE001
                 log.warning("state persist failed exec={}: {}", self.execution_id, e)
 
@@ -1204,7 +1306,6 @@ class WorkflowRuntime:
 
         只认本轮真跑过的节点（_executed_this_round）：再提交时 node_states 里还留着
         上一轮的输出，全量收集会把上一轮的 END/REPLY 答案当成本轮回答吐给用户。
-        本轮 END/REPLY 被审批「不同意」砍掉时，用审批节点配的拒绝文案兜底。
         """
         outputs = {}
         ordered = sorted((nid for nid in self._executed_this_round
@@ -1219,41 +1320,10 @@ class WorkflowRuntime:
                 output = self.ctx.get_node_output(nid)
                 if isinstance(output, dict):
                     outputs.update(output)
-        if not outputs and self.reject_replies:
-            # 审批「不同意」把下游 END/REPLY 全砍了：没有回答会让对话页空白，
-            # 用节点配的拒绝文案按 END 声明的变量名兜底铺回去
-            reply = list(self.reject_replies.values())[-1]
-            names = {f.get("name") for end in self.graph.find_end_nodes()
-                     for f in ((end.data or {}).get("outputs") or []) if f.get("name")}
-            names |= {"answer", "output", "text"}
-            outputs = {name: reply for name in names if name}
         return outputs
 
     def node_states_dict(self) -> dict:
         return {nid: s.to_dict() for nid, s in self.node_states.items()}
-
-    def snapshot(self) -> dict:
-        """执行快照（写 tb_workflow_execution.variables，仅 PAUSED 与终态）。
-
-        瘦身：去掉 context/completedWithBranch 等与 nodeStates 重复的字段——恢复不
-        再依赖快照（以 node_states 为权威源由 hydrate 重建 ctx），快照只用于排障与
-        详情展示，冗余副本只会在跨轮覆盖时造成口径不一致。
-        """
-        return {
-            "executionId": self.execution_id,
-            "status": self.status,
-            "submitMode": self.submit_mode,
-            "round": self.round,
-            "nodeStates": self.node_states_dict(),
-            "awaitingNodeIds": list(self.awaiting_nodes),
-            "approvalContext": self.awaiting_nodes,
-            "approvalDecisions": self.approval_decisions,
-            "rejectReplies": self.reject_replies,
-            "inputTokens": self.input_tokens,
-            "outputTokens": self.output_tokens,
-            "llmCallCount": self.llm_call_count,
-            "durationMs": self.duration_ms,
-        }
 
     def hydrate(self, node_states: Optional[dict], replay_global: bool = True) -> None:
         """用 DB 里的 node_states（跨轮权威源）重建运行时上下文。
@@ -1285,7 +1355,10 @@ class WorkflowRuntime:
             state.reviewBy = s.get("reviewBy")
             state.reviewOpinion = s.get("reviewOpinion")
             state.reviewDiff = s.get("reviewDiff")
-            # skip 是本轮属性，不随历史状态带过来
+            # skip 是本轮属性，不随历史状态带过来；emitted 是节点配置快照，必须带回来
+            # （否则恢复轮落库时会把上轮关掉的「返回内容」开关重置成开）
+            state.emitted = bool(s.get("emitted", True))
+            state.childExecutionId = s.get("childExecutionId")
             self.node_states[nid] = state
         self._order_counter = max((s.order for s in self.node_states.values()), default=0)
         for nid, state in self.node_states.items():
@@ -1320,38 +1393,3 @@ class WorkflowRuntime:
                 loop_var = (node.data or {}).get("loopVariable") or "loopIndex"
                 if loop_var in output:
                     self.ctx.global_vars[loop_var] = output[loop_var]
-
-    def restore(self, snapshot: dict) -> None:
-        """从上一轮落库的 variables 快照重建运行时（提交接口投递前调用）。
-
-        nodeStates 是权威源；老快照里的 context/global 只作结构升级前的兼容兜底。
-        """
-        self.hydrate(snapshot.get("nodeStates") or {},
-                     replay_global=(self.submit_mode == SUBMIT_MODE_CONTINUE))
-        legacy_ctx = snapshot.get("context") or {}
-        if legacy_ctx:
-            self.ctx.restore(legacy_ctx)
-        legacy_global = snapshot.get("global")
-        if legacy_global:
-            merged = dict(self.ctx.global_vars)
-            merged.update(legacy_global)
-            self.ctx.global_vars = merged
-        elif legacy_ctx.get("global"):
-            self.ctx.global_vars = dict(legacy_ctx["global"])
-        # 旧快照的端口路由记在顶层 completedWithBranch 里，nodeState.branch 缺失时回填
-        for nid, b in (snapshot.get("completedWithBranch") or {}).items():
-            state = self.node_states.get(nid)
-            if state is not None and state.branch is None:
-                state.branch = b
-                if state.status in (STATUS_COMPLETED, STATUS_FAILED):
-                    self._completed_with_branch[nid] = b
-        self.input_tokens = int(snapshot.get("inputTokens", 0))
-        # 老快照没有 round：保持构造参数（默认 1），别把它归零
-        self.round = max(self.round, int(snapshot.get("round") or 0))
-        self.output_tokens = int(snapshot.get("outputTokens", 0))
-        self.llm_call_count = int(snapshot.get("llmCallCount", 0))
-        self.reject_replies = dict(snapshot.get("rejectReplies") or {})
-        self.duration_base_ms = int(snapshot.get("durationMs", 0))
-        # 提交时预存的审批结论：构造参数已带时不覆盖（新结论优先于快照里的残留）
-        if not self.approval_decisions:
-            self.approval_decisions = dict(snapshot.get("approvalDecisions") or {})

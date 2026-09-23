@@ -43,7 +43,7 @@ class AwaitingApproval(Exception):
     绝不在 execute() 内部挂起协程等审批——那会占住 worker 任务槽并受节点超时约束。
 
     - node_id: 发起审批的节点 id
-    - context: 审批上下文（可编辑输入项三元组 + 审批人配置），随事件与快照外发
+    - context: 审批上下文（可编辑输入项四元组 + 审批人配置），随事件与快照外发
     - scope: ALL=整条流一起停 / DOWNSTREAM=仅本节点及下游等待
     """
 
@@ -55,7 +55,7 @@ class AwaitingApproval(Exception):
         self.scope = scope or "DOWNSTREAM"
 
 
-# 审批暂停范围（节点配置 pauseScope 取值，引擎据此决定是否砍在跑分支）
+# 审批暂停范围（节点配置 pauseScope 取值，引擎据此决定等人工结论时停多大范围）
 APPROVAL_SCOPE_ALL = "ALL"
 APPROVAL_SCOPE_DOWNSTREAM = "DOWNSTREAM"
 
@@ -99,17 +99,29 @@ class BaseNodeExecutor:
     def cfg(self, key: str, default: Any = None) -> Any:
         return self.config.get(key, default)
 
-    def input_pass_through(self, ctx: "ExecutionContext") -> dict:
+    def input_pass_through(self, ctx: "ExecutionContext", include_start: bool = False) -> dict:
         """入边来源节点的输出快照（输入透传用）。
 
         分支/屏障类控制节点（IF_ELSE、PARALLEL）原本只输出路由信息，节点追踪里
         看不到数据流过；用本方法把上游输出铺底进自己的 output，下游与追踪都能看到
         透传的输入数据。以 ctx.graph 为准（runtime 可能未注入，如单测环境）。
+
+        include_start=True（审批节点用）：额外把开始节点的入参铺在最底层。
+        开始入参是整条流的输入、不是某个业务节点的产物，但它在变量下拉里只归属于
+        开始节点——下游隔着审批（审批是引用屏障）就再也选不到它，形成
+        「开始→审批→下游能选、开始→节点1→审批→下游选不到」的拓扑敏感差异。
+        同名键以直接上游为准（更接近本节点输入的那份赢）。
         """
         merged: dict = {}
         graph = getattr(ctx, "graph", None)
         if graph is None:
             return merged
+        if include_start:
+            start = graph.find_start_node()
+            if start is not None:
+                output = ctx.get_node_output(start.id)
+                if isinstance(output, dict):
+                    merged.update(output)
         for edge in graph.get_in_edges(self.node.id) or []:
             output = ctx.get_node_output(edge.source)
             if isinstance(output, dict):

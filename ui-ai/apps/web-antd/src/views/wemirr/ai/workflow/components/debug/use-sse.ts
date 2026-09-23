@@ -6,7 +6,7 @@
 
 import type { WorkflowRuntimeEventType } from '../../domain/runtime-events';
 
-import type { ApprovalContext, NodeType } from '#/api/ai-workflow/types';
+import type { LlmToolKind, NodeType } from '#/api/ai-workflow/types';
 
 import {
   computed,
@@ -125,24 +125,49 @@ export interface StreamTokenEventData {
 }
 
 /**
- * 审批节点挂起事件数据（node.paused）
+ * 工具调用事件数据（node.tool_call）
+ */
+export interface NodeToolCallEventData {
+  nodeId: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  arguments?: Record<string, any>;
+  round?: number;
+  /** true = 子工作流审批结束后补记的那次调用 */
+  resumed?: boolean;
+}
+
+/**
+ * 工具结果事件数据（node.tool_result）
+ */
+export interface NodeToolResultEventData {
+  nodeId: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  /** 结果摘要（完整结果看节点输出的 toolCalls） */
+  result?: string;
+  error?: null | string;
+  round?: number;
+  resumed?: boolean;
+}
+
+/**
+ * 审批节点挂起事件数据（node.paused）：只说节点停下了，待办清单在详情里
  */
 export interface NodePausedEventData {
   nodeId: string;
   nodeType?: NodeType;
   duration?: number;
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
-  approvalContext?: ApprovalContext;
 }
 
 /**
- * 执行暂停事件数据（workflow.paused：本轮跑完但存在未决策的审批节点）
+ * 执行暂停事件数据（workflow.paused：本轮跑完了，但有节点停在等人答）
  * 原「断点命中」语义已随断点功能废弃
  */
 export interface ApprovalPausedEventData {
   nodeId?: string;
-  awaitingNodeIds?: string[];
-  approvalContext?: ApprovalContext;
   duration?: number;
   variables?: Record<string, any>;
 }
@@ -181,6 +206,10 @@ export interface SSEEventCallbacks {
   /** 并行分支被其他分支先完成短路的节点 */
   onNodeCancelled?: (data: NodeAbortedEventData) => void;
   onStreamToken?: (data: StreamTokenEventData) => void;
+  /** 大模型节点插入工具后的一次调用 */
+  onToolCall?: (data: NodeToolCallEventData) => void;
+  /** 一次工具调用的结果 */
+  onToolResult?: (data: NodeToolResultEventData) => void;
   /** 单个审批节点挂起（面板可先据此展开表单） */
   onNodePaused?: (data: NodePausedEventData) => void;
   /** 整条流暂停等人工审批 */
@@ -495,6 +524,45 @@ export function useSSE(
       }
     });
 
+    // 工具调用过程（LLM 节点插入 MCP/工具/子工作流）：不受节点「输出工具结果」
+    // 开关约束，没勾选时它是过程里唯一能看到「调了什么、传了什么」的地方
+    addEventListener('node.tool_call', (e) => {
+      const data = parseEventData<NodeToolCallEventData>(e);
+      if (data) {
+        debugStore.handleToolEvent({
+          type: 'node.tool_call',
+          nodeId: data.nodeId,
+          toolCallId: data.toolCallId,
+          toolName: data.toolName,
+          toolKind: data.toolKind,
+          arguments: data.arguments,
+          round: data.round,
+          resumed: data.resumed,
+        });
+        callbacks?.onToolCall?.(data);
+      }
+    });
+
+    // 工具调用结果（摘要）
+    addEventListener('node.tool_result', (e) => {
+      const data = parseEventData<NodeToolResultEventData>(e);
+      if (data) {
+        debugStore.handleToolEvent({
+          type: 'node.tool_result',
+          nodeId: data.nodeId,
+          toolCallId: data.toolCallId,
+          toolName: data.toolName,
+          toolKind: data.toolKind,
+          result: data.result,
+          // 引擎成功时把 error 显式发成 null，trace 里统一收成 undefined
+          error: data.error ?? undefined,
+          round: data.round,
+          resumed: data.resumed,
+        });
+        callbacks?.onToolResult?.(data);
+      }
+    });
+
     // 审批节点挂起事件（节点停在 AWAITING，不路由下游）
     addEventListener('node.paused', (e) => {
       const data = parseEventData<NodePausedEventData>(e);
@@ -504,8 +572,6 @@ export function useSSE(
           nodeId: data.nodeId,
           nodeType: data.nodeType,
           duration: data.duration,
-          pauseScope: data.pauseScope,
-          approvalContext: data.approvalContext,
         });
         callbacks?.onNodePaused?.(data);
       }
@@ -518,8 +584,6 @@ export function useSSE(
         debugStore.handleApprovalPaused({
           type: 'workflow.paused',
           nodeId: data.nodeId,
-          awaitingNodeIds: data.awaitingNodeIds,
-          approvalContext: data.approvalContext,
           variables: data.variables,
         });
         callbacks?.onApprovalPaused?.(data);

@@ -1,14 +1,11 @@
-import { dict } from '@fast-crud/fast-crud';
+import type { ModelCategory, ModelProviderKey } from '#/api/ai-workflow/const';
 
 import { useAccessStore } from '@vben/stores';
 
+import { dict } from '@fast-crud/fast-crud';
+
 import { resolveApiUrl } from '#/api/helper';
 import { defHttp, getTraceId, saveTraceId } from '#/api/request';
-
-import type {
-  ModelCategory,
-  ModelProviderKey,
-} from '#/api/ai-workflow/const';
 
 // ==================== 类型定义 ====================
 
@@ -59,6 +56,8 @@ export interface ModelPageRep {
   status: boolean;
   supports_stream?: boolean;
   supports_thinking?: boolean;
+  /** 工具调用能力位（仅文生文）：决定工作流 LLM 节点能不能插入 MCP/工具/工作流 */
+  supports_function_call?: boolean;
   stream_param?: null | string;
   thinking_param?: null | string;
   common_params?: CommonParam[];
@@ -84,6 +83,7 @@ export interface ModelDetailRep {
   rate_limit_qps: number;
   supports_stream?: boolean;
   supports_thinking?: boolean;
+  supports_function_call?: boolean;
   stream_param?: null | string;
   thinking_param?: null | string;
   common_params?: CommonParam[];
@@ -103,6 +103,7 @@ export interface ModelSaveReq {
   rate_limit_qps: number;
   supports_stream?: boolean;
   supports_thinking?: boolean;
+  supports_function_call?: boolean;
   stream_param?: string;
   thinking_param?: string;
   common_params?: CommonParam[];
@@ -156,6 +157,7 @@ export interface MyKeyRep {
   rate_limit_qps: number;
   supports_stream?: boolean;
   supports_thinking?: boolean;
+  supports_function_call?: boolean;
   stream_param?: null | string;
   thinking_param?: null | string;
   common_params?: CommonParam[];
@@ -189,8 +191,10 @@ export const GetCategories = () =>
   defHttp.get<ModelDictRep>(`${BASE_URL}/categories`);
 
 /** 模型标识注册表：按 厂家/类型 过滤（不传返回全部） */
-export const GetRegistry = (params?: { provider?: string; category?: string }) =>
-  defHttp.get<RegistryItem[]>(`${BASE_URL}/registry`, { params });
+export const GetRegistry = (params?: {
+  category?: string;
+  provider?: string;
+}) => defHttp.get<RegistryItem[]>(`${BASE_URL}/registry`, { params });
 
 export const GetDetail = (id: number) =>
   defHttp.get<ModelDetailRep>(`${BASE_URL}/${id}/detail`);

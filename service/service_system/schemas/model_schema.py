@@ -26,6 +26,7 @@ class ModelSaveRequest(BaseModel):
     # 高级设置（需求 2）
     supports_stream: bool = Field(False, description="是否支持流消息")
     supports_thinking: bool = Field(False, description="是否支持思考模式")
+    supports_function_call: bool = Field(False, description="是否支持工具调用")
     stream_param: Optional[str] = Field(None, max_length=64, description="开启流式的参数键名")
     thinking_param: Optional[str] = Field(None, max_length=64, description="开启思考的参数键名")
     common_params: Optional[List[CommonParam]] = Field(None, description="常用参数列表")

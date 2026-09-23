@@ -2,12 +2,13 @@ import asyncio
 import os
 import sys
 import uvicorn
+import platform
 
 from common.common_constants.constant import SERVICE_GATEWAY_PORT, SERVICE_GATEWAY
 from service.service_gateway import app
 
 if __name__ == '__main__':
-    if sys.platform.__contains__("win"):
+    if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     # 网关入口：统一经 create_app 引导（Nacos 注册/发现 + Redis 限流 + JWT 鉴权 + 动态转发）

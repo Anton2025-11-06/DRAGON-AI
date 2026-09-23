@@ -25,6 +25,7 @@ import {
   FullscreenOutlined,
   FunctionOutlined,
   LoadingOutlined,
+  MergeCellsOutlined,
   MessageOutlined,
   MinusCircleOutlined,
   MinusOutlined,
@@ -96,11 +97,28 @@ const hasStreamingContent = computed(() => !!props.trace?.streamingContent);
 /** 是否有思维链流式输出 */
 const hasStreamingReasoning = computed(() => !!props.trace?.streamingReasoning);
 
+/** 是否有工具调用过程（LLM 节点插入 MCP/工具/子工作流） */
+const hasToolCalls = computed(() => (props.trace?.toolCalls?.length ?? 0) > 0);
+
+/** 工具来源标签（与后端 TOOL_KIND_* 逐字对齐） */
+const TOOL_KIND_META: Record<string, { color: string; text: string }> = {
+  MCP: { color: 'geekblue', text: 'MCP' },
+  TOOL: { color: 'cyan', text: '工具' },
+  WORKFLOW: { color: 'purple', text: '工作流' },
+};
+
+function toolKindMeta(kind?: string) {
+  return (
+    TOOL_KIND_META[kind || ''] || { color: 'default', text: kind || '未知来源' }
+  );
+}
+
 /** 默认展开的面板 */
 const defaultActiveKey = computed(() => {
   const keys: string[] = [];
   if (hasInputs.value) keys.push('inputs');
   if (hasOutputs.value) keys.push('outputs');
+  if (hasToolCalls.value) keys.push('tools');
   if (hasError.value) keys.push('error');
   return keys;
 });
@@ -116,7 +134,6 @@ function getNodeIcon(nodeType: string) {
     KNOWLEDGE_RETRIEVAL: FileTextOutlined,
     QUESTION_CLASSIFIER: MessageOutlined,
     PARAMETER_EXTRACTOR: FunctionOutlined,
-    AGENT: RobotOutlined,
     APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: ThunderboltOutlined,
     ITERATION: LoadingOutlined,
@@ -131,6 +148,7 @@ function getNodeIcon(nodeType: string) {
     HTTP_REQUEST: ApiOutlined,
     TOOL: FunctionOutlined,
     MCP_TOOL: CloudServerOutlined,
+    WORKFLOW: MergeCellsOutlined,
   };
   return iconMap[nodeType] || FunctionOutlined;
 }
@@ -565,6 +583,83 @@ function decreaseDepth() {
           </div>
         </CollapsePanel>
 
+        <!-- 工具调用过程（LLM 节点插入工具）：模型只拿到截断后的结果，
+             面板这里也是截断摘要，完整体在输出数据的 toolCalls 里 -->
+        <CollapsePanel v-if="hasToolCalls" key="tools">
+          <template #header>
+            <div class="panel-header">
+              <span class="panel-title">工具调用</span>
+              <Tag size="small" color="orange">
+                {{ trace!.toolCalls!.length }} 次
+              </Tag>
+            </div>
+          </template>
+          <template #extra>
+            <div class="panel-actions" @click.stop>
+              <Tooltip title="复制">
+                <a
+                  class="action-btn"
+                  @click="copyToClipboard(trace!.toolCalls)"
+                >
+                  <CopyOutlined />
+                </a>
+              </Tooltip>
+            </div>
+          </template>
+          <div class="tool-call-list">
+            <div
+              v-for="(call, idx) in trace!.toolCalls"
+              :key="call.toolCallId || idx"
+              class="tool-call-item"
+            >
+              <div class="tool-call-head">
+                <span class="tool-call-order">{{ idx + 1 }}</span>
+                <span class="tool-call-name">{{
+                  call.toolName || '未命名工具'
+                }}</span>
+                <Tag :color="toolKindMeta(call.kind).color" size="small">
+                  {{ toolKindMeta(call.kind).text }}
+                </Tag>
+                <Tag v-if="call.resumed" color="gold" size="small">
+                  审批后补记
+                </Tag>
+                <span class="tool-call-round">
+                  第 {{ call.round || '-' }} 轮
+                </span>
+                <Tag v-if="call.error" color="red" size="small">失败</Tag>
+                <Tag
+                  v-else-if="call.result === undefined"
+                  color="processing"
+                  size="small"
+                >
+                  调用中
+                </Tag>
+                <Tag v-else color="success" size="small">已返回</Tag>
+              </div>
+              <div class="tool-call-block">
+                <div class="tool-call-label">入参</div>
+                <VueJsonPretty
+                  :data="call.arguments || {}"
+                  :deep="jsonExpandDepth"
+                  :show-length="true"
+                  :show-line="false"
+                  :show-double-quotes="false"
+                />
+              </div>
+              <div class="tool-call-block">
+                <div class="tool-call-label">结果摘要</div>
+                <pre v-if="call.result" class="tool-call-result">{{
+                  call.result
+                }}</pre>
+                <span v-else class="tool-call-none"> 暂无结果 </span>
+              </div>
+              <div v-if="call.error" class="tool-call-error">
+                {{ call.error }}
+              </div>
+            </div>
+          </div>
+        </CollapsePanel>
+
         <!-- 思维链 (LLM 深度思考流式) -->
         <CollapsePanel
           v-if="hasStreamingReasoning"
@@ -900,6 +995,96 @@ function decreaseDepth() {
     .reasoning-content {
       color: var(--ant-color-text-secondary);
       font-style: italic;
+    }
+
+    // 工具调用列表
+    .tool-call-list {
+      padding: 8px 12px;
+    }
+
+    .tool-call-item {
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      background-color: var(--ant-color-bg-layout);
+      border: 1px solid var(--ant-color-border-secondary);
+      border-radius: 8px;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+    }
+
+    .tool-call-head {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 8px;
+
+      .tool-call-order {
+        min-width: 18px;
+        color: var(--ant-color-text-secondary);
+        font-size: 12px;
+        text-align: center;
+      }
+
+      .tool-call-name {
+        color: var(--ant-color-primary);
+        font-family: 'Fira Code', 'Monaco', monospace;
+        font-size: 13px;
+        font-weight: 600;
+        word-break: break-all;
+      }
+
+      .tool-call-round {
+        color: var(--ant-color-text-tertiary);
+        font-size: 12px;
+      }
+    }
+
+    .tool-call-block {
+      & + .tool-call-block {
+        margin-top: 6px;
+      }
+
+      .tool-call-label {
+        margin-bottom: 4px;
+        color: var(--ant-color-text-secondary);
+        font-size: 12px;
+      }
+
+      :deep(.vjs-tree) {
+        padding: 6px 10px;
+        font-size: 12px;
+        background-color: var(--ant-color-bg-container);
+        border-radius: 4px;
+      }
+    }
+
+    .tool-call-result {
+      max-height: 160px;
+      padding: 6px 10px;
+      margin: 0;
+      overflow: auto;
+      color: var(--ant-color-text);
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background-color: var(--ant-color-bg-container);
+      border-radius: 4px;
+    }
+
+    .tool-call-none {
+      color: var(--ant-color-text-quaternary);
+      font-size: 12px;
+      font-style: italic;
+    }
+
+    .tool-call-error {
+      margin-top: 6px;
+      color: var(--ant-color-error);
+      font-size: 12px;
+      word-break: break-word;
     }
 
     .error-content {

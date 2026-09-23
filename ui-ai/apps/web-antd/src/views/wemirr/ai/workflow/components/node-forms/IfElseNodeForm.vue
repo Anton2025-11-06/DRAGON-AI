@@ -136,7 +136,7 @@ function switchValueType(condition: Condition, key: string) {
 
 // 是否为空值检查运算符
 function isNullCheckOperator(operator: CompareOperator): boolean {
-  return ['IS_EMPTY', 'IS_NOT_EMPTY', 'IS_NOT_NULL', 'IS_NULL'].includes(
+  return ['IS_EMPTY', 'IS_NOT_EMPTY', 'IS_NOT_NULL', 'IS_NULL', 'IS_TRUE', 'IS_FALSE'].includes(
     operator,
   );
 }
@@ -310,6 +310,8 @@ function handleChange() {
                   <a-select-option value="ENDS_WITH">结尾是</a-select-option>
                   <a-select-option value="IS_EMPTY">为空</a-select-option>
                   <a-select-option value="IS_NOT_EMPTY">不为空</a-select-option>
+                  <a-select-option value="IS_TRUE">为TRUE</a-select-option>
+                  <a-select-option value="IS_FALSE">为FALSE</a-select-option>
                 </a-select>
               </div>
 

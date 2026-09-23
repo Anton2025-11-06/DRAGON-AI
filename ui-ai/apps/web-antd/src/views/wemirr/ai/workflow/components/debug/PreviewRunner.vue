@@ -5,10 +5,13 @@ import type { SSEConnectionState } from './use-sse';
  * PreviewRunner 预览运行组件
  * 集成 DynamicInputForm，实现预览运行与执行事件处理
  *
- * 暂停的唯一来源是 APPROVAL 节点：收到 workflow.paused 后在面板内直接给出
- * 审批入口，结论经 submit-sync 同一套 WS 握手回传（不再有无条件的 resume 接口）。
+ * 两个运行入口：「新的运行」不带 executionId 新建一个执行；「继续运行」在
+ * 前者返回的 executionId 上带 restart 重跑（保留会话行，大模型记忆因此跨轮接着跑）。
+ * 暂停的唯一来源是等人答。本组件只负责执行与事件回推，**不嵌审批表单**：审批面板是
+ * 调试面板的第四个标签页（见 DebugPanel），结论经本组件持有的 WS 再提交一次（提交要用
+ * 同一条连接，故只暴露 submitApproval 能力）。
  */
-import type { InputField } from '#/api/ai-workflow/types';
+import type { ApprovalDecisionReq, InputField } from '#/api/ai-workflow/types';
 
 import { computed, onBeforeUnmount, ref } from 'vue';
 
@@ -24,7 +27,6 @@ import { message } from 'ant-design-vue';
 import { cancelExecution } from '#/api/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
-import ApprovalPanel from './ApprovalPanel.vue';
 import DynamicInputForm from './DynamicInputForm.vue';
 import { useWorkflowWs } from './use-ws';
 
@@ -63,6 +65,8 @@ const emit = defineEmits<{
   (e: 'nodeDelta', nodeId: string, token: string): void;
   /** 审批节点挂起，整条流停在 PAUSED */
   (e: 'workflowPaused', nodeId: string): void;
+  /** 请求展示审批页（面板内跳到第四个「审批」tab） */
+  (e: 'showApproval'): void;
   /** SSE 连接状态变化 */
   (e: 'connection-state-change', state: SSEConnectionState): void;
 }>();
@@ -79,7 +83,6 @@ const debugStore = useDebugStore();
 const {
   connectionState,
   connect: connectWs,
-  connectSubmit: connectSubmitWs,
   disconnect: disconnectWs,
 } = useWorkflowWs(props.sseBaseUrl, {
   onNodeStarted: (data) => {
@@ -99,9 +102,7 @@ const {
     if (data.nodeId) emit('workflowPaused', data.nodeId);
   },
   onApprovalPaused: (data) => {
-    const nodeId =
-      data.awaitingNodeIds?.[0] || data.approvalContext?.nodeId || '';
-    emit('workflowPaused', nodeId);
+    emit('workflowPaused', data.nodeId || '');
     message.info('已暂停，等待人工审批');
   },
   onExecutionCompleted: (data) => {
@@ -126,9 +127,6 @@ const inputFormRef = ref<InstanceType<typeof DynamicInputForm>>();
 /** 输入值 */
 const inputValues = ref<Record<string, any>>({});
 
-/** 审批结论提交中 */
-const submitting = ref(false);
-
 // ==================== Computed ====================
 
 /** 是否可以运行 */
@@ -136,21 +134,20 @@ const canRun = computed(() => {
   return props.workflowId && !debugStore.isRunning;
 });
 
-/** 待审批节点上下文（暂停时面板的数据源） */
+/** 欠人答的审批清单（详情给的那份，面板的审批表单数据源） */
 const awaitingContexts = computed(() => debugStore.awaitingApprovalList);
 
-/** 停在等待人工审批 */
-const isAwaiting = computed(
-  () => debugStore.isPaused && awaitingContexts.value.length > 0,
-);
+/**
+ * 停在等待人工审批：详情里确实还欠着人答才算。
+ *
+ * 不能拿 node.paused 当依据：子流程里的审批也会镜像到本层节点上，那份该不该弹
+ * 只有详情知道（已转给子执行的那些不在 pendingApprovals 里）。
+ */
+const isAwaiting = computed(() => awaitingContexts.value.length > 0);
 
-/** 已终态且有 executionId：允许全量重跑（RETRY） */
-const canRetry = computed(() => {
-  return (
-    !debugStore.isRunning &&
-    !debugStore.isPaused &&
-    Boolean(debugStore.executionId)
-  );
+/** 可以继续运行：已有一次「新的运行」给出的执行 id，且当前没有还在跑的一轮 */
+const canContinue = computed(() => {
+  return !debugStore.isRunning && Boolean(debugStore.executionId);
 });
 
 /** 是否有输入值 */
@@ -171,7 +168,22 @@ onBeforeUnmount(() => {
 // ==================== Methods ====================
 
 /**
- * 执行预览运行
+ * 收集当前表单里非空的入参，全空时返回 undefined（让执行行沿用上一轮输入）。
+ *
+ * 过滤空值字段：未填写（空串/null/undefined）的字段不传，
+ * 交给后端 START 节点用字段默认值兜底（否则 {query: ""} 会覆盖默认值）
+ */
+function pickInputs(): Record<string, any> | undefined {
+  const inputs = Object.fromEntries(
+    Object.entries(inputValues.value).filter(
+      ([, v]) => v !== '' && v !== null && v !== undefined,
+    ),
+  );
+  return Object.keys(inputs).length > 0 ? inputs : undefined;
+}
+
+/**
+ * 执行新的运行（新建一次执行）
  */
 async function handleRun() {
   // 验证表单
@@ -182,19 +194,11 @@ async function handleRun() {
   }
 
   try {
-    // 过滤空值字段：未填写（空串/null/undefined）的字段不传，
-    // 交给后端 START 节点用字段默认值兜底（否则 {query: ""} 会覆盖默认值）
-    const inputs = Object.fromEntries(
-      Object.entries(inputValues.value).filter(
-        ([, v]) => v !== '' && v !== null && v !== undefined,
-      ),
-    );
-
     // 启动调试状态（executionId 待首个事件 workflow.started 回填到 debugStore）
     debugStore.startPreviewRun('');
 
-    // 建立 WebSocket 并发送执行入参：连接即触发同步执行，事件经该连接实时回推
-    connectWs(props.workflowId, { inputs });
+    // 建立 WebSocket 并发出提交入参：不带 executionId 即新建一次执行
+    connectWs({ workflowId: props.workflowId, values: pickInputs() ?? {} });
 
     // 触发事件
     emit('workflowStarted', debugStore.executionId || '');
@@ -209,7 +213,7 @@ async function handleRun() {
 /**
  * 停止执行
  *
- * 预览运行走 execute-sync（本进程执行），HTTP /cancel 无法中断本进程的
+ * 预览运行走 WS /submit（本进程执行），HTTP /cancel 无法中断本进程的
  * runtime.run()，真正的停止是断开 WS（下一次 send_text 失败即中断执行）。
  * 故：先断连接 + 复位本地状态（保证按钮一定有反馈），再在 executionId
  * 已回填时补一发 HTTP cancel（兼容 worker 异步链路，失败也不影响本地停止）。
@@ -218,6 +222,8 @@ async function handleStop() {
   // 先断开 WebSocket 并复位调试状态：无论 executionId 是否已回填都能立即停止
   disconnectWs();
   debugStore.cancelExecution();
+  // 停止即放弃本轮：待办清单不清，面板会继续挂在页面上（详情里还欠着就还能答）
+  debugStore.clearPendingApprovals();
 
   // executionId 由首个 workflow.started 事件回填；存在时再请求后端取消
   const execId = debugStore.executionId;
@@ -233,35 +239,46 @@ async function handleStop() {
 }
 
 /**
- * 提交审批结论（CONTINUE）：走 submit-sync 的 WS，后续节点在同一连接里跑完
- * @param decisions 每个待审批节点一条结论
+ * 提交审批结论：同一个 executionId 再提交一次，后续节点在同一连接里跑完
+ *
+ * 由 DebugPanel 的审批区调用（本组件持有连接，只有它能再提交）。
+ * @param decisions 每份待办一条结论（靠 approvalToken 定位，不需知道落在哪个节点）
+ * @returns 是否已发出提交（缺 executionId 时返回 false，调用方据此收起 loading）
  */
-function handleApprovalSubmit(decisions: any[]) {
+function submitApproval(decisions: ApprovalDecisionReq[]): boolean {
   const execId = debugStore.executionId;
   if (!execId) {
     message.error('缺少执行 ID，无法提交审批结论');
-    return;
+    return false;
   }
-  submitting.value = true;
   try {
-    // 恢复提交沿用同一个 executionId（会话语义连续），已完成节点由后端按 node_states 跳过
-    connectSubmitWs(execId, { mode: 'CONTINUE', approval: decisions });
+    // 会话语义连续：已完成节点由后端按 node_states 跳过，未答的那几份继续挂着
+    connectWs({ executionId: execId, decisions });
+    return true;
   } catch (error: any) {
     message.error(error.message || '审批提交失败');
-  } finally {
-    submitting.value = false;
+    return false;
   }
 }
 
 /**
- * 全量重跑（RETRY）：终态行才可用，同一个 executionId 重置统计后从头跑完
+ * 继续运行（重开一轮）：在「新的运行」拿到的那个 executionId 上全量重跑
+ *
+ * 与「新的运行」的唯一区别是执行 id 复用：会话行不清，记忆因此接着上一轮。
+ * 带 restart 才能跳过「存在未答复的审批」那道拦截：没未答项时它就是普通重跑。
  */
-function handleRetry() {
+async function handleContinue() {
   const execId = debugStore.executionId;
   if (!execId) return;
-  debugStore.startPreviewRun('');
-  connectSubmitWs(execId, { mode: 'RETRY' });
-  message.success('已按原输入全量重跑');
+  const isValid = await inputFormRef.value?.validate();
+  if (!isValid) {
+    message.warning('请填写必填字段');
+    return;
+  }
+  // 复位面板但保留 executionId（传空会让停止/审批入口在首个事件回来前拿不到 id）
+  debugStore.startPreviewRun(execId);
+  connectWs({ executionId: execId, restart: true, values: pickInputs() });
+  message.success('已继续运行');
 }
 
 /**
@@ -275,12 +292,14 @@ function handleClearInputs() {
 // ==================== Expose ====================
 
 defineExpose({
-  /** 执行预览运行 */
+  /** 新的运行（新建一次执行） */
   run: handleRun,
   /** 停止执行 */
   stop: handleStop,
-  /** 全量重跑（终态后可用） */
-  retry: handleRetry,
+  /** 提交审批结论（审批面板在独立的「审批」tab，连接在本组件手里） */
+  submitApproval,
+  /** 继续运行（在同一个 executionId 上 restart 一轮） */
+  continueRun: handleContinue,
   /** 获取输入值 */
   getInputValues: () => ({ ...inputValues.value }),
   /** 设置输入值 */
@@ -317,21 +336,20 @@ defineExpose({
           @click="handleRun"
         >
           <template #icon><PlayCircleOutlined /></template>
-          预览运行
+          新的运行
         </a-button>
+        <a-tooltip
+          title="在「新的运行」返回的执行 id 上再跑一轮（restart）：入参取上方表单，全空则沿用上轮"
+        >
+          <a-button :disabled="!canContinue" @click="handleContinue">
+            <template #icon><RedoOutlined /></template>
+            继续运行
+          </a-button>
+        </a-tooltip>
         <a-button v-if="debugStore.isRunning" danger @click="handleStop">
           <template #icon><StopOutlined /></template>
           停止
         </a-button>
-        <a-tooltip
-          v-else-if="canRetry"
-          title="同一 executionId 全量重跑（RETRY）"
-        >
-          <a-button @click="handleRetry">
-            <template #icon><RedoOutlined /></template>
-            全量重跑
-          </a-button>
-        </a-tooltip>
       </div>
     </div>
 
@@ -347,8 +365,17 @@ defineExpose({
             {{
               isAwaiting
                 ? '执行已暂停 - 等待人工审批'
-                : '执行已暂停 - 未收到审批上下文，请刷新执行详情'
+                : '执行已暂停 - 未取到待办清单，请刷新执行详情'
             }}
+            <!-- 审批表单不在本页：给个入口跳到第四个「审批」tab -->
+            <a-button
+              v-if="isAwaiting"
+              type="link"
+              size="small"
+              @click="emit('showApproval')"
+            >
+              去提交审批
+            </a-button>
           </span>
           <span v-else>
             <LoadingOutlined /> 正在执行...
@@ -374,15 +401,6 @@ defineExpose({
         </template>
       </a-alert>
     </div>
-
-    <!-- 审批面板：暂停的唯一入口 -->
-    <ApprovalPanel
-      v-if="isAwaiting"
-      class="runner-approval"
-      :contexts="awaitingContexts"
-      :submitting="submitting"
-      @submit="handleApprovalSubmit"
-    />
 
     <!-- 动态输入表单 -->
     <div class="input-form-section">
@@ -444,10 +462,6 @@ defineExpose({
       align-items: center;
     }
   }
-}
-
-.runner-approval {
-  margin-bottom: 16px;
 }
 
 .input-form-section {

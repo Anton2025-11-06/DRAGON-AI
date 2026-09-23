@@ -5,6 +5,16 @@
 ## 0. 变更记录（2026-09-08：取消 celery，统一 arq 异步执行）
 
 > ⚠️ 本次重构后，下文 4.1/4.4/5.1/5.2/5.7 中关于「同步 execute 入口、request_pause/request_cancel 信号控制、TTL 看门狗、进程内注册表恢复」的旧描述**已被新模型取代**，阅读时请以本变更记录 + 代码注释为准。
+>
+> ⚠️ 再之后「审批节点 + 指定 executionId 再提交 + 大模型记忆」一轮重构（见
+> `docs/workflow-approval-memory.md`）又把 `pause`/`resume`/`resume-from-snapshot` 与断点
+> （`breakpoints`，含 `tb_workflow_execution` 的同名列）整体下线，暂停唯一来源是 APPROVAL
+> 节点，恢复/重跑统一走提交接口。下文涉及这些能力的段落仅作历史留存，以该文档为准。
+>
+> ⚠️ 最近一轮（执行契约重构，见 `docs/workflow-execution-contract.md`）把四个提交端点与同名服务方法
+> 删净：对外只剩 `POST|WS /workflow-executions/submit`（不带 `executionId` 即新建）。下文 4.1
+> 「两个执行入口」、4.3「暂停写 `{global, context, snapshot}`」、4.4「注册表与 resume 信号」、
+> 5.2「run() 停在暂停循环里等信号」均已成历史，该文档没覆盖的地方以代码注释为准。
 
 1. **任务队列**：废除 celery，全部任务走 `arq_tasks/`（`WorkerSettings`，Redis **db=1**）投递执行。
 2. **执行入口统一**：`execute`（同步）已删除，**仅保留 `execute_async`**。API 层投递任务到 arq 队列后立即返回 `executionId`，前端通过 SSE `subscribe` 接口 + executionId 订阅该次执行的事件流。
@@ -18,7 +28,7 @@
 7. **事件通道纯 Redis Pub/Sub（无进程内状态）**：`EventBus` 删除本地历史缓冲/订阅队列/close，每次 publish 直接交给注入的 pub hook 实时 PUBLISH；`execution_registry`（进程内 `{execution_id: Runtime}` 注册表）整体删除，SSE 订阅/快照统一走 Redis 频道与 DB（晚订阅 DB 兜底）。
 8. **执行状态统一常量**：engine 定义 `STATUS_*`（PENDING/RUNNING/PAUSED/COMPLETED/CANCELLED/FAILED），service/arq/订阅器一律引用常量，禁止裸字符串。
 9. **归档功能删除**：后端 archive 接口/方法、前端归档按钮/API/状态色标、相关测试用例全部移除，工作流状态仅剩 DRAFT/PUBLISHED。
-10. **修复新触发执行输入丢失 Bug**：`_build_runtime` 直接以执行记录行 `inputs/breakpoints` 构造运行时，`restore()` 仅在存在快照（暂停恢复）时调用，避免空快照把新执行输入清空。
+10. **修复新触发执行输入丢失 Bug**：`_build_runtime` 直接以执行记录行的 `inputs` 构造运行时，`restore()` 仅在存在快照（暂停恢复）时调用，避免空快照把新执行输入清空。
 11. **节点「返回内容」开关（emitOutput）**：每个节点可在属性面板设置返回内容开关（缺省开启）——开则把该节点数据事件（`node.completed` 的输出、`node.delta` token 流）实时推送给客户端；关则这两个数据事件不广播（`node.started`/`node.failed` 与 workflow 级终态事件不受影响）。数据持久化（节点明细落库、执行状态记录）一直开启，与开关无关。
 
 ## 1. 总体架构（四层，依赖单向向下）
@@ -131,7 +141,7 @@ execute_async() 异步：asyncio.create_task(_run())，立即返回 executionId
 ```
 取图（DEBUG=草稿 / 正式=快照） → WorkflowGraph 解析 + 严格校验
 → 写 tb_workflow_execution(RUNNING, uuid4)
-→ WorkflowRuntime(graph, inputs, breakpoints,
+→ WorkflowRuntime(graph, execution_id, inputs,
      model_provider=GatewayCacheConfigProvider,   # 模型配置：Redis 缓存+MySQL 回源
      http_client=共享 httpx.AsyncClient,           # 连接池复用
      node_persist_hook=_persist_node,              # 节点状态变化落库
@@ -157,7 +167,7 @@ execute_async() 异步：asyncio.create_task(_run())，立即返回 executionId
 ```python
 runtime = WorkflowRuntime(graph, execution_id, inputs, ...)
 runtime.restore(snapshot)   # 仅暂停恢复;新触发 variables 为空则跳过
-await runtime.run()         # 由 arq worker 任务驱动(execute-async)
+await runtime.run()         # 由 arq worker 任务或 WS 提交驱动
 # 事件:节点事件(含 node.delta)经 EventBus pub hook 实时 PUBLISH
 # 到 Redis 频道(Pub/Sub),无进程内注册表与本地事件缓存
 ```
@@ -172,7 +182,7 @@ emit(workflow.started)
       _do_pause()（状态落库+发事件+挂 TTL 看门狗）
       await _resume_signal.wait()   ← run() 在整个生命周期 parked 在这里
       恢复后重排 _pending_nodes 继续调度
-→ 全图完成：status=COMPLETED，_collect_outputs()（合并所有 END 节点输出）
+→ 全图完成：status=COMPLETED，_collect_outputs()（合并本轮跑过的 END/REPLY 输出）
 → 异常：FAILED（落库+发事件+上抛）；取消：CANCELLED
 → finally: bus.close()
 ```
@@ -258,7 +268,8 @@ local    scopes 栈（LOOP/ITERATION 的 item/index，栈顶优先）
   publish_hook 实时 PUBLISH 到 Redis 频道 `workflow:evt:{execution_id}`（含 node.delta
   token 级流式）；hook 缺失（引擎直驱测试）时事件直接丢弃。订阅者跨进程 SUBSCRIBE 同一频道
   实时消费（见 services/event_pubsub.py），晚订阅由 DB 状态兜底。
-- 事件协议（前端 runtime-events.ts 按行解析）：`workflow.started/resumed/paused/completed/failed/cancelled` + `node.started/delta/completed/failed`。SSE 帧：`event: {type}\ndata: {json}\n\n`。
+- 事件协议（前端 runtime-events.ts 按行解析）：`workflow.started/resumed/paused/completed/failed/cancelled` + `node.started/delta/completed/failed/paused/timeout/cancelled/tool_call/tool_result`。SSE 帧：`event: {type}\ndata: {json}\n\n`。
+- 大模型节点插入工具（需求 6/7/8）：`node.tool_call`（模型要求调哪个工具、传了什么参数）+ `node.tool_result`（结果摘要，按 `TOOL_EVENT_SUMMARY_CHARS` 截断）靠 `toolCallId` 配对，完整结果在节点输出 `toolCalls` 里。这两个是过程可见性、不受 `emitOutput` 约束；工具结果是否作为内容推给客户端由 LLM 节点的 `emitToolResult` 单独控制。带工具时流式开关照常生效（流式响应的 `delta.tool_calls` 分片由 `ChatMLMixin._chat_stream` 按 index 累加、收尾片物化成与 ainvoke 同形状的列表），轮次上限 `MAX_TOOL_ROUNDS=50`。
 - 节点「返回内容」开关（画布 `data.emitOutput`，默认开）：开才广播该节点的数据事件——`node.delta`（nodes/base.py `emit_delta`）与 `node.completed`（engine `_execute_node`）；关则跳过。受开关影响的仅这两个事件；节点执行、`node.started`/`node.failed` 与数据持久化（落库）不受影响。
 
 ## 8. 新增一种节点（二开标准路径）
@@ -300,6 +311,23 @@ local    scopes 栈（LOOP/ITERATION 的 item/index，栈顶优先）
 5. **并行分支异常必须上抛**（gather 后检查 BaseException），否则假成功。
 6. **变量解析失败返回 None 而非报错**（非 strict），排查"输出空"问题时先想引用没解析。
 7. **执行记录不随工作流删除级联**（审计保留）；同名工作流允许存在（测试文本断言注意）。
+8. **`row.outputs` 只有 END/REPLY 配的那一份，父侧取数要并上节点输出**：`_collect_outputs()`
+   只收本轮跑过的 END/REPLY，而 END 不配输出变量只是 WARNING，所以
+   `tb_workflow_execution.outputs` 完全可能是 `{}`。父侧（【工作流】节点、LLM 的工作流工具）
+   走 `service.child_result_outputs`：从 `node_states` 里按 skip=false × emitted=true ×
+   终态（COMPLETED 收 output、FAILED 收 error）挑出节点输出，以节点 id 为键并一层，
+   再用 END 声明的 outputs 覆盖顶层（它是子流程对外的公开契约）。
+   - 节点类型在 `CHILD_RESULT_SKIP_TYPES`（START/END/REPLY/IF_ELSE/LOOP/PARALLEL）里的不收：
+     START 只有入参回显，END/REPLY 的输出已在顶层平铺，IF_ELSE/PARALLEL 的 output 主体是
+     入边上游的整块透传，LOOP 的 `loopResult` 又是循环体全部节点输出的副本（体内节点会被
+     逐个单独收）。**ITERATION 不在列** —— 循环体每轮被 `_reset_subgraph_nodes` 重置，
+     体内节点只剩最后一轮的 output，只有它的 `items` 是逐次迭代的完整聚合。
+     加新节点类型时得想清楚属不属于这一类。
+   - 别指望订阅事件流补：`workflow.completed` 的 outputs 就是同一个 `_collect_outputs()`；
+     `node.completed` 带 output 又有两个前置（emitOutput 开着、节点非流式），而父侧是 await
+     到子执行终态才取数，那时再订阅只会走 DB 回放，回放读的仍是 `node_states`。
+   - `emitted` 是 `engine.NodeState` 的执行时快照（`data.emitOutput` 只住在图里，取数侧回读
+     发布快照太贵）；往 node_states 加字段时 **hydrate 必须读回来**，否则恢复轮落库会把它重置成默认值。
 
 ## 10. 当前架构边界（分布式现状）
 

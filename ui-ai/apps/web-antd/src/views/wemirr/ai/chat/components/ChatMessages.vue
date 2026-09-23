@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ChatReference } from '../../shared';
 
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import {
   CopyOutlined,
@@ -20,6 +20,7 @@ import {
 } from 'markstream-vue';
 
 import { referenceDisplayIndex } from '../../shared';
+import { useFollowBottom } from '../../shared/composables/useFollowBottom';
 
 import 'markstream-vue/index.css';
 
@@ -54,7 +55,10 @@ export interface ChatMessage {
 }
 
 // ==================== Refs ====================
+// containerRef 是滚动容器（.chat-messages 上 overflow: hidden scroll），
+// listRef 是被它撑高的内容元素——自动跟随要看的是内容尺寸变化，不是 prop 变化
 const containerRef = ref<HTMLElement | null>(null);
+const listRef = ref<HTMLElement | null>(null);
 
 // ==================== 操作处理 ====================
 function handleCopy(content: string) {
@@ -87,6 +91,30 @@ const displayMessages = computed(() => {
   return items;
 });
 
+// ==================== 思考过程展开态 ====================
+/** 正在流式输出的那条气泡（上面只把 streaming 内容灌进最后一条 AI 消息） */
+const streamingKey = computed(() => {
+  if (!props.isStreaming) return '';
+  const last = displayMessages.value.at(-1);
+  return last?.role === 'ai' ? last.key : '';
+});
+
+// 用户手动开合过的气泡：记下来就完全听他的，不再被“是否在输出中”覆盖
+// （历史消息不该被自动铺开，正在输出的那条他手动收起了就别再弹开）
+const reasonOverrides = ref<Record<string, boolean>>({});
+
+function isReasonOpen(msg: ChatMessage): boolean {
+  const manual = reasonOverrides.value[msg.key];
+  return manual === undefined ? msg.key === streamingKey.value : manual;
+}
+
+function toggleReason(msg: ChatMessage) {
+  reasonOverrides.value = {
+    ...reasonOverrides.value,
+    [msg.key]: !isReasonOpen(msg),
+  };
+}
+
 /** 接口返回数据格式化为可读文本：对象 JSON 缩进，字符串原样 */
 function formatResponseData(data: unknown): string {
   if (typeof data === 'string') return data;
@@ -105,42 +133,26 @@ function hasResponseData(
 }
 
 // ==================== 滚动到底部 ====================
-let scrollTimer: null | ReturnType<typeof setTimeout> = null;
+// 跟随逻辑集中在 useFollowBottom（认得出真正在滚的元素、不被继承来的 smooth 带偏、
+// 盯内容尺寸而不是盯 prop），这里只负责在合适的时机推它一把
+const { scrollToBottom } = useFollowBottom(containerRef, { content: listRef });
 
-// 用户是否贴近底部（距离底部小于阈值）；为 false 时暂停自动滚动，避免流式输出打断阅读
-const isNearBottom = ref(true);
+// 刚发消息/切会话时不管三七二十一先贴底（正常流式输出靠观察器）
+watch(
+  () => props.messages.length,
+  () => scrollToBottom(true),
+);
+watch(
+  () => props.streamingReferences?.length,
+  () => scrollToBottom(),
+);
 
-function handleScroll() {
-  const el = containerRef.value;
-  if (!el) return;
-  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-}
-
-function scrollToBottom() {
-  // 用户正在查看上方历史时不打扰，滚回底部附近后再恢复自动跟随
-  if (!isNearBottom.value) return;
-  if (scrollTimer) return;
-  scrollTimer = setTimeout(() => {
-    scrollTimer = null;
-    nextTick(() => {
-      if (containerRef.value) {
-        containerRef.value.scrollTop = containerRef.value.scrollHeight;
-      }
-    });
-  }, 50);
-}
-
-watch(() => props.messages.length, scrollToBottom);
-watch(() => props.streamingContent, scrollToBottom);
-watch(() => props.streamingThinking, scrollToBottom);
-watch(() => props.streamingReferences?.length, scrollToBottom);
-
-defineExpose({ scrollToBottom });
+defineExpose({ scrollToBottom: () => scrollToBottom(true) });
 </script>
 
 <template>
-  <div ref="containerRef" class="chat-messages" @scroll="handleScroll">
-    <div class="message-list">
+  <div ref="containerRef" class="chat-messages">
+    <div ref="listRef" class="message-list">
       <div
         v-for="msg in displayMessages"
         :key="msg.key"
@@ -164,12 +176,14 @@ defineExpose({ scrollToBottom });
 
           <!-- AI 消息 -->
           <template v-else>
+            <!-- 思考过程：只有正在输出的那条自动展开（输出完收回，历史气泡不占版面）；
+                 open 全由状态驱动 + 拦下 summary 的默认开合，否则用户点了又被下一帧强改回去 -->
             <details
               v-if="msg.thinking"
               class="thinking-panel"
-              :open="isStreaming"
+              :open="isReasonOpen(msg)"
             >
-              <summary>思考</summary>
+              <summary @click.prevent="toggleReason(msg)">思考</summary>
               <div class="thinking-content">{{ msg.thinking }}</div>
             </details>
             <div class="message-bubble ai">
@@ -263,6 +277,9 @@ defineExpose({ scrollToBottom });
   min-height: 0;
   padding: 24px 0;
   overflow: hidden scroll;
+  // 全局 html{scroll-behavior:smooth} 会继承下来，让程序贴底变成一段动画
+  // （流式输出时永远追不上内容）：这一屏的跟随必须是瞬时的
+  scroll-behavior: auto;
   // 始终显示滚动条轨道，防止内容变化导致的抖动
   &::-webkit-scrollbar {
     width: 8px;

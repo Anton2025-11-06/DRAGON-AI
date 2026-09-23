@@ -134,6 +134,15 @@ function formatValue(value: any): string {
   return String(value);
 }
 
+/**
+ * 留痕行的定位键：改了子字段时变量名重复（同一个 body 里改了两个 key），
+ * 不拼上 path 就看不出改的是哪一个
+ */
+function diffKey(row: any): string {
+  const path = row?.path ? `.${row.path}` : '';
+  return `${row?.nodeId}.${row?.varName}${path}`;
+}
+
 /** 超时/取消不是执行失败，错误条用黄色告警 */
 function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
   if (status === 'TIMEOUT') return 'warning';
@@ -290,11 +299,11 @@ function getNodeErrorType(status?: string): 'error' | 'info' | 'warning' {
                   </div>
                   <div
                     v-for="row in node.reviewDiff || []"
-                    :key="`${row.nodeId}:${row.varName}`"
+                    :key="diffKey(row)"
                     class="approval-diff"
                   >
                     <div class="diff-key">
-                      {{ row.nodeId }}.{{ row.varName }}
+                      {{ diffKey(row) }}
                     </div>
                     <div class="diff-old">{{ formatValue(row.oldValue) }}</div>
                     <div class="diff-arrow">→</div>

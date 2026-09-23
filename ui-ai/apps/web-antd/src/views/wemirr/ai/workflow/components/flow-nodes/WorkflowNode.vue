@@ -19,13 +19,13 @@ import {
   CommentOutlined,
   DatabaseOutlined,
   FileTextOutlined,
+  MergeCellsOutlined,
   PlayCircleOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
   StopOutlined,
   SyncOutlined,
   ToolOutlined,
-  UserOutlined,
 } from '@ant-design/icons-vue';
 import { Handle, Position } from '@vue-flow/core';
 
@@ -93,7 +93,6 @@ const iconComponent = computed(() => {
     KNOWLEDGE_RETRIEVAL: BookOutlined,
     QUESTION_CLASSIFIER: BranchesOutlined,
     PARAMETER_EXTRACTOR: ApiOutlined,
-    AGENT: UserOutlined,
     APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: BranchesOutlined,
     ITERATION: SyncOutlined,
@@ -109,6 +108,7 @@ const iconComponent = computed(() => {
     TOOL: ToolOutlined,
     MCP_TOOL: CloudServerOutlined,
     VARIABLE_ASSIGNER: DatabaseOutlined,
+    WORKFLOW: MergeCellsOutlined,
   };
   return iconMap[nodeType.value];
 });
@@ -203,6 +203,12 @@ const inputSummary = computed(() => {
       const fields = config.value.fields || [];
       return fields.length > 0 ? `${fields.length} 个输入` : '无输入';
     }
+    case 'WORKFLOW': {
+      if (!config.value.workflowId) return '未配置';
+      return config.value.versionMode === 'SPECIFIC'
+        ? `${config.value.workflowName || '子工作流'} v${config.value.version ?? '?'}`
+        : `${config.value.workflowName || '子工作流'}（最新版）`;
+    }
     default: {
       return '点击配置';
     }
@@ -213,7 +219,8 @@ const inputSummary = computed(() => {
 const outputSummary = computed(() => {
   switch (nodeType.value) {
     case 'APPROVAL': {
-      return '审批结论';
+      // 同意与不同意都把结论三键交给下游，走不走、怎么走由下游条件节点定
+      return '审批结论 + 透传参数';
     }
     case 'CODE': {
       return '代码执行结果';
@@ -229,6 +236,9 @@ const outputSummary = computed(() => {
     }
     case 'TOOL': {
       return '工具执行结果';
+    }
+    case 'WORKFLOW': {
+      return `${config.value.outputVariable || 'result'} + text`;
     }
     default: {
       return '变量输出';

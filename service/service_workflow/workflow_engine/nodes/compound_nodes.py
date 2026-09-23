@@ -99,7 +99,7 @@ class IterationNodeExecutor(BaseNodeExecutor):
 
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
         cfg = self.config
-        arr = ctx.resolve(str(cfg.get("arrayVariable") or ""))
+        arr = ctx.resolve_ref(cfg.get("arrayVariable"))
         if arr is None:
             raise ValueError(f"迭代数组变量无法解析: {cfg.get('arrayVariable')}")
         if not isinstance(arr, list):

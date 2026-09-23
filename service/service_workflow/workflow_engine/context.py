@@ -22,6 +22,9 @@ from service.service_workflow.workflow_engine.graph import WorkflowGraph
 # {{xxx.yyy[.zzz]}} —— 允许字母/数字/下划线/中文/点号
 VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z0-9_\u4e00-\u9fa5.\-\[\]0-9]+)\s*\}\}")
 
+# 整串只有一个 {{引用}}（内部不再含花括号）：用于区分「单引用保类型」与「多引用拼文本」
+_SINGLE_VAR_PATTERN = re.compile(r"\s*\{\{\s*([^{}]+?)\s*\}\}\s*")
+
 
 class VariableNotFound(Exception):
     """strict 模式下变量引用无法解析"""
@@ -92,23 +95,6 @@ class ExecutionContext:
     def get_node_output(self, node_id: str) -> dict:
         return self.node_outputs.get(node_id, {})
 
-    def to_dict(self) -> dict:
-        """调试快照：全部上下文导出。"""
-        return {
-            "inputs": self.inputs,
-            "global": self.global_vars,
-            "nodes": self.node_outputs,
-            "scopes": list(self.scopes),
-            "executed": list(self.executed),
-        }
-
-    def restore(self, snapshot: dict) -> None:
-        self.inputs = dict(snapshot.get("inputs") or {})
-        self.global_vars = dict(snapshot.get("global") or {})
-        self.node_outputs = {k: dict(v) for k, v in (snapshot.get("nodes") or {}).items()}
-        self.scopes = [dict(s) for s in (snapshot.get("scopes") or [])]
-        self.executed = list(snapshot.get("executed") or [])
-
     # ==================== 变量解析 ====================
 
     def resolve(self, ref: str) -> Any:
@@ -178,6 +164,27 @@ class ExecutionContext:
             raise VariableNotFound(f"变量引用无法解析: {ref}")
         return value
 
+    def resolve_ref(self, ref: Any) -> Any:
+        """解析「引用参数」类配置项（REPLY 引用参数 / 输入变量 / 文件变量…）。
+
+        前端这类字段的输入框是 VariableInput（自由文本 + 变量标签混排），用户可以在
+        同一个字段里插入多个 {{引用}}，因此不能按单引用剥壳处理：
+        - 单个 {{a}} 或裸引用 a.b：走 resolve，保留解析值的原始类型（对象/数组不转字符串）；
+        - 多个引用（{{a}}{{b}}）或引用与普通文本混排：按模板渲染成拼接后的文本，
+          未解析到的引用渲染为空串，整体为空时返回 None（由调用方报「无法解析」）。
+        早先的实现只剥首尾花括号，多引用会拼成一个坏引用（nodes.a.out1nodes.a.out2）
+        并恒定解析失败，就是本方法要解决的场景。
+        """
+        text = ref if isinstance(ref, str) else ("" if ref is None else str(ref))
+        text = text.strip()
+        if not text:
+            return None
+        # 不含大括号（裸引用/字面量）或整体就是一个 {{...}}：单引用，保留类型
+        if "{{" not in text or _SINGLE_VAR_PATTERN.fullmatch(text):
+            return self.resolve(text)
+        rendered = self._render_string(text, strict=False, keep_unresolved=False)
+        return rendered if rendered.strip() else None
+
     # ==================== 模板渲染 ====================
 
     def render(self, template: Any, strict: bool = False,
@@ -221,6 +228,10 @@ class ExecutionContext:
     def extract_refs(self, text: str) -> list[str]:
         """提取模板中的全部变量引用（依赖分析/校验用）。"""
         return [m.group(1) for m in VAR_PATTERN.finditer(text or "")]
+
+    def unresolved_refs(self, text: str) -> list[str]:
+        """模板中当前取不到值的引用（报错文案用来定位到具体哪一段没解析上）。"""
+        return [r for r in self.extract_refs(text) if self.resolve(r) is None]
 
 
 def parse_json_if_embedded(value: Any) -> Any:
@@ -266,3 +277,53 @@ def _dig(value: Any, path: str) -> Any:
         if value is None:
             return None
     return value
+
+
+def split_path(path: str) -> list:
+    """路径切成 token 序列（`_dig`/`set_dig` 共用，切法必须一致否则读写不闭环）。"""
+    return [t for t in re.split(r"[.\[\]]+", (path or "").strip()) if t]
+
+
+def set_dig(root: Any, path: str, value: Any) -> tuple:
+    """按路径写嵌套值（`_dig` 的写侧）：返回 (写入后的容器, 是否写成功)。
+
+    审批人只改大对象里的某个字段时走这里：不然得把整段 JSON 重录入，既易错
+    又把没改的字段一起覆盖掉。三条约定：
+    - 空路径 = 直接替换整值（等价于旧的回写口径）；
+    - 中途是 JSON 字符串（大模型结构化输出很常见）先解开、改完再序列化回去：
+      读侧本来就是「按需解开」，写侧跟同一口径才不会把结构化输出压成普通文本；
+    - 路径不存在/中间撞标量/数组越界 → 放弃回写并返回 (原值, False)，
+      宁可不改也不凭空造一层结构（清单里的行本来就是从真实存在的值取出来的）。
+    """
+    tokens = split_path(path)
+    if not tokens:
+        return value, True
+    return _set_tokens(root, tokens, value)
+
+
+def _set_tokens(node: Any, tokens: list, value: Any) -> tuple[Any, bool]:
+    head, rest = tokens[0], tokens[1:]
+    original = node
+    node = parse_json_if_embedded(node)
+    was_json = node is not original and isinstance(node, (dict, list))
+    key: Any = head
+    if isinstance(node, dict):
+        if head not in node:
+            return original, False
+    elif isinstance(node, list):
+        try:
+            key = int(head)
+        except ValueError:
+            return original, False
+        if not -len(node) <= key < len(node):
+            return original, False
+    else:
+        return original, False
+    if rest:
+        child, ok = _set_tokens(node[key], rest, value)
+        if not ok:
+            return original, False
+        node[key] = child
+    else:
+        node[key] = value
+    return (json.dumps(node, ensure_ascii=False) if was_json else node), True

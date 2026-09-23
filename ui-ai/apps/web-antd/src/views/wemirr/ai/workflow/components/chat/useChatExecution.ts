@@ -1,16 +1,7 @@
 /**
- * 对话窗口的一次执行运行态 + SSE 订阅。
- *
- * 每次「发送」产生一个 ChatRun（步骤、流式正文、最终输出），execute-async 拿到
- * executionId 后订阅 GET /workflow-executions/{id}/subscribe 的 SSE 事件流，
- * 按事件类型原地更新这个 ChatRun。
- *
- * 审批：收到 node.paused / workflow.paused 后本轮结束（SSE 关掉、气泡不转圈），
- * 待审批上下文挂在 ChatRun.awaiting 上供面板渲染；结论经 /submit 回传后重新订阅
- * 同一 executionId 的事件流，后续节点补写进同一个气泡（会话历史不断层）。
- *
- * 不复用 components/debug/use-sse.ts：那份实现把事件写进全局 debugStore，
- * 对话是多轮并存的历史，同一条流写全局会把上一轮的状态串掉。
+ * 对话窗口的一次执行运行态 + SSE 订阅：一个会话固定一个 executionId，每轮在同一 id 上提交。
+ * 待审批只从执行详情的 pendingApprovals 读（帧上不承载审批内容），谁要画面板谁刷新。
+ * 不复用 components/debug/use-sse.ts：那份把事件写进全局 debugStore，撑不住多轮并存的历史。
  */
 
 import type {
@@ -21,6 +12,8 @@ import type {
   NodePausedEvent,
   NodeStartedEvent,
   NodeTimeoutEvent,
+  NodeToolCallEvent,
+  NodeToolResultEvent,
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
   WorkflowPausedEvent,
@@ -28,8 +21,9 @@ import type {
 } from '../../domain/runtime-events';
 
 import type {
-  ApprovalContext,
   ApprovalDecisionReq,
+  LlmToolKind,
+  PendingApproval,
 } from '#/api/ai-workflow/types';
 
 import { reactive, ref } from 'vue';
@@ -40,11 +34,22 @@ import { SSE } from 'sse.js';
 
 import {
   cancelExecution,
-  executeWorkflowAsync,
   getExecution,
   getExecutionSubscribeUrl,
-  submitExecution,
+  submitWorkflow,
 } from '#/api/ai-workflow';
+
+/** 一次工具调用的痕迹（node.tool_call 开条、node.tool_result 回填结果） */
+export interface ChatToolCall {
+  arguments?: Record<string, any>;
+  error?: null | string;
+  kind?: LlmToolKind;
+  round?: number;
+  result?: string;
+  resumed?: boolean;
+  toolCallId?: string;
+  toolName?: string;
+}
 
 /** 单个节点的执行痕迹 */
 export interface ChatStep {
@@ -66,6 +71,8 @@ export interface ChatStep {
     | 'running'
     | 'skipped'
     | 'timeout';
+  /** 插入工具后的调用过程（按事件到达顺序追加） */
+  toolCalls?: ChatToolCall[];
 }
 
 /** 一轮对话（一次工作流执行）的完整状态 */
@@ -81,8 +88,8 @@ export interface ChatRun {
   steps: ChatStep[];
   /** 流式正文增量，按节点聚合 */
   streams: Record<string, string>;
-  /** 待审批节点上下文（空=无挂起） */
-  awaiting: ApprovalContext[];
+  /** 此刻欠人答的审批（执行详情 pendingApprovals 的镜像，空=无挂起） */
+  pendingApprovals: PendingApproval[];
   /** 本轮使用的 API Key（再提交/取消要带同一个 key） */
   apiKey?: string;
 }
@@ -108,9 +115,9 @@ function parseFrame<T>(raw: unknown): null | T {
  */
 export function createChatRun(executionId: string): ChatRun {
   return reactive({
-    awaiting: [],
     executionId,
     outputs: {},
+    pendingApprovals: [],
     reasoning: {},
     status: 'running',
     steps: [],
@@ -131,6 +138,13 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
   /** 事件静默多久后主动查一次执行详情 */
   const IDLE_PROBE_MS = 15_000;
+
+  /**
+   * 断流后最多重新订阅几次（父等子的那段静默窗口可被网关回收连接，需要自愈）。
+   * 不封顶就会在「服务端一直不返终态帧」的异常场景下订阅风暴，给一个足够宽的数。
+   */
+  const MAX_RESUBSCRIBE = 20;
+  let resubscribes = 0;
 
   function clearPoll() {
     if (pollTimer) {
@@ -238,6 +252,54 @@ export function useChatExecution(options: ChatExecutionOptions) {
     if (data.error) step.error = data.error;
   }
 
+  /**
+   * 工具调用 / 结果：归到发起调用的那个节点步骤上。
+   *
+   * 节点可能因取消/断流错过 node.started，ensureStep 兼容：至少调用过程要可见。
+   * 结果帧靠 toolCallId 配对（模型一轮可并行发多个调用）。
+   */
+  function onToolCall(run: ChatRun, data: NodeToolCallEvent) {
+    if (!data.nodeId) return;
+    const step = ensureStep(run, data.nodeId);
+    step.toolCalls = [
+      ...(step.toolCalls || []),
+      {
+        arguments: data.arguments,
+        kind: data.toolKind,
+        round: data.round,
+        resumed: data.resumed,
+        toolCallId: data.toolCallId,
+        toolName: data.toolName,
+      },
+    ];
+  }
+
+  function onToolResult(run: ChatRun, data: NodeToolResultEvent) {
+    if (!data.nodeId) return;
+    const step = ensureStep(run, data.nodeId);
+    const existed = (step.toolCalls || []).find(
+      (item) => item.toolCallId && item.toolCallId === data.toolCallId,
+    );
+    if (existed) {
+      existed.error = data.error ?? null;
+      existed.result = data.result;
+      if (data.resumed !== undefined) existed.resumed = data.resumed;
+      return;
+    }
+    step.toolCalls = [
+      ...(step.toolCalls || []),
+      {
+        error: data.error ?? null,
+        kind: data.toolKind,
+        result: data.result,
+        round: data.round,
+        resumed: data.resumed,
+        toolCallId: data.toolCallId,
+        toolName: data.toolName,
+      },
+    ];
+  }
+
   function onCompleted(run: ChatRun, data: WorkflowCompletedEvent) {
     run.outputs = (data.outputs || {}) as Record<string, any>;
     run.duration = data.duration;
@@ -256,53 +318,43 @@ export function useChatExecution(options: ChatExecutionOptions) {
     finish();
   }
 
-  /** 把审批上下文按节点 id 合并入库（node.paused 先到、workflow.paused 补全） */
-  function upsertAwaiting(run: ChatRun, context?: ApprovalContext) {
-    if (!context?.nodeId) return;
-    const existed = run.awaiting.find((item) => item.nodeId === context.nodeId);
-    if (existed) {
-      Object.assign(existed, context);
-    } else {
-      run.awaiting.push(context);
+  /**
+   * 用执行详情刷新本轮欠人答的审批（审批内容的唯一来源）。
+   * 详情读不到时保持原样：读失败不能当成「没有欠着的审批」。
+   */
+  async function refreshPendingApprovals(run: ChatRun) {
+    try {
+      const detail = await getExecution(run.executionId);
+      if (detail) run.pendingApprovals = detail.pendingApprovals || [];
+    } catch {
+      // 查不动详情：面板维持现状，由下一轮探测或用户重试补上
     }
   }
 
-  /** 单个审批节点挂起：本轮还会跑无关分支，先记住待决态 */
+  /** 单个审批节点挂起：本轮还会跑无关分支，先把这个节点画成等人答 */
   function onNodePaused(run: ChatRun, data: NodePausedEvent) {
     if (!data.nodeId) return;
     ensureStep(run, data.nodeId, data.nodeType as string | undefined).status =
       'awaiting';
-    upsertAwaiting(
-      run,
-      data.approvalContext || {
-        nodeId: data.nodeId,
-        pauseScope: data.pauseScope,
-      },
-    );
   }
 
   /**
-   * 整条流本轮跑完但还有未决策的审批节点：停住转圈、关流，等面板提交。
+   * 整条流本轮跑完但停在等人：停住转圈、关流，再从详情取待办给面板。
    *
-   * 不算终态（不记入 settled=false 的口径），但也要把看门狗拆掉：
-   * 后端已经退出 run()，再轮询只会拿到 PAUSED。
+   * 不算终态，但也要把看门狗拆掉：后端已经退出 run()，再轮询只会拿到 PAUSED。
    */
-  function onWorkflowPaused(run: ChatRun, data: WorkflowPausedEvent) {
-    upsertAwaiting(run, data.approvalContext);
-    (data.awaitingNodeIds || []).forEach((id) => {
-      ensureStep(run, id).status = 'awaiting';
-      upsertAwaiting(run, { nodeId: id });
-    });
+  async function onWorkflowPaused(run: ChatRun, data: WorkflowPausedEvent) {
     if (data.nodeId) ensureStep(run, data.nodeId).status = 'awaiting';
     run.duration = data.duration;
     run.status = 'paused';
-    clearAwaitingStepsAsPaused(run);
     finish();
+    await refreshPendingApprovals(run);
+    clearAwaitingStepsAsPaused(run);
   }
 
-  /** 未给上下文的挂起步骤统一标 paused，避免面板进不了审批入口时看不出异常 */
+  /** 标了等人答但详情里没这份待办的步骤降级为 paused：看不出新问题比把不存在的审批摆上面板好 */
   function clearAwaitingStepsAsPaused(run: ChatRun) {
-    const known = new Set(run.awaiting.map((item) => item.nodeId));
+    const known = new Set(run.pendingApprovals.map((item) => item.nodeId));
     run.steps.forEach((step) => {
       if (step.status === 'awaiting' && !known.has(step.nodeId)) {
         step.status = 'paused';
@@ -312,12 +364,18 @@ export function useChatExecution(options: ChatExecutionOptions) {
 
   // ==================== 断流回落 ====================
 
+  /** 探一次详情的结论：拿到终态 / 确知还在跑（含「等子流程跑完」）/ 探不出东西 */
+  type ProbeResult = 'alive' | 'settled' | 'unknown';
+
   /**
    * 用执行详情接口探一次终态（服务端事件流的兜底口径）。
    *
-   * @returns true 表示已拿到终态并写入 run
+   * 返回 'alive' 与 'unknown' 的差别决定断流后是「重新订阅接着等」还是
+   * 「按尝试次数报错」：父等子的那段窗口里服务端故意不发任何挂起帧（否则页面
+   * 会把刚提交过的审批再弹一遍），连接一旦被网关回收，按'unknown' 处理就会
+   * 在十秒后把一条正常在跑的执行报成「事件连接中断」。
    */
-  async function probeExecution(run: ChatRun): Promise<boolean> {
+  async function probeExecution(run: ChatRun): Promise<ProbeResult> {
     try {
       const detail = await getExecution(run.executionId);
       const status = detail?.status;
@@ -326,31 +384,32 @@ export function useChatExecution(options: ChatExecutionOptions) {
         run.duration = detail.duration;
         run.status = 'success';
         finish();
-        return true;
+        return 'settled';
       }
       if (status === 'FAILED' || status === 'CANCELLED') {
         run.error = detail.errorMessage || '执行未正常结束';
         run.status = status === 'CANCELLED' ? 'cancelled' : 'error';
         finish();
-        return true;
+        return 'settled';
       }
       if (status === 'PAUSED') {
-        // 断流后探到暂停：从行内 approvalContext 重建待审批面板数据
-        const contexts = detail.approvalContext || {};
-        run.awaiting = Object.values(contexts) as ApprovalContext[];
-        (
-          detail.awaitingNodeIds || run.awaiting.map((item) => item.nodeId)
-        ).forEach((id) => {
-          ensureStep(run, id).status = 'awaiting';
+        run.pendingApprovals = detail.pendingApprovals || [];
+        // 清单为空 = 本轮不欠人答，只是停在等子执行跑完被钩子推起：接着探。
+        // 把这种 PAUSED 当待决项渲染，就是把已经投递的结论再问一遍
+        if (run.pendingApprovals.length === 0) return 'alive';
+        run.pendingApprovals.forEach((item) => {
+          ensureStep(run, item.nodeId).status = 'awaiting';
         });
         run.status = 'paused';
         finish();
-        return true;
+        return 'settled';
       }
+      // 还停在 RUNNING/PENDING：执行在 worker 手里，接着等就是对的
+      return 'alive';
     } catch {
-      // 查询失败按「未结束」处理，交给下一轮重试，终态判定优先于报错提示
+      // 查不动详情：不能据此断定执行还活着，也不能就此报失败，交给下一轮重试
+      return 'unknown';
     }
-    return false;
   }
 
   /**
@@ -364,13 +423,17 @@ export function useChatExecution(options: ChatExecutionOptions) {
     idleTimer = setTimeout(async () => {
       idleTimer = null;
       if (settled) return;
-      if (!(await probeExecution(run))) armIdleWatch(run);
+      if ((await probeExecution(run)) !== 'settled') armIdleWatch(run);
     }, IDLE_PROBE_MS);
   }
 
   /**
    * SSE 没给出终态就断了（网关空闲回收、页面网络抖动）。
    * 执行本身还在后台跑，改用执行详情轮询把结果补齐，避免对话气泡永远转圈。
+   *
+   * 探明「确实还活着」时不是接着数尝试次数，而是重新订阅一次：服务端会按行状态
+   * 分流（RUNNING 挂频道；已转发结论的 PAUSED 补历史后挂频道等续跑），比在这干轮询
+   * 靠谱。重试次数只用于兜住「订阅→立即断流」的循环。
    */
   function reconcile(run: ChatRun, attempt = 0) {
     if (settled) return;
@@ -379,7 +442,13 @@ export function useChatExecution(options: ChatExecutionOptions) {
     pollTimer = setTimeout(async () => {
       pollTimer = null;
       if (settled) return;
-      if (await probeExecution(run)) return;
+      const probe = await probeExecution(run);
+      if (probe === 'settled') return;
+      if (probe === 'alive' && resubscribes < MAX_RESUBSCRIBE) {
+        resubscribes += 1;
+        subscribe(run.executionId, run);
+        return;
+      }
       if (attempt < maxAttempt) {
         reconcile(run, attempt + 1);
       } else {
@@ -411,8 +480,9 @@ export function useChatExecution(options: ChatExecutionOptions) {
       source?.addEventListener(type, (event: MessageEvent) => {
         const data = parseFrame<WorkflowRuntimeEvent>(event.data);
         if (!data || !activeRun) return;
-        // 收到任何一帧都说明流是活的，看门狗重新计时
+        // 收到任何一帧都说明流是活的：看门狗重新计时，断流重订阅的额度也重新给满
         armIdleWatch(run);
+        resubscribes = 0;
         handler(data);
       });
     };
@@ -431,6 +501,12 @@ export function useChatExecution(options: ChatExecutionOptions) {
     listen('node.cancelled', (data) =>
       onNodeAborted(run, data as NodeCancelledEvent, 'cancelled'),
     );
+    listen('node.tool_call', (data) =>
+      onToolCall(run, data as NodeToolCallEvent),
+    );
+    listen('node.tool_result', (data) =>
+      onToolResult(run, data as NodeToolResultEvent),
+    );
     listen('workflow.completed', (data) =>
       onCompleted(run, data as WorkflowCompletedEvent),
     );
@@ -439,12 +515,12 @@ export function useChatExecution(options: ChatExecutionOptions) {
     );
     listen('workflow.cancelled', () => onCancelled(run));
     listen('node.paused', (data) => onNodePaused(run, data as NodePausedEvent));
-    listen('workflow.paused', (data) =>
-      onWorkflowPaused(run, data as WorkflowPausedEvent),
-    );
-    // 恢复提交的首帧：上一轮的挂起标记已被本轮重跑，待决列表清空
+    listen('workflow.paused', (data) => {
+      void onWorkflowPaused(run, data as WorkflowPausedEvent);
+    });
+    // 恢复提交的首帧：上一轮的挂起标记已被本轮重跑，待办清单随之作废
     listen('workflow.resumed', () => {
-      run.awaiting.splice(0);
+      run.pendingApprovals = [];
       run.steps.forEach((step) => {
         if (step.status === 'awaiting' || step.status === 'paused') {
           step.status = 'running';
@@ -467,62 +543,64 @@ export function useChatExecution(options: ChatExecutionOptions) {
   }
 
   /**
-   * 发起一轮对话：异步执行 + 订阅事件流，返回被填充的 ChatRun。
-   * apiKey 是对话选中的 Key，随 execute-async 的 X-Workflow-Token 下发。
+   * 发起一轮对话：新建一条执行拿到 executionId，订阅事件流并返回被填充的 ChatRun。
+   * apiKey 是对话选中的 Key，随 submit 的 X-Workflow-Token 下发。
    */
   async function send(
     workflowId: number | string,
-    inputs: Record<string, any>,
+    values: Record<string, any>,
     apiKey?: string,
   ) {
-    const executionId = await executeWorkflowAsync(
-      workflowId,
-      { inputs },
-      apiKey,
-    );
-    const run = createChatRun(executionId);
+    const result = await submitWorkflow({ values, workflowId }, apiKey);
+    const run = createChatRun(result.executionId);
     run.apiKey = apiKey;
-    subscribe(executionId, run);
+    subscribe(result.executionId, run);
     return run;
   }
 
   /**
-   * 再提交（需求 3）：同一个 executionId 带上本次结论/输入，提交成功后重新订阅。
+   * 审批结论回传：同一个 executionId 上接着跑，后续节点补写进同一个气泡。
+   *
+   * 只有审批保持原地：它就是本轮的下半段，另起气泡会把一次回答剖成两截。
    *
    * @param run 本轮对话的运行句柄（携带 executionId / apiKey）
-   * @param body 提交体
-   * @param body.approval 各待审批节点的结论（传了即按 CONTINUE 恢复）
-   * @param body.inputs 可选覆盖的 START 入参
+   * @param decisions 各待审批节点的结论（approvalToken 来自详情的 pendingApprovals）
    */
-  async function resubmit(
+  async function submitApproval(
     run: ChatRun,
-    body: { approval?: ApprovalDecisionReq[]; inputs?: Record<string, any> },
+    decisions: ApprovalDecisionReq[],
   ) {
     if (!run?.executionId) return;
-    await submitExecution(
-      run.executionId,
-      { ...body, mode: body.approval ? 'CONTINUE' : 'RETRY' },
+    await submitWorkflow(
+      { decisions, executionId: run.executionId },
       run.apiKey,
     );
-    if (body.approval) {
-      run.awaiting.splice(0);
-    }
+    run.pendingApprovals = [];
     run.error = undefined;
     // 重新订阅同一 executionId：后续节点补写进同一个气泡
     subscribe(run.executionId, run);
   }
 
-  /** 提交审批结论（CONTINUE） */
-  async function submitApproval(
-    run: ChatRun,
-    decisions: ApprovalDecisionReq[],
-  ) {
-    await resubmit(run, { approval: decisions });
-  }
-
-  /** 全量重跑（RETRY）：不传 inputs 则沿用上轮行内输入 */
-  async function retryRun(run: ChatRun, inputs?: Record<string, any>) {
-    await resubmit(run, inputs ? { inputs } : {});
+  /**
+   * 在同一个 executionId 上重启一轮（restart）：提交后**新建**一个 ChatRun 并订阅。
+   *
+   * 多轮对话就靠它：会话 id 不变（大模型的会话记忆挂在 node_states 上，跨轮保留），
+   * 但展示载体换成新气泡：往旧 run 上续写会把上一轮已经看完的回答整栏盖掉。
+   * 不传 values 则沿用上一轮的行内输入。
+   */
+  async function retryRun(
+    session: Pick<ChatRun, 'apiKey' | 'executionId'>,
+    values?: Record<string, any>,
+  ): Promise<ChatRun> {
+    const { apiKey, executionId } = session;
+    await submitWorkflow(
+      { ...(values ? { values } : {}), executionId, restart: true },
+      apiKey,
+    );
+    const next = createChatRun(executionId);
+    next.apiKey = apiKey;
+    subscribe(executionId, next);
+    return next;
   }
 
   /** 主动取消后端执行（引擎在下一个检查点生效；PAUSED 下直接写终态） */
@@ -531,9 +609,13 @@ export function useChatExecution(options: ChatExecutionOptions) {
     await cancelExecution(run.executionId, run.apiKey);
   }
 
-  /** 主动停止（关闭连接并标记取消） */
+  /** 主动停止（关闭连接并标记取消）：待审批状态下同样收流，面板随之收起 */
   function abort(run?: ChatRun) {
-    if (run && run.status === 'running') run.status = 'cancelled';
+    if (run && (run.status === 'running' || run.status === 'paused')) {
+      run.status = 'cancelled';
+      // 停了就是放弃本轮审批，待办清单不清就会一直挂在气泡里
+      run.pendingApprovals = [];
+    }
     finish();
   }
 

@@ -2,7 +2,6 @@
 import type {
   ExtractParameter,
   ParameterExtractorConfig,
-  ParameterType,
 } from '#/api/ai-workflow/types';
 
 import { reactive, watch } from 'vue';
@@ -37,15 +36,21 @@ const emit = defineEmits<{
   (e: 'update:config', config: ParameterExtractorConfig): void;
 }>();
 
-// 默认参数
-const defaultParameters: ExtractParameter[] = [
-  {
-    name: 'param1',
-    type: 'string' as ParameterType,
+/** 生成参数行稳定 key（拖拽/渲染用） */
+function genParamId(): string {
+  return `param_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 新建参数行：每次给新对象，避开模块级共享引用被互相改掉 */
+function createParameter(name = ''): ExtractParameter {
+  return {
+    id: genParamId(),
+    name,
+    type: 'string',
     description: '',
     required: false,
-  },
-];
+  };
+}
 
 // 表单数据
 const formData = reactive<ParameterExtractorConfig>({
@@ -53,13 +58,45 @@ const formData = reactive<ParameterExtractorConfig>({
   modelType: MT_TEXT_TO_TEXT,
   inputVariable: '',
   instructions: '',
-  parameters: [...defaultParameters],
+  parameters: [createParameter('param1')],
 });
+
+/**
+ * 本地刚 emit 出去的配置快照（nodeId + 配置内容）。
+ * 父层（PropertyPanel / selectedNode.data）会把自己刚收到的配置原样回传，若不加守卫，
+ * 回传值会立即重建 formData.parameters（连对象身份一起换掉），参数行的 a-input 在键入
+ * 过程中被销毁重建：光标与选区丢失（表现为“输入的内容跳出输入栏”），且 ant-design-vue
+ * vc-input 的 setValue 在 nextTick 里读已销毁实例的 inputRef 会抛
+ * 「Cannot read properties of null (reading 'input')」，整个表单渲染失败。
+ */
+let emittedSignature = '';
+
+/** 配置内容签名（含参数行 id，能识别自己的回传，也覆盖标量字段的外部变更） */
+function signatureOf(config: ParameterExtractorConfig | undefined): string {
+  return JSON.stringify([
+    config?.modelId ?? null,
+    config?.inputVariable || '',
+    config?.instructions || '',
+    (config?.parameters || []).map((p) => [
+      p.id || '',
+      p.name || '',
+      p.type || 'string',
+      p.description || '',
+      !!p.required,
+      p.enumValues || [],
+    ]),
+  ]);
+}
 
 // 监听配置变化
 watch(
   () => props.config,
   (config) => {
+    if (`${props.nodeId}|${signatureOf(config)}` === emittedSignature) {
+      // 自己刚 emit 的内容，保留本地编辑状态与参数行对象身份，不重建列表
+      return;
+    }
+    emittedSignature = '';
     Object.assign(formData, {
       modelId: config.modelId,
       modelType: config.modelType || MT_TEXT_TO_TEXT,
@@ -67,8 +104,8 @@ watch(
       instructions: config.instructions || '',
       parameters:
         config.parameters && config.parameters.length > 0
-          ? config.parameters.map((p) => ({ ...p }))
-          : [...defaultParameters],
+          ? config.parameters.map((p) => ({ ...p, id: p.id || genParamId() }))
+          : [createParameter('param1')],
     });
   },
   { immediate: true, deep: true },
@@ -77,13 +114,9 @@ watch(
 // 添加参数
 function addParameter() {
   formData.parameters = formData.parameters || [];
-  const newIndex = formData.parameters.length + 1;
-  formData.parameters.push({
-    name: `param${newIndex}`,
-    type: 'string' as ParameterType,
-    description: '',
-    required: false,
-  });
+  formData.parameters.push(
+    createParameter(`param${formData.parameters.length + 1}`),
+  );
   handleChange();
 }
 
@@ -100,10 +133,21 @@ function handleChange() {
     modelType: MT_TEXT_TO_TEXT,
     inputVariable: formData.inputVariable,
     instructions: formData.instructions,
-    parameters: formData.parameters?.filter(
-      (p: ExtractParameter) => p.name && p.type,
-    ),
+    // 不过滤空名参数：a-input 每次键入都会触发 change，过滤会让 config 回写时
+    // 把正在编辑的参数行连带卸载，ant-design-vue 在 nextTick 里读已销毁实例的
+    // inputRef 就抛「Cannot read properties of null (reading 'input')」；
+    // 空名行属于待配置状态，由变量下拉与保存校验排除，后端执行时跳过
+    // （回写本身由上方 emittedSignature 守卫拦住，两层一起才不会重建参数行）
+    parameters: (formData.parameters || []).map((p) => ({
+      id: p.id,
+      name: p.name || '',
+      type: p.type || 'string',
+      description: p.description || '',
+      required: !!p.required,
+      enumValues: p.enumValues,
+    })),
   };
+  emittedSignature = `${props.nodeId}|${signatureOf(config)}`;
   emit('update:config', config);
 }
 </script>
@@ -148,7 +192,7 @@ function handleChange() {
     <div class="parameters-section">
       <draggable
         v-model="formData.parameters"
-        item-key="name"
+        item-key="id"
         handle=".drag-handle"
         @change="handleChange"
       >

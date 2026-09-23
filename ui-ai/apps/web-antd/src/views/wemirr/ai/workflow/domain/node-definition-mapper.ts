@@ -12,6 +12,7 @@ export function mapBackendNodeDefinition(
     category: definition.category,
     icon: definition.icon,
     color: definition.color,
+    disabled: !!definition.disabled,
     inputs: definition.inputs,
     outputs: definition.outputs,
     formComponent: definition.configSchema.formComponent,

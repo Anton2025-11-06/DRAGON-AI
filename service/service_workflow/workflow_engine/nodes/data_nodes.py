@@ -39,7 +39,7 @@ class TemplateNodeExecutor(BaseNodeExecutor):
             if not name:
                 continue
             reference = v.get("reference")
-            value = ctx.resolve(str(reference)) if reference else None
+            value = ctx.resolve_ref(reference) if reference else None
             variables[str(name)] = value if value is not None else v.get("defaultValue")
 
         if engine == "JINJA2":
@@ -98,10 +98,13 @@ class ReplyNodeExecutor(BaseNodeExecutor):
             ref = str(cfg.get("variableRef") or "").strip()
             if not ref:
                 raise ValueError(f"节点「{self.node.label}」未选择引用参数")
-            # 前端 VariableInput 存入 {{node.var}} 模板格式，剥壳后解析
-            value = ctx.resolve(ref.strip("{} "))
+            # 该字段是 VariableInput：可以只放一个引用，也可以插入多个引用/混排文本，
+            # 统一交给 resolve_ref（单引用保留类型，多引用渲染成拼接文本）
+            value = ctx.resolve_ref(ref)
             if value is None:
-                raise ValueError(f"节点「{self.node.label}」引用的参数无法解析: {ref}")
+                raise ValueError(
+                    f"节点「{self.node.label}」引用的参数无法解析: "
+                    f"{self._unresolved_detail(ctx, ref)}")
             text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         else:
             # 自定义文本：支持 {{节点.变量}} 模板渲染，未解析引用渲染为空串
@@ -116,13 +119,37 @@ class ReplyNodeExecutor(BaseNodeExecutor):
         # 只输出 outputVariable 一个键，避免 output/text 双键重复暴露
         return NodeResult(output={output_var: text})
 
+    def _unresolved_detail(self, ctx: ExecutionContext, ref: str) -> str:
+        """把「引用的参数无法解析」定位到具体引用，并说明上游为何还没值。
+
+        引用参数可以是多个 {{...}}（画布上是 VariableInput，可混排文本），只回显
+        整串模板没法定位到到底是那一段取不上，故逐个列出解不出值的引用；引用的是
+        审批节点时额外说清「结论没提交前本轮没有输出」。
+        """
+        bad = ctx.unresolved_refs(ref)
+        if not bad:
+            return ref
+        states = getattr(self.runtime, "node_states", None) or {}
+        parts = []
+        for one in bad:
+            node_id = one.split(".", 2)[1] if one.startswith("nodes.") else one
+            status = getattr(states.get(node_id), "status", "")
+            if status == "AWAITING":
+                tail = "（该节点正在等人工审批，结论提交前本轮没有输出）"
+            elif status in ("PENDING", "RUNNING"):
+                tail = f"（该节点尚未执行完成，当前 {status}）"
+            else:
+                tail = ""
+            parts.append(f"{{{{{one}}}}}{tail}")
+        return "、".join(parts)
+
     @staticmethod
     def validate_node(node, graph) -> list:
         issues = []
         data = node.data or {}
         reply_type = (data.get("replyType") or "TEXT").upper()
         if reply_type == "VARIABLE":
-            if not str(data.get("variableRef") or "").strip().strip("{}").strip():
+            if not str(data.get("variableRef") or "").strip():
                 issues.append(issue("REPLY_NO_VARIABLE", "ERROR", "回复节点未选择引用参数", node))
         elif not str(data.get("text") or "").strip():
             issues.append(issue("REPLY_NO_TEXT", "ERROR", "回复节点文本内容为空", node))
@@ -159,7 +186,7 @@ class CodeNodeExecutor(BaseNodeExecutor):
         # 兼容旧数据：配置过 entryFunction 时仍优先按该方法名查找
         entry = (cfg.get("entryFunction") or "main").strip() or "main"
         # 解析参数：参数名 / 类型 / 是否必填 / 来源（REFERENCE 引用参数 | CONSTANT 自定义值）
-        kwargs = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve)
+        kwargs = py_sandbox.resolve_kwargs(cfg.get("inputs") or [], ctx.resolve_ref)
         timeout_ms = int(cfg.get("timeout") or py_sandbox.DEFAULT_TIMEOUT_MS)
         result = await py_sandbox.run_code(code, kwargs, entry=entry, timeout_ms=timeout_ms)
         py_sandbox.validate_output(result)
@@ -186,7 +213,7 @@ class ListOperatorNodeExecutor(BaseNodeExecutor):
         # 引用本身支持 JSONPath 风格子路径/下标再次提取（{{大模型.output.data[0]}}）；
         # 解析出来的值是大模型常见的 JSON 文本时先解开，再判断是否数组。
         # 不做类型预检（前端已放开“只能选数组”的限制），取不到数组时直接报错提示写法。
-        arr = parse_json_if_embedded(ctx.resolve(str(ref or "")))
+        arr = parse_json_if_embedded(ctx.resolve_ref(ref))
         if arr is None:
             raise ValueError(f"输入数组变量无法解析: {ref or '(空)'}")
         if isinstance(arr, tuple):
@@ -268,7 +295,7 @@ class ListOperatorNodeExecutor(BaseNodeExecutor):
             cc = cfg.get("concatConfig") or {}
             merged = list(arr)
             for other_ref in cc.get("otherArrays") or []:
-                other = parse_json_if_embedded(ctx.resolve(str(other_ref)))
+                other = parse_json_if_embedded(ctx.resolve_ref(other_ref))
                 if isinstance(other, list):
                     merged.extend(other)
             if cc.get("removeDuplicates"):
@@ -300,7 +327,7 @@ class DocExtractorNodeExecutor(BaseNodeExecutor):
         ref = str(self.cfg("fileVariable") or "")
         # 引用优先：前端 {{inputs.doc}} / 裸 n_start.doc 都兼容（resolve 入口统一剥壳）；
         # 解析不到时回退字面量（用户直接填了上传返回的 URL）
-        url = file_url(ctx.resolve(ref)) or file_url(ref)
+        url = file_url(ctx.resolve_ref(ref)) or file_url(ref)
         if not url:
             raise ValueError(f"文档提取节点未取到文件 URL（变量需为上传接口返回的文件）: {ref or '(空)'}")
         content, metadata = await FileUtils.extract_from_url(

@@ -95,6 +95,7 @@ class ModelService:
             "model_params": m.model_params or {},
             "supports_stream": int(m.supports_stream or 0),
             "supports_thinking": int(m.supports_thinking or 0),
+            "supports_function_call": int(m.supports_function_call or 0),
         }
 
     # ==================== 模型 CRUD ====================
@@ -116,6 +117,7 @@ class ModelService:
             "status": bool(m.status),
             "supports_stream": bool(m.supports_stream),
             "supports_thinking": bool(m.supports_thinking),
+            "supports_function_call": bool(m.supports_function_call),
             "stream_param": m.stream_param,
             "thinking_param": m.thinking_param,
             "common_params": m.common_params or [],
@@ -202,6 +204,7 @@ class ModelService:
                 rate_limit_qps=max(0, req.rate_limit_qps),
                 supports_stream=1 if req.supports_stream else 0,
                 supports_thinking=1 if req.supports_thinking else 0,
+                supports_function_call=1 if req.supports_function_call else 0,
                 stream_param=req.stream_param or None,
                 thinking_param=req.thinking_param or None,
                 common_params=common_params or None,
@@ -241,6 +244,7 @@ class ModelService:
             m.rate_limit_qps = max(0, req.rate_limit_qps)
             m.supports_stream = 1 if req.supports_stream else 0
             m.supports_thinking = 1 if req.supports_thinking else 0
+            m.supports_function_call = 1 if req.supports_function_call else 0
             m.stream_param = req.stream_param or None
             m.thinking_param = req.thinking_param or None
             m.common_params = common_params or None

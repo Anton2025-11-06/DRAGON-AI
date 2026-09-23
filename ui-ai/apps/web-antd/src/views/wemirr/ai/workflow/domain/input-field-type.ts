@@ -64,6 +64,54 @@ const INPUT_FIELD_TYPE_COLORS: Record<NormalizedInputFieldType, string> = {
 };
 
 /**
+ * 各字段类型在开始节点「字段类型」下给出的说明。
+ *
+ * 这里以前挂着一句「短文本与长文本已合并为文本类型」——那是历史迁移备注，
+ * 与当前选的是什么类型无关，对配参数没有任何帮助；改成按类型说清控件与值形态。
+ */
+const INPUT_FIELD_TYPE_HINTS: Record<NormalizedInputFieldType, string> = {
+  TEXT: '单行/多行文本都用它，可用最大长度与正则限制内容',
+  NUMBER: '数值输入，可限定最小/最大值区间',
+  SELECT: '从下方「选项列表」里单选一项，值为选项文本',
+  CHECKBOX: '开关，值为布尔（true/false）',
+  SINGLE_FILE: '上传 1 个文件，可限类型与大小，值为带 url 的文件对象',
+  FILE_LIST: '上传多个文件，受「最多文件数量」限制，值为文件对象数组',
+  APPROVER:
+    '提交时传审批人标识数组（元素为数字或字符串），与审批节点的审批人配置取交集判定权限',
+};
+
+/**
+ * 文件字段「允许的文件类型」常用项，按用途分组供下拉多选。
+ *
+ * 值仍是带点的扩展名（`.pdf`）：动态输入表单直接把它 join 成上传控件的 accept，
+ * 改存储格式会让已有图与上传校验一起失效。
+ */
+export const FILE_TYPE_GROUPS: { label: string; types: string[] }[] = [
+  {
+    label: '文档',
+    types: [
+      '.pdf',
+      '.doc',
+      '.docx',
+      '.xls',
+      '.xlsx',
+      '.ppt',
+      '.pptx',
+      '.csv',
+      '.md',
+      '.txt',
+    ],
+  },
+  { label: '图片', types: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'] },
+  { label: '音频', types: ['.mp3', '.wav', '.m4a', '.aac', '.flac'] },
+  { label: '视频', types: ['.mp4', '.mov', '.avi', '.mkv', '.webm'] },
+  {
+    label: '数据/压缩包',
+    types: ['.json', '.jsonl', '.xml', '.yaml', '.yml', '.zip', '.rar'],
+  },
+];
+
+/**
  * 归一字段类型：历史文本类型（短文本/长文本）统一映射为 TEXT，
  * 空值或未知类型回落到默认类型，保证旧图不会渲染出空白控件。
  */
@@ -96,6 +144,11 @@ export function getInputFieldTypeLabel(type?: null | string): string {
 /** 字段类型标签颜色 */
 export function getInputFieldTypeColor(type?: null | string): string {
   return INPUT_FIELD_TYPE_COLORS[normalizeInputFieldType(type)];
+}
+
+/** 字段类型对应的配置说明（未知类型回落成文本类型的说明） */
+export function getInputFieldTypeHint(type?: null | string): string {
+  return INPUT_FIELD_TYPE_HINTS[normalizeInputFieldType(type)];
 }
 
 /** 多文件字段的最大文件数量（未配置时给默认上限） */

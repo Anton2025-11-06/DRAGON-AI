@@ -19,6 +19,7 @@ import {
   FileTextOutlined,
   FunctionOutlined,
   LoadingOutlined,
+  MergeCellsOutlined,
   MessageOutlined,
   MinusCircleOutlined,
   PlayCircleOutlined,
@@ -156,7 +157,6 @@ function getNodeIcon(nodeType: string) {
     KNOWLEDGE_RETRIEVAL: FileTextOutlined,
     QUESTION_CLASSIFIER: MessageOutlined,
     PARAMETER_EXTRACTOR: FunctionOutlined,
-    AGENT: RobotOutlined,
     APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: ThunderboltOutlined,
     ITERATION: LoadingOutlined,
@@ -171,6 +171,7 @@ function getNodeIcon(nodeType: string) {
     HTTP_REQUEST: ApiOutlined,
     TOOL: FunctionOutlined,
     MCP_TOOL: CloudServerOutlined,
+    WORKFLOW: MergeCellsOutlined,
   };
   return iconMap[nodeType] || FunctionOutlined;
 }

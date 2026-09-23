@@ -40,6 +40,7 @@ async def get_login_user(request: Request) -> dict:
         raise UnauthorizedException("未登录，禁止操作！")
     return data
 
+
 async def get_user_id(request: Request) -> int:
     try:
         login_user = await get_login_user(request)
@@ -63,9 +64,13 @@ def has_permission(perm: str):
     菜单权限校验装饰器：要求登录用户权限标识集合包含 perm（ADMIN 角色直接放行）
     用法示例：@has_permission("system:user:add")
     """
+
     def outer(func):
         @wraps(func)
         async def inner(request: Request, *args, **kwargs):
+            # 流程执行权限校验：X-Workflow-Token 存在则 bypass, workflow api-key调用
+            if request.headers.__contains__("X-Workflow-Token"):
+                return await func(request, *args, **kwargs)
             login_user = await get_login_user(request)
             if not is_admin(login_user) and perm not in login_user.get("permissions", []):
                 raise UnauthorizedException("权限不足，禁止操作！")
@@ -82,9 +87,14 @@ def require_permission(*perms: str, require_all: bool = False):
     :param perms: 权限标识列表
     :param require_all: True-需满足全部权限；False-满足任一即可（默认）
     """
+
     def outer(func):
         @wraps(func)
         async def inner(request: Request, *args, **kwargs):
+            # 流程执行权限校验：X-Workflow-Token 存在则 bypass, workflow api-key调用
+            if request.headers.__contains__("X-Workflow-Token"):
+                return await func(request, *args, **kwargs)
+
             login_user = await get_login_user(request)
             if is_admin(login_user):
                 return await func(request, *args, **kwargs)
@@ -101,11 +111,11 @@ def require_permission(*perms: str, require_all: bool = False):
 
 
 # ==================== 数据权限（Data Scope）====================
-DATA_SCOPE_ALL = 1            # 全部数据
+DATA_SCOPE_ALL = 1  # 全部数据
 DATA_SCOPE_DEPT_AND_CHILD = 2  # 本部门及以下
-DATA_SCOPE_DEPT = 3           # 本部门数据
-DATA_SCOPE_SELF = 4           # 仅本人数据
-DATA_SCOPE_CUSTOM = 5         # 自定义部门数据
+DATA_SCOPE_DEPT = 3  # 本部门数据
+DATA_SCOPE_SELF = 4  # 仅本人数据
+DATA_SCOPE_CUSTOM = 5  # 自定义部门数据
 
 
 def get_data_scope(login_user: dict) -> int:

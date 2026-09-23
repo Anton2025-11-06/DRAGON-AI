@@ -22,14 +22,15 @@ import { defineStore } from 'pinia';
 
 import {
   createWorkflow,
-  executeWorkflowAsync,
   getWorkflowDetail,
   getWorkflowNodeDefinitions,
+  submitWorkflow,
   updateWorkflow,
 } from '#/api/ai-workflow';
 import { MODEL_TYPES_MEMORY } from '#/api/ai-workflow/const';
 import { generateUUID } from '#/utils/uuid';
 import { useSSE } from '#/views/wemirr/ai/workflow/components/debug/use-sse';
+import { defaultPassThroughName } from '#/views/wemirr/ai/workflow/components/variable-selector/upstream-variables';
 import { mapBackendNodeDefinitions } from '#/views/wemirr/ai/workflow/domain/node-definition-mapper';
 import {
   assertWorkflowHandle,
@@ -127,6 +128,8 @@ export interface NodePanelItem {
   description: string;
   /** 节点分类 */
   category: WorkflowNodeCategory;
+  /** 能力未实现的节点：面板置灰不可拖 */
+  disabled?: boolean;
   /** 默认配置 */
   defaultConfig: Record<string, any>;
 }
@@ -268,14 +271,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       executionState.value.status = 'PAUSED';
       executionState.value.currentNodeId = data.nodeId || null;
       executionState.value.variables = data.variables || {};
-      // 后端只在收尾时给出首个待审批节点；其余待审批节点已由 node.paused 逐个登记
-      (data.awaitingNodeIds || []).forEach((id) => {
-        const nodeState = executionState.value?.nodeStates.get(id);
-        if (nodeState && nodeState.status !== 'completed') {
-          nodeState.status = 'awaiting';
-          highlightNode(id, 'paused');
-        }
-      });
+      // 暂停帧只说「本轮停在等人」：挂在哪个节点上由逐个的 node.paused 登记，画布不补
       if (data.nodeId) highlightNode(data.nodeId, 'paused');
     },
     onExecutionCompleted: (data) => {
@@ -331,6 +327,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       icon: definition.icon,
       description: definition.description,
       category: definition.category,
+      disabled: !!definition.disabled,
       defaultConfig: { ...definition.defaultConfig },
     })),
   );
@@ -622,13 +619,24 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       }
     }
     const approvalNodes = nodes.filter((node) => node.type === 'APPROVAL');
-    if (approvalNodes.length > 0 && approverFields.length === 0) {
+    // 只有配了审批人的审批节点才需要「审批人」入参；审批人留空 = 任何持 key 者皆可审
+    const gatedApprovalNodes = approvalNodes.filter((node) => {
+      const data = node.data || {};
+      const approvers = data.approvers ?? data.config?.approvers;
+      return (
+        Array.isArray(approvers) &&
+        approvers.some((item: any) => String(item ?? '').trim() !== '')
+      );
+    });
+    if (gatedApprovalNodes.length > 0 && approverFields.length === 0) {
       addIssue(
         'ERROR',
         'APPROVER_FIELD_MISSING',
-        '画布存在审批节点，但开始节点未添加「审批人」入参字段',
+        `审批节点 ${gatedApprovalNodes
+          .map((node) => node.label || node.id)
+          .join('、')} 已配置审批人，但开始节点未添加「审批人」入参字段`,
         undefined,
-        '在开始节点新增一个类型为 APPROVER 的输入字段（值为数组），提交时带上审批人标识',
+        '在开始节点新增一个类型为 APPROVER 的输入字段（值为数组），提交时带上审批人标识；不需要限定审批人时把审批人留空即可',
       );
     }
     if (approverFields.length > 0 && approvalNodes.length === 0) {
@@ -780,14 +788,6 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
           );
         }
       }
-      if (node.type === 'AGENT' && !node.data?.agentId) {
-        addIssue(
-          'ERROR',
-          'AGENT_ID_REQUIRED',
-          `子智能体 ${node.label || node.id} 必须选择目标智能体`,
-          node,
-        );
-      }
       if (node.type === 'KNOWLEDGE_RETRIEVAL') {
         const knowledgeBaseIds = node.data?.knowledgeBaseIds;
         if (!Array.isArray(knowledgeBaseIds) || knowledgeBaseIds.length === 0) {
@@ -820,7 +820,11 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
       }
       if (node.type === 'PARAMETER_EXTRACTOR') {
         const parameters = node.data?.parameters;
-        if (!Array.isArray(parameters) || parameters.length === 0) {
+        // 表单不再过滤空名行（输入中过滤会把正在编辑的行冲掉），这里只按「有名字的参数」校验
+        const named = Array.isArray(parameters)
+          ? parameters.filter((p: any) => !!String(p?.name || '').trim())
+          : [];
+        if (named.length === 0) {
           addIssue(
             'ERROR',
             'EXTRACTOR_PARAMETERS_REQUIRED',
@@ -874,6 +878,39 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
           );
         }
       }
+      if (node.type === 'WORKFLOW') {
+        // 嵌套调用：子工作流与执行用 key 缺一不可（与后端 WORKFLOW_* 同一口径，
+        // 发布前就拦住，总比跑到一半才报「API Key 不存在」友好）
+        if (!node.data?.workflowId) {
+          addIssue(
+            'ERROR',
+            'WORKFLOW_NO_TARGET',
+            `工作流节点 ${node.label || node.id} 必须选择子工作流`,
+            node,
+          );
+        }
+        if (!node.data?.apiKeyId) {
+          addIssue(
+            'ERROR',
+            'WORKFLOW_NO_API_KEY',
+            `工作流节点 ${node.label || node.id} 必须选择执行用 API Key`,
+            node,
+            '子工作流需先发布并创建可用的 API Key',
+          );
+        }
+        if (
+          String(node.data?.versionMode || 'LATEST').toUpperCase() ===
+            'SPECIFIC' &&
+          !node.data?.version
+        ) {
+          addIssue(
+            'ERROR',
+            'WORKFLOW_NO_VERSION',
+            `工作流节点 ${node.label || node.id} 选择了指定版本但未填版本号`,
+            node,
+          );
+        }
+      }
       if (node.type === 'APPROVAL') {
         const scope = String(
           node.data?.pauseScope || 'DOWNSTREAM',
@@ -884,6 +921,30 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
             'APPROVAL_SCOPE_INVALID',
             `审批节点 ${node.label || node.id} 的暂停范围取值非法`,
             node,
+          );
+        }
+        // 输出键名要能当 {{nodes.<审批>.<键>}} 的单段用：带点号/方括号会被当成子路径
+        // 切分，下游照着引用名永远取不到值（与后端 APPROVAL_PASSTHROUGH_NAME 同一口径）
+        const rows: any[] = Array.isArray(node.data?.passThroughInputs)
+          ? node.data.passThroughInputs
+          : [];
+        const badNames = rows
+          .map((item: any) => {
+            const alias = String(item?.name || '').trim();
+            return alias || defaultPassThroughName(item?.varName, item?.path);
+          })
+          .filter(
+            (name: string) => !!name && !/^[\w\u4E00-\u9FA5-]+$/.test(name),
+          );
+        if (badNames.length > 0) {
+          addIssue(
+            'ERROR',
+            'APPROVAL_PASSTHROUGH_NAME',
+            `审批节点 ${node.label || node.id} 的输出参数名不合法：${badNames.join(
+              '、',
+            )}`,
+            node,
+            '下游要用 {{nodes.节点id.名字}} 引用它，名字不能含点号与方括号',
           );
         }
         if (!(incomingByNode.get(node.id)?.length || 0)) {
@@ -1084,16 +1145,18 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
   }
 
   /**
-   * 执行工作流
+   * 执行工作流（不带 executionId 的提交 = 新建一条执行）
    */
-  async function executeWorkflow(inputs: Record<string, any> = {}) {
+  async function executeWorkflow(values: Record<string, any> = {}) {
     if (!currentWorkflow.value?.id) return;
 
     executing.value = true;
     try {
-      const executionId = await executeWorkflowAsync(currentWorkflow.value.id, {
-        inputs,
+      const result = await submitWorkflow({
+        values,
+        workflowId: currentWorkflow.value.id,
       });
+      const executionId = result.executionId;
 
       // 初始化执行状态
       executionState.value = {
@@ -1101,7 +1164,7 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         status: 'RUNNING',
         currentNodeId: null,
         nodeStates: new Map(),
-        variables: inputs,
+        variables: values,
         startTime: new Date(),
         endTime: null,
       };

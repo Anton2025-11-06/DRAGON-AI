@@ -13,7 +13,6 @@
  */
 export type NodeType =
   // 工作流边界
-  | 'AGENT' // 智能体
   | 'APPROVAL' // 人工审批（暂停整条流等结论，由「再提交」接口带回）
   | 'CODE' // 代码
   | 'DOC_EXTRACTOR' // 文档读取
@@ -38,7 +37,8 @@ export type NodeType =
   | 'TOOL' // 工具
   // 外部系统节点
   | 'VARIABLE_AGGREGATOR' // 变量聚合
-  | 'VARIABLE_ASSIGNER'; // 变量赋值
+  | 'VARIABLE_ASSIGNER' // 变量赋值
+  | 'WORKFLOW'; // 工作流（嵌套调用平台内另一条已发布工作流）
 
 /**
  * 工作流状态枚举
@@ -59,7 +59,7 @@ export type ExecutionStatus =
 /**
  * 节点执行状态
  * AWAITING = 审批节点挂起等人工结论（非终态，恢复提交时必然重跑该节点）
- * TIMEOUT / CANCELLED = 并行短路或审批不同意砍掉的分支
+ * TIMEOUT / CANCELLED = 并行屏障「任一完成」短路掉的分支（审批不同意不再砍节点）
  */
 export type NodeExecutionStatus =
   | 'AWAITING'
@@ -208,76 +208,96 @@ export interface WorkflowSaveReq {
 }
 
 /**
- * 工作流执行请求
+ * 提交后可选的两种结论；两者都继续走下游，分流由下游条件节点拿 review 自己判
  */
-export interface WorkflowExecutionReq {
-  /** 输入参数 */
-  inputs?: Record<string, any>;
-}
+export type ApprovalAction = 'APPROVE' | 'REJECT';
 
 /**
- * 审批表单里被改过的一行：(源节点 id, 变量名, 新值) 三元组
- * 后端会同时回写 node_states[源节点].output 与运行时上下文，并留 diff 作审批审计
+ * 审批节点的暂停范围（只决定「等人工结论时停多大范围」，不决定拒绝后砍谁）
+ * DOWNSTREAM = 仅本节点及下游等待；ALL = 整条工作流一起停（在跑分支会被取消，恢复后重跑）
  */
-export interface ApprovalEditReq {
-  /** 源节点 id */
-  nodeId: string;
-  /** 源节点输出里的变量名 */
-  varName: string;
-  /** 改后的新值 */
-  value?: any;
-}
+export type ApprovalPauseScope = 'ALL' | 'DOWNSTREAM';
 
 /**
- * 单个审批节点的结论
+ * 一份审批结论：凭哪份待办答、答什么、改了哪些字段
  */
 export interface ApprovalDecisionReq {
-  /** 审批节点 id；只有一个待审批节点时可省略 */
-  nodeId?: string;
-  /** true=同意，false=不同意（取消下游） */
-  approved: boolean;
+  /** pendingApprovals[].approvalToken；结论落到哪条执行的哪个节点由后端按它解析 */
+  approvalToken: string;
+  action: ApprovalAction;
+  /** 键 = editableFields[].name，值 = 改后的完整值 */
+  fieldValues?: Record<string, any>;
   /** 审批意见 */
   opinion?: string;
-  /** 同意时对上游数据的编辑 */
-  edits?: ApprovalEditReq[];
 }
 
 /**
- * 指定 executionId 的再提交入参
- * RETRY = 全量重跑（终态可用）；CONTINUE = 暂停后恢复（仅 PAUSED，必须带 approval）
+ * submit 的唯一入参（新建会话与后续动作共用一个类，意图只看给了哪几个键）
  */
 export interface WorkflowSubmitReq {
-  /** 提交模式 */
-  mode: 'CONTINUE' | 'RETRY';
-  /** 本轮输入；不传沿用上轮行内 inputs */
-  inputs?: Record<string, any>;
-  /** 审批结论列表（并行多个待审批时每节点一条） */
-  approval?: ApprovalDecisionReq[];
+  /** 不传=新建会话；传=对已有会话的任一后续动作 */
+  executionId?: string;
+  /** 新建时必填；带 executionId 时可省 */
+  workflowId?: number | string;
+  /** 业务输入；不传沿用上轮 inputs */
+  values?: Record<string, any>;
+  /** 审批结论，一份待办一条 */
+  decisions?: ApprovalDecisionReq[];
+  /** 放弃未答审批并全量重跑；仅带 executionId 时有意义 */
+  restart?: boolean;
 }
 
 /**
- * 审批上下文（后端在 node.paused / workflow.paused 里外发，审批面板的数据源）
+ * submit 的唯一返回体（四种意图同形，调用方不需按分支解析）
  */
-export interface ApprovalContext {
-  /** 审批节点 id */
+export interface SubmitResult {
+  executionId: string;
+  status: ExecutionStatus;
+  /** 本次提交后的当前挂起代次 */
+  pauseGeneration: number;
+  /** 重复答复同一份凭据：后台未做任何动作 */
+  duplicated?: boolean;
+  /** 提交后仍欠的审批 */
+  pendingApprovals?: PendingApproval[];
+}
+
+/**
+ * 一份待办里审批方能改的那一行
+ * `name` 是审批节点透传给下游的输出键名，同一份清单内天然唯一，回传时就拿它当 fieldValues 的键
+ */
+export interface EditableApprovalField {
+  name: string;
+  /** 给人看的字段名 */
+  label: string;
+  /** 当前值（没填过的审批入参是空数组） */
+  value?: any;
+  /**
+   * 值形状标记：目前只有开始节点的「审批入参」（APPROVER）会带，它的值契约是数组
+   *——按普通文本框渲染会把一个工号提交成字符串
+   */
+  valueType?: string;
+  /** 这行值是不是必须给出（标记位，面板据此提醒） */
+  required?: boolean;
+  /** 值从哪个节点来，只用于展示 */
+  sourceNodeLabel?: string;
+}
+
+/**
+ * 此刻欠人答的一份审批（详情 pendingApprovals 的元素，审批面板的数据源）
+ * 结论要落到哪条执行的哪个节点是内部事实，不外发：答复只认 approvalToken
+ */
+export interface PendingApproval {
+  /** 一次性凭据：答完即失效，重开一轮全部换号 */
+  approvalToken: string;
+  /** 本执行里正挂着的那个节点 id（画布高亮用，等子流程时就是那个【工作流】节点） */
   nodeId: string;
-  /** 审批节点名称 */
-  nodeName?: string;
-  /** 配置的审批人集合（空=任何调用方皆可审） */
-  approvers?: Array<number | string>;
-  /** 暂停范围 */
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
-  /** 不同意时的回复兜底文案 */
-  rejectReply?: string;
-  /** 审批时限（小时，0=不限） */
-  timeoutHours?: number;
-  /** 可编辑的上游数据（三元组清单） */
-  editableInputs?: Array<{
-    nodeId: string;
-    nodeName?: string;
-    value?: any;
-    varName: string;
-  }>;
+  nodeLabel: string;
+  /** 给人看的那句话；等子流程时会说清是哪条子流的哪一道 */
+  title: string;
+  /** 真正出结论的那道审批节点名 */
+  approvalNodeLabel: string;
+  allowedActions: ApprovalAction[];
+  editableFields: EditableApprovalField[];
 }
 
 /**
@@ -408,8 +428,10 @@ export interface NodeExecutionState {
   status?: NodeExecutionStatus | string;
   /** 所属分支/并行端口 id */
   branch?: string;
-  /** 本轮沿用（未重跑）标记：CONTINUE 提交里跳过上轮已完成节点 */
+  /** 本轮沿用（未重跑）标记：带 decisions 的续跑里跳过上轮已完成节点 */
   skip?: boolean;
+  /** 节点「返回内容」开关的执行时快照（父工作流取子执行结果时按它筛对外可见的输出） */
+  emitted?: boolean;
   /** 输入数据 */
   input?: Record<string, any>;
   /** 输出数据 */
@@ -431,6 +453,8 @@ export interface NodeExecutionState {
   }>;
   /** 审批结论（true=同意） */
   review?: boolean;
+  /** 【工作流】节点已发起的子执行 id（恢复轮的认据：有值就不再重跑子流程） */
+  childExecutionId?: string;
   /** 审批人标识 */
   reviewBy?: string;
   /** 审批意见 */
@@ -440,6 +464,8 @@ export interface NodeExecutionState {
     newValue?: any;
     nodeId: string;
     oldValue?: any;
+    /** 子路径（空=整个变量被改） */
+    path?: string;
     varName: string;
   }>;
 }
@@ -490,10 +516,10 @@ export interface WorkflowExecutionResp {
   submitMode?: 'CONTINUE' | 'RETRY';
   /** 图拓扑指纹（再提交前的漂移校验依据） */
   graphHash?: string;
-  /** 仍等待人工审批的节点 id 列表 */
-  awaitingNodeIds?: string[];
-  /** 审批上下文（按审批节点 id 索引，仅 PAUSED 行有值） */
-  approvalContext?: Record<string, ApprovalContext>;
+  /** 当前挂起代次：与事件帧上的对不上时以详情为准 */
+  pauseGeneration?: number;
+  /** 此刻还欠人答的审批（仅 PAUSED 行有值；空数组=没人在等，停在等子流程） */
+  pendingApprovals?: PendingApproval[];
   /** 执行用户ID (字符串类型，避免 JavaScript 大数精度丢失) */
   userId?: string;
   /** 创建时间 */
@@ -573,6 +599,8 @@ export interface WorkflowNodeDefinitionResp {
   color: string;
   start: boolean;
   terminal: boolean;
+  /** 平台能力未实现时在节点面板置灰（不可拖拽），执行器与历史图数据不受影响 */
+  disabled?: boolean;
   inputs: WorkflowNodePortDefinitionResp[];
   outputs: WorkflowNodePortDefinitionResp[];
   configSchema: WorkflowNodeConfigSchemaResp;
@@ -589,13 +617,6 @@ export interface AiModelOption {
   /** 模型标识（API 调用名，tb_model.model_name，如画布节点展示） */
   modelName?: string;
   baseUrl?: string;
-}
-
-export interface WorkflowAgentOption {
-  id: number;
-  name: string;
-  avatar?: string;
-  description?: string;
 }
 
 export interface KnowledgeBaseOption {
@@ -654,6 +675,37 @@ export interface DynamicToolOption {
   }>;
 }
 
+/**
+ * 【工作流】节点「执行用 API Key」下拉项
+ * 由 GET /workflows/executable-list 内联返回，而不是让前端再去拉一次
+ * /workflow-api-keys/workflows/{id}：那个接口要 workflow:apikey:list 权限，
+ * 编辑器使用者不一定有，拿不到就只能面对一个「选不到 key」的死下拉。
+ */
+export interface ExecutableWorkflowApiKeyOption {
+  /** 过期时间（null=永不过期；后端已过滤掉过期与停用的 key） */
+  expireTime: null | string;
+  id: number;
+  name: string;
+  /** 每分钟调用上限 */
+  rateLimit: number;
+}
+
+/**
+ * 可被【工作流】节点调用的工作流：已发布且至少有一把可用 API Key
+ *（口径与节点执行器的运行前校验一致，否则下拉里会选到一个必然失败的子工作流）
+ */
+export interface ExecutableWorkflowOption {
+  /** 可用 API Key（供「执行用 API Key」下拉，不必再发一次带权限的请求） */
+  apiKeys: ExecutableWorkflowApiKeyOption[];
+  apiKeyCount: number;
+  /** 当前发布版本号（versionMode=LATEST 时实际跑的就是它） */
+  currentVersion: number;
+  description?: string;
+  /** 工作流ID (字符串类型，避免 JavaScript 大数精度丢失) */
+  id: string;
+  name: string;
+}
+
 // ==================== SSE 事件类型 ====================
 
 export const WORKFLOW_RUNTIME_EVENT_TYPES = [
@@ -669,6 +721,10 @@ export const WORKFLOW_RUNTIME_EVENT_TYPES = [
   'node.cancelled',
   // 审批节点挂起（单节点级暂停，区别于整条流的 workflow.paused）
   'node.paused',
+  // 大模型节点插入工具后的调用过程：node.tool_call 是模型要求调哪个工具/传了什么参数，
+  // node.tool_result 是这一次调用的结果摘要（完整结果看节点输出的 toolCalls）
+  'node.tool_call',
+  'node.tool_result',
   'workflow.paused',
   'workflow.completed',
   'workflow.failed',
@@ -690,6 +746,8 @@ export interface ExecutionEvent {
   executionId: string;
   /** 时间戳 */
   timestamp: number | string;
+  /** 挂起代次：与当前行不符的帧是上一轮残留，直接丢 */
+  pauseGeneration?: number;
 }
 
 /**
@@ -786,6 +844,44 @@ export interface StreamTokenEvent extends ExecutionEvent {
 }
 
 /**
+ * 大模型节点的工具调用事件（模型要求调用某个已插入的工具）
+ */
+export interface NodeToolCallEvent extends ExecutionEvent {
+  type: 'node.tool_call';
+  /** 发起调用的大模型节点ID */
+  nodeId: string;
+  /** 回填 tool 消息时用的调用 id（同一次调用的 call/result 靠它配对） */
+  toolCallId?: string;
+  /** 工具名（重名时带 mcp12__ 这类来路前缀，不一定是工具登记的原始名） */
+  toolName?: string;
+  /** 工具来源 */
+  toolKind?: LlmToolKind;
+  /** 模型给的入参 */
+  arguments?: Record<string, any>;
+  /** 第几轮工具调用（从 1 开始；恢复轮回填的那次记 0） */
+  round?: number;
+  /** true = 子工作流审批结束后补记的那次调用，不是本轮真的又调了一遍 */
+  resumed?: boolean;
+}
+
+/**
+ * 大模型节点的工具结果事件（这一次调用的返回值）
+ */
+export interface NodeToolResultEvent extends ExecutionEvent {
+  type: 'node.tool_result';
+  nodeId: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  /** 结果 JSON 的文本摘要（后端按事件体积截断，完整结果在节点输出 toolCalls 里） */
+  result?: string;
+  /** 这一次调用的失败原因（未注册工具/参数非法/调用异常），非空时 result 只有 error */
+  error?: null | string;
+  round?: number;
+  resumed?: boolean;
+}
+
+/**
  * 执行完成事件
  */
 export interface ExecutionCompletedEvent extends ExecutionEvent {
@@ -816,24 +912,16 @@ export interface NodePausedEvent extends ExecutionEvent {
   nodeType?: NodeType;
   /** 挂起前已执行的耗时(毫秒) */
   duration?: number;
-  /** 暂停范围 */
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
-  /** 审批表单数据源 */
-  approvalContext?: ApprovalContext;
 }
 
 /**
- * 执行暂停事件（本轮跑完但存在未决策的审批节点）
- * 不再是断点命中：唯一来源是审批节点，恢复只能走 submit 接口
+ * 执行暂停事件（本轮跑完了，但有节点停在等人答）
+ * 帧上不承载任何审批内容：要看欠谁就去 GET 详情取 pendingApprovals
  */
 export interface ExecutionPausedEvent extends ExecutionEvent {
   type: 'workflow.paused';
-  /** 首个待审批节点ID */
+  /** 停下时所在的节点 id（等结论的那个） */
   nodeId?: string;
-  /** 全部待审批节点ID（并行下可能多个） */
-  awaitingNodeIds?: string[];
-  /** 待审批节点的审批上下文 */
-  approvalContext?: ApprovalContext;
   /** 已执行耗时(毫秒) */
   duration?: number;
   /** 当前全局变量（排障展示用） */
@@ -1025,6 +1113,33 @@ export interface ContextVariable {
 }
 
 /**
+ * 大模型节点可插入的工具来源（与后端 ai_nodes.TOOL_KIND_* 逐字对齐）
+ * - TOOL：工具库里的动态函数工具
+ * - MCP：一个 MCP 连接（插入粒度是连接，里面有几个工具算几个）
+ * - WORKFLOW：平台内另一条已发布工作流（子执行，审批挂起会带着父节点一起挂）
+ */
+export type LlmToolKind = 'MCP' | 'TOOL' | 'WORKFLOW';
+
+/**
+ * 大模型节点的一条工具绑定
+ * 画布上不配参数：工具参数定义、MCP 连接的 tools/list、子工作流开始节点入参
+ * 都在引擎执行时才读，读不到就该工具装配失败（而不是静默不发）。
+ * apiKeyId/versionMode/version/workflowName 仅 kind=WORKFLOW 有意义。
+ */
+export interface LlmToolBinding {
+  /** 执行用 API Key（子工作流必填：决定用哪套凭证与限流额度） */
+  apiKeyId?: number;
+  /** 来路 ID：工具 ID / MCP 连接 ID / 子工作流 ID */
+  id: number | string;
+  kind: LlmToolKind;
+  /** 版本号（仅 versionMode=SPECIFIC 生效） */
+  version?: number;
+  versionMode?: WorkflowVersionMode;
+  /** 子工作流名称（选择时快照，供已选清单展示） */
+  workflowName?: string;
+}
+
+/**
  * LLM 大模型节点配置 (Workflow Model Node)
  * 经 common_model 支持 12 种能力类型（按所选模型登记的 category 类型化直连），
  * 支持 Vision、结构化输出，及各能力类型的媒体输入变量。
@@ -1045,7 +1160,7 @@ export interface LLMNodeConfig {
   promptTemplate?: string;
   /** 深度思考（仅能力类型支持且模型管理开启 supports_thinking 时写入） */
   thinking?: boolean;
-  /** 是否流式输出（仅能力类型支持且模型管理开启 supports_stream 时写入） */
+  /** 是否流式输出（仅能力类型支持且模型管理开启 supports_stream 时写入；带工具时同样生效） */
   streaming?: boolean;
   /** 输出变量名 */
   outputVariable?: string;
@@ -1075,6 +1190,13 @@ export interface LLMNodeConfig {
   voice?: string;
   /** 结构化输出配置 */
   structuredOutput?: StructuredOutput;
+  /**
+   * 插入的工具（仅文生文且模型登记了 supports_function_call 时写入）：
+   * 流式开关照常生效（tool_calls 由后端按流式分片累加还原）
+   */
+  tools?: LlmToolBinding[];
+  /** 是否把工具调用结果作为内容输出给客户端（关掉只记节点输出与调试事件） */
+  emitToolResult?: boolean;
   /** 上下文变量列表 */
   contextVariables?: ContextVariable[];
   /** 是否启用对话记忆（仅文生文/提示词族能力类型可用） */
@@ -1233,6 +1355,8 @@ export type ParameterType =
  * 提取参数定义
  */
 export interface ExtractParameter {
+  /** 前端拖拽/渲染用稳定 key（不持久化语义） */
+  id?: string;
   /** 参数名 */
   name: string;
   /** 参数类型 */
@@ -1286,9 +1410,11 @@ export type CompareOperator =
   | 'GREATER_THAN'
   | 'IN'
   | 'IS_EMPTY'
+  | 'IS_FALSE'
   | 'IS_NOT_EMPTY'
   | 'IS_NOT_NULL'
   | 'IS_NULL'
+  | 'IS_TRUE'
   | 'LESS_OR_EQUAL'
   | 'LESS_THAN'
   | 'MATCHES_REGEX'
@@ -1858,13 +1984,33 @@ export interface McpNodeConfig {
 }
 
 /**
- * 智能体节点配置
+ * 工作流节点的版本策略：LATEST 跟发布走 / SPECIFIC 锁定某个已发布版本
  */
-export interface AgentNodeConfig {
-  /** 智能体ID */
-  agentId?: number;
-  /** 输出变量名 */
+export type WorkflowVersionMode = 'LATEST' | 'SPECIFIC';
+
+/**
+ * 工作流节点配置 (WORKFLOW)
+ * 嵌套调用平台内另一条已发布工作流：引擎在 workflow 服务内部直接起子执行（不走网关），
+ * api-key 只作为「用哪套凭证/限流」的配置项，执行前仍会校验它存在/启用/未过期且未超限。
+ * 子流程里有审批节点时子执行落 PAUSED，本节点跟着挂起，子执行终态后自动恢复。
+ * 输出：{ [outputVariable]: 子工作流 END 输出, text: 可读文本 }
+ */
+export interface WorkflowNodeConfig {
+  /** 执行用 API Key ID（决定用哪套凭证与限流额度） */
+  apiKeyId?: number;
+  /** 入参绑定行（子工作流的入参要手配，与 TOOL 节点同一语义） */
+  inputs?: CodeInputVariable[];
+  /** 输出变量名，默认 result */
   outputVariable?: string;
+  /** 子执行整体等待上限（毫秒），留空取节点默认超时 */
+  timeout?: number;
+  /** 版本号（仅 versionMode=SPECIFIC 生效） */
+  version?: number;
+  versionMode?: WorkflowVersionMode;
+  /** 子工作流 ID（数据源 /workflows/executable-list） */
+  workflowId?: number | string;
+  /** 子工作流名称（仅展示，执行时以 workflowId 为准） */
+  workflowName?: string;
 }
 
 /**
@@ -1966,18 +2112,39 @@ export interface ReplyNodeConfig {
 }
 
 /**
+ * 审批节点「选择输出参数」的一项：放行上游某个输出的整体或某个子字段
+ *（唯一标识是 (节点, 变量, 子路径)，同名变量靠源节点区分）
+ */
+export interface ApprovalPassThroughInput {
+  /** 来源节点 ID */
+  nodeId: string;
+  /** 来源节点输出里的变量名 */
+  varName: string;
+  /**
+   * 变量之下的子路径（空=整个变量），口径同变量引用：`user.name` / `list[0]`
+   */
+  path?: string;
+  /**
+   * 透传给下游的输出键名（下游用 {{nodes.<审批>.<name>}} 引用）；
+   * 缺省取子路径末段（末段是纯数字时用 `<变量名>_<下标>`）
+   */
+  name?: string;
+}
+
+/**
  * 人工审批节点配置
- * 在节点边界暂停整条流；结论由「指定 executionId 再提交」接口带回
+ * 在节点边界暂停等结论；只收集审批结论，同意与否都照常往下游走
  */
 export interface ApprovalNodeConfig {
   /** 审批人集合（数字或字符串，命中其一即可）；空=持 key 且知道 executionId 者皆可审 */
   approvers?: Array<number | string>;
   /** 暂停范围：DOWNSTREAM 仅本节点及下游等待 / ALL 整条工作流一起停 */
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
-  /** 不同意时的回复兜底文案 */
-  rejectReply?: string;
-  /** 审批时限（小时，0=不限；超时自动裁决二期） */
-  timeoutHours?: number;
+  pauseScope?: ApprovalPauseScope;
+  /**
+   * 透传给下游的输入参数：留空 = 全部上游输出透传，选了则只透传选中的几项
+   *（审批结论 review/reviewOpinion/reviewBy 不受此配置影响，始终输出）
+   */
+  passThroughInputs?: ApprovalPassThroughInput[];
 }
 
 /**
@@ -1991,7 +2158,6 @@ export interface NodeConfigMap {
   KNOWLEDGE_RETRIEVAL: KnowledgeRetrievalConfig;
   QUESTION_CLASSIFIER: QuestionClassifierConfig;
   PARAMETER_EXTRACTOR: ParameterExtractorConfig;
-  AGENT: AgentNodeConfig;
   IF_ELSE: IfElseNodeConfig;
   ITERATION: IterationNodeConfig;
   VARIABLE_AGGREGATOR: VariableAggregatorConfig;
@@ -2006,6 +2172,7 @@ export interface NodeConfigMap {
   TOOL: ToolNodeConfig;
   MCP_TOOL: McpNodeConfig;
   APPROVAL: ApprovalNodeConfig;
+  WORKFLOW: WorkflowNodeConfig;
 }
 
 /**

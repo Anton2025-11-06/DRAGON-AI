@@ -3,10 +3,11 @@
  * DebugPanel 调试面板组件
  * 采用可调整大小的分栏布局，集成 PreviewRunner、NodeTracePanel、VariableInspector
  *
- * 审批入口不在本面板：暂停唯一来自 APPROVAL 节点，由 PreviewRunner 内的审批面板
- * 经 submit-sync 回传结论（断点与无条件 resume 链路已整体废弃）。
+ * 审批是独立的第四个标签页（预览运行 / 节点追踪 / 变量 / 审批），不嵌在变量页里：
+ * 暂停唯一来自等人答，收到 paused 事件后自动跳到该页，结论经 PreviewRunner
+ * 持有的那条 WS 再提交一次（断点与无条件 resume 链路已整体废弃）。
  */
-import type { InputField } from '#/api/ai-workflow/types';
+import type { ApprovalDecisionReq, InputField } from '#/api/ai-workflow/types';
 import type {
   NodeExecutionStatus,
   NodeTrace,
@@ -16,6 +17,7 @@ import type {
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import {
+  AuditOutlined,
   BugOutlined,
   ClockCircleOutlined,
   ColumnHeightOutlined,
@@ -26,6 +28,7 @@ import {
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 import { useDebugStore } from '#/store/debug-store';
 
+import ApprovalPanel from './debug/ApprovalPanel.vue';
 import NodeTracePanel from './debug/NodeTracePanel.vue';
 import PreviewRunner from './debug/PreviewRunner.vue';
 import VariableInspector from './debug/VariableInspector.vue';
@@ -65,8 +68,8 @@ const workflowStore = useAiWorkflowStore();
 
 // ==================== State ====================
 
-/** 当前激活的标签页 */
-const activeTab = ref<'runner' | 'trace' | 'variables'>('runner');
+/** 当前激活的标签页（approval = 审批页，与预览运行/节点追踪/变量并列的第四页） */
+const activeTab = ref<'approval' | 'runner' | 'trace' | 'variables'>('runner');
 
 /** 分栏大小 (百分比) */
 const splitSize = ref(50);
@@ -99,6 +102,37 @@ const isPaused = computed(() => debugStore.isPaused);
 /** 变量分组列表 */
 const variableGroups = computed(
   (): VariableGroup[] => debugStore.variableGroups,
+);
+
+/** 欠人答的审批清单（来自执行详情，并行下可能多份） */
+const pendingApprovals = computed(() => debugStore.awaitingApprovalList);
+
+/**
+ * 审批页是否处于「有节点待决策」：tab 常驻，只靠徽标和正文区分，
+ * 不把入口做成「出事件才出现」——用户找不到入口比多看一个空页更糟。
+ *
+ * 判据是详情的 pendingApprovals 而非事件帧：帧只说「停下了」，子流程里那道审批
+ * 该不该在本层弹，只有详情知道（已转给子执行的那些不在清单里）。
+ */
+const isAwaiting = computed(() => pendingApprovals.value.length > 0);
+
+/**
+ * 本轮还在收尾（其他分支未跑完）：此时提交会被后端以「执行未处于 PAUSED」拒掉，
+ * 且提交会先断掉在跑的这条连接再拨号，故先把提交按钮置为 loading 等它停下来。
+ */
+const approvalLocked = computed(() => isRunning.value && isAwaiting.value);
+
+/** 已点提交、后端还未给出恢复/拒绝结果 */
+const approvalSubmitting = ref(false);
+
+/** 提交按钮 loading：收尾中 或 已发出提交 */
+const approvalBusy = computed(
+  () => approvalLocked.value || approvalSubmitting.value,
+);
+
+/** 面板标题：收尾中给出可见解释，不让按钮无缘无故转圈 */
+const approvalTitle = computed(() =>
+  approvalLocked.value ? '人工审批（本轮运行收尾中，请稍候提交）' : '人工审批',
 );
 
 /** 节点追踪列表 */
@@ -203,6 +237,35 @@ watch(isRunning, (running) => {
     workflowStore.resetNodeHighlights();
   }
 });
+
+// 收到暂停：直接跳到「审批」页（第四个 tab），不让用户自己找入口。
+// node.paused（登记待审批）与 workflow.paused（置 isPaused）到达顺序不定、后者可能晚很多，
+// 故两个条件一起 watch，任一后到都能触发跳转。
+watch(
+  () => [isAwaiting.value, debugStore.isPaused] as const,
+  ([awaiting, paused]) => {
+    if (awaiting && paused) {
+      activeTab.value = 'approval';
+    }
+  },
+);
+
+// 审批已提交（登记被清）→ 跳回节点追踪看续跑过程，停在空审批页上什么也看不到。
+watch(isAwaiting, (awaiting) => {
+  if (!awaiting && activeTab.value === 'approval') {
+    activeTab.value = 'trace';
+  }
+});
+
+// 提交已生效（审批登记被清）或本轮已终态（提交被拒）：收起提交按钮的 loading
+watch(
+  () => [isAwaiting.value, debugStore.isRunning, debugStore.isPaused] as const,
+  ([awaiting, running, paused]) => {
+    if (!awaiting || (!running && !paused)) {
+      approvalSubmitting.value = false;
+    }
+  },
+);
 
 // ==================== Methods ====================
 
@@ -334,6 +397,16 @@ function traceStatusColor(status: NodeExecutionStatus): string {
 }
 
 /**
+ * 提交审批结论：能发这一帧的连接在 PreviewRunner 手里，转交它发出。
+ */
+function handleApprovalSubmit(decisions: ApprovalDecisionReq[]) {
+  approvalSubmitting.value = true;
+  if (!previewRunnerRef.value?.submitApproval(decisions)) {
+    approvalSubmitting.value = false;
+  }
+}
+
+/**
  * 处理调试变量编辑。
  *
  * 变量编辑不再直连后端（原 update_variable 已随外部暂停链路废弃）：
@@ -369,9 +442,11 @@ defineExpose({
       ...debugStore.nodeTraces.values(),
     ],
   /** 切换到指定标签页 */
-  switchTab: (tab: 'runner' | 'trace' | 'variables') => {
+  switchTab: (tab: 'approval' | 'runner' | 'trace' | 'variables') => {
     activeTab.value = tab;
   },
+  /** 是否处于待审批（父组件可用来自定义入口） */
+  isAwaitingApproval: isAwaiting,
   /**
    * 重置面板（BUG5）：回到「预览运行」页并清空上一次的输入，
    * 执行结果/节点追踪/变量等状态由 debugStore.clearExecutionState() 负责清除
@@ -403,6 +478,19 @@ defineExpose({
         <a-tag v-else-if="isPaused" color="purple" size="small"> 待审批 </a-tag>
       </div>
       <div class="header-right">
+        <!-- 审批快捷入口：待决策时把第四个 tab 顶到眼前 -->
+        <a-button
+          v-if="isAwaiting"
+          type="primary"
+          size="small"
+          danger
+          @click="activeTab = 'approval'"
+        >
+          <template #icon><AuditOutlined /></template>
+          审批{{
+            pendingApprovals.length > 1 ? ` ${pendingApprovals.length}` : ''
+          }}
+        </a-button>
         <!-- 布局切换 -->
         <a-tooltip
           :title="isHorizontalLayout ? '切换为右侧布局' : '切换为底部布局'"
@@ -445,6 +533,7 @@ defineExpose({
                 (nodeId: string) =>
                   handleSelectTrace(debugStore.getNodeTrace(nodeId)!)
               "
+              @show-approval="activeTab = 'approval'"
             />
           </a-tab-pane>
           <a-tab-pane key="trace">
@@ -520,12 +609,44 @@ defineExpose({
                 />
               </span>
             </template>
-            <VariableInspector
-              :groups="variableGroups"
-              :is-paused="isPaused"
-              :execution-id="debugStore.executionId"
-              @update="handleVariableUpdate"
-            />
+            <div class="variables-list">
+              <VariableInspector
+                :groups="variableGroups"
+                :is-paused="isPaused"
+                :execution-id="debugStore.executionId"
+                @update="handleVariableUpdate"
+              />
+            </div>
+          </a-tab-pane>
+          <a-tab-pane key="approval">
+            <template #tab>
+              <span>
+                审批
+                <a-badge
+                  v-if="isAwaiting"
+                  :count="pendingApprovals.length"
+                  :number-style="{
+                    backgroundColor: '#f5222d',
+                    fontSize: '10px',
+                  }"
+                />
+              </span>
+            </template>
+            <div class="approval-pane">
+              <!-- 无待决策节点时空态；有则整页给审批表单（不挤在变量页右侧） -->
+              <ApprovalPanel
+                v-if="isAwaiting"
+                :approvals="pendingApprovals"
+                :submitting="approvalBusy"
+                :title="approvalTitle"
+                @submit="handleApprovalSubmit"
+              />
+              <a-empty
+                v-else
+                :image="false"
+                description="暂无待审批节点（工作流跑到 APPROVAL 节点会停在这里等你）"
+              />
+            </div>
           </a-tab-pane>
         </a-tabs>
       </div>
@@ -717,6 +838,24 @@ defineExpose({
     font-size: 13px;
     font-weight: 500;
     color: var(--ant-color-text-secondary);
+  }
+}
+
+// 变量页：整栏变量列表
+.variables-list {
+  height: 100%;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+// 审批页（第四个 tab）：整栏只放审批表单，多个待决节点时纵向排开
+.approval-pane {
+  height: 100%;
+  padding: 8px;
+  overflow-y: auto;
+
+  .approval-panel {
+    max-width: 720px;
   }
 }
 

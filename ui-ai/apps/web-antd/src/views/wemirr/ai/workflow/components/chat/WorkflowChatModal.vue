@@ -4,7 +4,9 @@
  *
  * 职责：
  * 1. 按 START 节点配置渲染全部入参入口（含文件上传，走 workflow 模块上传接口）；
- * 2. 发送时调 execute-async，并订阅 subscribe 事件流，边收边渲染；
+ * 2. 首轮提交（不带 executionId）记下返回的 executionId，之后每轮都在这个 id 上重启
+ *    （只换 values）——一个会话 = 一个执行 id，大模型记忆因此跨轮连续；
+ *    每轮订阅 subscribe 事件流，边收边渲染；
  * 3. 把执行过程中每个节点的输出自动铺进气泡（一块一段、虚线分隔、各自可复制），
  *    完整输入 / 输出下钻放在右下角「执行过程」弹窗里。
  * 渲染统一走 OutputValue 按值形态适配，新增节点类型 / 模型能力类型不需要改这里。
@@ -18,14 +20,7 @@ import type {
   WorkflowPageResp,
 } from '#/api/ai-workflow/types';
 
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import {
   CloseCircleFilled,
@@ -37,7 +32,6 @@ import {
   KeyOutlined,
   LoadingOutlined,
   PartitionOutlined,
-  RedoOutlined,
   RightOutlined,
   RobotOutlined,
   SendOutlined,
@@ -46,6 +40,7 @@ import { message, Tooltip } from 'ant-design-vue';
 
 import { getWorkflowDetail } from '#/api/ai-workflow';
 
+import { useFollowBottom } from '../../../shared/composables/useFollowBottom';
 import ApprovalPanel from '../debug/ApprovalPanel.vue';
 import DynamicInputForm from '../debug/DynamicInputForm.vue';
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
@@ -103,8 +98,16 @@ const stepsOpen = ref(false);
 const stepsRun = ref<ChatRun | null>(null);
 /** 全屏展示（清空按钮左边的入口，ESC 退出） */
 const isFull = ref(false);
-/** 思考过程的展开态，按「执行id:节点id」记，换一轮执行不串台 */
+/** 思考过程的展开态，按「气泡id:节点id」记，换一轮不串台（多轮共用一个 executionId） */
 const openReasons = ref<Record<string, boolean>>({});
+
+/**
+ * 会话执行 id：首次提交拿到后固定下来，后续每轮都在它上面重启。
+ *
+ * 重启会 +1 挂起代次并保留 node_states（llmMessages 存在里面），
+ * 所以同一个 id 就是把对话历史连着的那条记忆链。开窗/清空时重置。
+ */
+const sessionExecutionId = ref('');
 
 /** 节点ID → 画布节点名（异步事件只带 nodeId） */
 const nodeLabels = ref<Record<string, string>>({});
@@ -190,6 +193,7 @@ watch(
     }
     messages.value = [];
     formValues.value = {};
+    sessionExecutionId.value = '';
     // 重开窗不能沿用上一次的输入（已上传文件列表存在子组件里，只能让它自己清）
     formRef.value?.resetFields?.();
     await loadWorkflow();
@@ -198,12 +202,22 @@ watch(
 
 // ==================== 展示辅助 ====================
 
-function scrollToBottom() {
-  nextTick(() => {
-    const el = bodyRef.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-}
+/**
+ * 输出时自动跟随到底部：整套口径收在 useFollowBottom（与模型对话页同一个）。
+ *
+ * 这里原先是自己一份内联实现（watch 数据 + `el.scrollTop = el.scrollHeight`），
+ * 在弹窗里不成立：全局 `html { scroll-behavior: smooth }` 会继承到 .chat-body，
+ * 贴底成了一段动画，途中量到的位置离底部还远，「用户在不在底部」被误判成 false，
+ * 跟随从此死掉 —— 表现就是每出一点新内容都得自己往下拖一下。
+ * 组合式函数贴底走 'instant' 并把自己触发的那批 scroll 事件排除在判断之外。
+ */
+const { scrollToBottom } = useFollowBottom(bodyRef);
+
+// 新增一行气泡：强制贴底（后面的流式内容交给尺寸观察器继续跟）
+watch(
+  () => messages.value.length,
+  () => scrollToBottom(true),
+);
 
 /** 入参里的文件值（上传产物是对象/对象数组） */
 function isFileValue(value: any): boolean {
@@ -261,8 +275,10 @@ function buildCopyText(answer?: string, output?: any): string {
 /**
  * 气泡内要自动显示的数据块：执行过程里每一段有产出的节点各一块，按执行顺序排。
  * 最终 outputs 本质是 END/REPLY 节点输出的汇总，已由对应节点块覆盖时不再重复铺一份。
+ *
+ * scope 是本条气泡的唯一标识：一个会话多轮共用一个 executionId，折叠态不能再用它区隔。
  */
-function dataBlocks(run: ChatRun): RunDataBlock[] {
+function dataBlocks(run: ChatRun, scope?: string): RunDataBlock[] {
   const blocks: RunDataBlock[] = [];
   for (const step of run.steps) {
     const answer = streamText(run, step);
@@ -276,7 +292,7 @@ function dataBlocks(run: ChatRun): RunDataBlock[] {
       error: step.error,
       key: step.nodeId,
       output,
-      reasonKey: `${run.executionId}:${step.nodeId}`,
+      reasonKey: `${scope || run.executionId}:${step.nodeId}`,
       reasoning: reasoning || undefined,
       running: step.status === 'running',
       status: step.status,
@@ -312,9 +328,13 @@ async function copyBlock(block: RunDataBlock) {
   }
 }
 
-/** 思考过程默认折叠，长思链不把气泡顶成一屏 */
+/**
+ * 思考过程展开态：只有正在执行的那一段自动展开（跑完收回），已跑完的与历史气泡默认
+ * 折叠，免得长思链把气泡顶成一屏；用户手动开合过就记成显式值，之后完全听他的。
+ */
 function isReasonOpen(block: RunDataBlock): boolean {
-  return !!openReasons.value[block.reasonKey || ''];
+  const manual = openReasons.value[block.reasonKey || ''];
+  return manual === undefined ? !!block.running : manual;
 }
 
 function toggleReason(block: RunDataBlock) {
@@ -382,11 +402,22 @@ async function handleSend() {
   try {
     // 带上选中的 Key：这次发起走网关的 API Key 模式（Key 有效性 + QPS 限流），
     // 和输入框下方「以 API Key「xx」调用已发布版本」的口径对上
-    const run = await chatExecution.send(
-      props.workflow.id,
-      inputs,
-      props.apiKey?.apiKey,
-    );
+    const apiKey = props.apiKey?.apiKey;
+    let run: ChatRun;
+    if (sessionExecutionId.value) {
+      // 上一轮还停在待审批：本轮重启会把它整个取代，先收起它的审批表单
+      const prev = lastRun();
+      if (prev?.status === 'paused') chatExecution.abort(prev);
+      // 后续轮次：同一个执行 id 上重启，只把入参换成本轮，记忆接着上一轮
+      run = await chatExecution.retryRun(
+        { apiKey, executionId: sessionExecutionId.value },
+        inputs,
+      );
+    } else {
+      // 首轮：新建执行，executionId 当场记成会话 id
+      run = await chatExecution.send(props.workflow.id, inputs, apiKey);
+      sessionExecutionId.value = run.executionId;
+    }
     messages.value.push({
       id: `a_${Date.now()}`,
       role: 'assistant',
@@ -437,10 +468,13 @@ function lastRun(): ChatRun | null {
   return messages.value.toReversed().find((item) => item.run)?.run || null;
 }
 
-/** 本轮已收尾（可 RETRY）：非 running、非 paused 的状态都是后端认可的终态 */
-function isSettled(run: ChatRun): boolean {
-  return run.status !== 'running' && run.status !== 'paused';
-}
+/**
+ * 可停止：本轮还在跑，或卡在待审批。
+ *
+ * 挂起时不再另开一个「取消挂起」按钮——两者做的是同一件事（停掉本轮），
+ * 多一个入口只会让人先纠结该点哪个。
+ */
+const canStop = computed(() => running.value || lastRun()?.status === 'paused');
 
 async function handleApprovalSubmit(
   msg: ChatMessage,
@@ -460,21 +494,6 @@ async function handleApprovalSubmit(
   }
 }
 
-async function handleRetry(run: ChatRun) {
-  if (approvalSubmitting.value) return;
-  approvalSubmitting.value = true;
-  try {
-    // 不传 inputs：后端沿用执行行里记录的上轮入参
-    await chatExecution.retryRun(run);
-    message.success('已按原入参重新提交');
-    scrollToBottom();
-  } catch (error: any) {
-    message.error(error?.message || '重新提交失败');
-  } finally {
-    approvalSubmitting.value = false;
-  }
-}
-
 function handleClear() {
   if (running.value) {
     message.warning('执行中，请先停止');
@@ -482,6 +501,7 @@ function handleClear() {
   }
   messages.value = [];
   stepsRun.value = null;
+  sessionExecutionId.value = '';
   formRef.value?.resetFields?.();
 }
 
@@ -533,10 +553,12 @@ function handleShortcut(event: KeyboardEvent) {
   handleSend();
 }
 
-onMounted(() => window.addEventListener('keydown', handleShortcut, true));
-onBeforeUnmount(() =>
-  window.removeEventListener('keydown', handleShortcut, true),
-);
+onMounted(() => {
+  window.addEventListener('keydown', handleShortcut, true);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleShortcut, true);
+});
 </script>
 
 <template>
@@ -643,7 +665,7 @@ onBeforeUnmount(() =>
               </div>
 
               <div
-                v-for="block in dataBlocks(msg.run)"
+                v-for="block in dataBlocks(msg.run, msg.id)"
                 :key="block.key"
                 class="data-block"
               >
@@ -667,7 +689,7 @@ onBeforeUnmount(() =>
                   type="error"
                 />
 
-                <!-- 思维链默认折叠，只留一行摘要，展开才渲染全文 -->
+                <!-- 思维链：执行中的段落自动展开，跑完/历史折叠成一行摘要 -->
                 <div v-if="block.reasoning" class="block-reason">
                   <div class="block-reason-head" @click="toggleReason(block)">
                     <component
@@ -711,12 +733,13 @@ onBeforeUnmount(() =>
                 正在排队执行…
               </div>
 
-              <!-- 审批入口：本轮因待决审批节点停下时，直接在气泡里给出结论 -->
+              <!-- 审批入口：本轮停下后详情里还有欠人答的待办，直接在气泡里给出结论 -->
               <ApprovalPanel
                 v-if="
-                  msg.run.status === 'paused' && msg.run.awaiting.length > 0
+                  msg.run.status === 'paused' &&
+                  msg.run.pendingApprovals.length > 0
                 "
-                :contexts="msg.run.awaiting"
+                :approvals="msg.run.pendingApprovals"
                 :submitting="approvalSubmitting"
                 @submit="(decisions) => handleApprovalSubmit(msg, decisions)"
               />
@@ -726,14 +749,6 @@ onBeforeUnmount(() =>
                 <a class="steps-btn" @click="openSteps(msg.run)">
                   <PartitionOutlined />
                   执行过程 · {{ msg.run.steps.length }} 段
-                </a>
-                <a
-                  v-if="isSettled(msg.run)"
-                  class="steps-btn steps-btn-ghost"
-                  @click="handleRetry(msg.run)"
-                >
-                  <RedoOutlined />
-                  按原入参重跑
                 </a>
               </div>
             </template>
@@ -761,15 +776,9 @@ onBeforeUnmount(() =>
           以 API Key「{{ props.apiKey?.name || '—' }}」调用已发布版本
         </span>
         <span class="composer-tip">Ctrl / ⌘ + Enter 发送</span>
-        <a-button v-if="running" danger size="small" @click="handleStop">
+        <a-button v-if="canStop" danger size="small" @click="handleStop">
           停止
         </a-button>
-        <a-tooltip
-          v-else-if="lastRun()?.status === 'paused'"
-          title="取消本轮执行并结束挂起（待审批状态下同样生效）"
-        >
-          <a-button size="small" @click="handleStop">取消挂起</a-button>
-        </a-tooltip>
         <a-tooltip title="Ctrl / ⌘ + Enter 发送">
           <a-button
             :loading="running"
@@ -855,6 +864,9 @@ onBeforeUnmount(() =>
   height: 420px;
   padding: 16px 4px 8px;
   overflow-y: auto;
+
+  // 全局 html{scroll-behavior:smooth} 会继承下来，让程序贴底变成一段动画
+  scroll-behavior: auto;
 }
 
 .chat-welcome {
@@ -1137,18 +1149,6 @@ onBeforeUnmount(() =>
     &:hover {
       color: #fff;
       background: #40a9ff;
-    }
-
-    // 次要动作（重跑）：不抢「执行过程」的视觉权重
-    &.steps-btn-ghost {
-      color: #1890ff;
-      background: #fff;
-      border: 1px solid #91d5ff;
-
-      &:hover {
-        color: #096dd9;
-        background: #e6f7ff;
-      }
     }
   }
 }

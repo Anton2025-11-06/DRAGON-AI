@@ -10,6 +10,8 @@
     node.timeout
     node.cancelled
     node.paused
+    node.tool_call
+    node.tool_result
     workflow.completed
     workflow.failed
     workflow.cancelled
@@ -17,6 +19,15 @@
     workflow.resumed
 
 SSE 帧格式：event: {type}\ndata: {json}\n\n（前端 runtime-events.ts 按行解析）。
+
+node.tool_call / node.tool_result 由大模型节点插入工具后补发（见
+nodes/ai_nodes.py::_emit_tool_call/_emit_tool_result）：前者是模型要求调哪个工具、
+传了什么参数，后者是这一次调用的结果摘要（按 TOOL_EVENT_SUMMARY_CHARS 截断，
+完整结果在节点输出的 toolCalls 里）。两者靠 payload 的 toolCallId 配对。payload 的
+toolName 就是工具登记时的真实名称（工具名不做字符归一；只有重名时引擎内部注册表
+会另用带来路前缀的 key 占位，那个名字不外泄）。
+不受节点「返回内容」开关（emitOutput）约束——那是给面向业务的输出内容用的，这两个
+是过程可见性；工具结果是否作为内容推给客户端由 emitToolResult 单独控制。
 
 node.timeout / node.cancelled 由并行屏障补发（见 engine._settle_branch_nodes）：
 「任一完成 + 等待超时」下被砍分支里的节点只有 node.started、没有终态时，
@@ -70,14 +81,19 @@ class EventBus:
     """
 
     def __init__(self, execution_id: str,
-                 publish_hook: Optional[Any] = None):
+                 publish_hook: Optional[Any] = None,
+                 pause_generation: int = 0):
         """
         :param publish_hook: 跨进程发布回调（service 注入）：
             async (WorkflowEvent) -> None，每次发布实时 PUBLISH 到 Redis 频道；
             约定内部捕获异常，失败不阻断本地执行。
+        :param pause_generation: 本次运行的挂起代次（service 从执行行读出后植入），
+            非 0 时盖进每一帧 payload，消费方据此丢弃过期帧
+            （docs/workflow-execution-contract.md §2.3）。同一次运行的所有帧同号。
         """
         self.execution_id = execution_id
         self.publish_hook = publish_hook
+        self.pause_generation = int(pause_generation or 0)
 
     async def publish(self, event: WorkflowEvent) -> None:
         if self.publish_hook is not None:
@@ -87,4 +103,6 @@ class EventBus:
 
     async def emit(self, event_type: str, **payload) -> None:
         # payload 字段名 camelCase 由调用方保证（nodeId/duration 等）
+        if self.pause_generation:
+            payload["pauseGeneration"] = self.pause_generation
         await self.publish(WorkflowEvent(event_type, self.execution_id, payload=payload))

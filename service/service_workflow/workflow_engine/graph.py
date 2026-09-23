@@ -232,16 +232,24 @@ class WorkflowGraph:
                         suggestion="同一出口的重复连线请只保留一条；不同分支出口连到同一节点是允许的")
 
         # 7. 审批节点 ↔ 开始节点「审批入参」字段的双向联动（需求 2 决策 ⑧）
+        # 只有**配了审批人**的审批节点才需要身份来源；审批人留空 = 任何持 key 且知道
+        # executionId 者皆可审，此时不强制开始节点加 APPROVER 入参。
+        from service.service_workflow.workflow_engine.nodes.approval_nodes import (
+            normalize_approvers,
+        )
         approvals = [n for n in self.nodes if n.type == "APPROVAL"]
+        gated = [n for n in approvals
+                 if normalize_approvers((n.data or {}).get("approvers"))]
         approver_fields = []
         if start is not None:
             approver_fields = [f for f in ((start.data or {}).get("fields") or [])
                                if str(f.get("type") or "").upper() == "APPROVER"]
-        if approvals and not approver_fields:
-            add("APPROVER_FIELD_MISSING", "ERROR", "画布存在审批节点，但开始节点未添加「审批入参」字段",
-                approvals[0],
+        if gated and not approver_fields:
+            names = "、".join(f"「{n.label}」" for n in gated)
+            add("APPROVER_FIELD_MISSING", "ERROR",
+                f"审批节点{names}已配置审批人，但开始节点未添加「审批入参」字段", gated[0],
                 suggestion="在开始节点新增一个类型为 APPROVER 的输入字段（值为数组），"
-                           "提交时用它与审批人列表比对权限")
+                           "提交时用它与审批人列表比对权限；不需要限定审批人时把审批人留空即可")
         if approver_fields and not approvals:
             add("APPROVER_FIELD_ORPHAN", "ERROR",
                 "开始节点配置了「审批入参」字段，但画布上没有审批节点", start,

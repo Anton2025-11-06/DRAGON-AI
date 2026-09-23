@@ -8,7 +8,6 @@ export const ALL_NODE_TYPES = [
   'KNOWLEDGE_RETRIEVAL',
   'QUESTION_CLASSIFIER',
   'PARAMETER_EXTRACTOR',
-  'AGENT',
   'APPROVAL',
   'IF_ELSE',
   'ITERATION',
@@ -23,6 +22,7 @@ export const ALL_NODE_TYPES = [
   'HTTP_REQUEST',
   'TOOL',
   'MCP_TOOL',
+  'WORKFLOW',
 ] as const satisfies readonly NodeType[];
 
 export type WorkflowNodeCategory =
@@ -46,6 +46,8 @@ export interface WorkflowNodeDefinition {
   category: WorkflowNodeCategory;
   icon: string;
   color: string;
+  /** 后端标记的能力未实现节点：面板可见但不可拖 */
+  disabled?: boolean;
   inputs: WorkflowPortDefinition[];
   outputs: WorkflowPortDefinition[];
   formComponent: string;

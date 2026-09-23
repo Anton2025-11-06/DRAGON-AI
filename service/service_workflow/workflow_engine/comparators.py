@@ -38,6 +38,10 @@ def cmp_equals(a, b) -> bool:
     return _to_str(a) == _to_str(b)
 
 
+def is_true(a, b=None) -> bool:
+    return a
+
+
 def cmp_not_equals(a, b) -> bool:
     return not cmp_equals(a, b)
 
@@ -169,6 +173,8 @@ COMPARATORS: dict[str, Callable[[Any, Any], bool]] = {
     "IS_NOT_NULL": cmp_is_not_null,
     "MATCHES_REGEX": cmp_matches_regex,
     "MATCHES": cmp_matches,
+    "IS_TRUE": is_true,
+    "IS_FALSE": is_true
 }
 
 
@@ -185,9 +191,9 @@ def evaluate_conditions(conditions: list[dict], operator: str, ctx) -> bool:
         return False
     results = []
     for cond in conditions:
-        source = ctx.resolve(cond.get("variable", ""))
+        source = ctx.resolve_ref(cond.get("variable", ""))
         if cond.get("valueIsVariable"):
-            target = ctx.resolve(_to_str(cond.get("value")))
+            target = ctx.resolve_ref(_to_str(cond.get("value")))
         else:
             target = cond.get("value")
         try:
@@ -197,7 +203,6 @@ def evaluate_conditions(conditions: list[dict], operator: str, ctx) -> bool:
     if (operator or "AND").upper() == "OR":
         return any(results)
     return all(results)
-
 
 # ==================== 条件断点表达式（已废弃） ====================
 #

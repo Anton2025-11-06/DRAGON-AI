@@ -176,7 +176,7 @@ class VariableAssignerNodeExecutor(BaseNodeExecutor):
             atype = (a.get("type") or "LITERAL").upper()
             value = a.get("value")
             if atype == "VARIABLE":
-                value = ctx.resolve(str(value or ""))
+                value = ctx.resolve_ref(value)
             elif atype == "EXPRESSION":
                 value = self._safe_transform(ctx, value, a.get("transformExpression"))
             if isinstance(value, str):
@@ -281,7 +281,7 @@ class VariableAggregatorNodeExecutor(BaseNodeExecutor):
             strategy = (g.get("strategy") or "FIRST_NON_NULL").upper()
             values = []
             for ref in sources:
-                v = ctx.resolve(str(ref or "")) if ref else None
+                v = ctx.resolve_ref(ref) if ref else None
                 if v is not None:
                     values.append(v)
             if strategy == "FIRST_NON_NULL":

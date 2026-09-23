@@ -5,7 +5,7 @@
 新增节点类型只需实现 BaseNodeExecutor 子类并在本文件注册。
 """
 from service.service_workflow.workflow_engine.nodes.ai_nodes import (
-    AgentNodeExecutor, LLMNodeExecutor, ParameterExtractorNodeExecutor,
+    LLMNodeExecutor, ParameterExtractorNodeExecutor,
     QuestionClassifierNodeExecutor,
 )
 from service.service_workflow.workflow_engine.nodes.approval_nodes import (
@@ -26,6 +26,9 @@ from service.service_workflow.workflow_engine.nodes.data_nodes import (
 from service.service_workflow.workflow_engine.nodes.external_nodes import (
     HttpRequestNodeExecutor, McpToolNodeExecutor, ToolNodeExecutor,
 )
+from service.service_workflow.workflow_engine.nodes.subworkflow_nodes import (
+    WorkflowNodeExecutor,
+)
 
 NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     # 边界
@@ -35,7 +38,6 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     LLMNodeExecutor.node_type: LLMNodeExecutor,
     QuestionClassifierNodeExecutor.node_type: QuestionClassifierNodeExecutor,
     ParameterExtractorNodeExecutor.node_type: ParameterExtractorNodeExecutor,
-    AgentNodeExecutor.node_type: AgentNodeExecutor,
     # 控制流
     IfElseNodeExecutor.node_type: IfElseNodeExecutor,
     LoopNodeExecutor.node_type: LoopNodeExecutor,
@@ -43,7 +45,7 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     ParallelNodeExecutor.node_type: ParallelNodeExecutor,
     VariableAssignerNodeExecutor.node_type: VariableAssignerNodeExecutor,
     VariableAggregatorNodeExecutor.node_type: VariableAggregatorNodeExecutor,
-    # 人工审批（业务逻辑：在节点边界暂停，由「指定 executionId 再提交」接口恢复）
+    # 人工审批（业务逻辑：在节点边界挂起，由带 decisions 的 submit 恢复）
     ApprovalNodeExecutor.node_type: ApprovalNodeExecutor,
     # 数据
     TemplateNodeExecutor.node_type: TemplateNodeExecutor,
@@ -56,12 +58,15 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     HttpRequestNodeExecutor.node_type: HttpRequestNodeExecutor,
     ToolNodeExecutor.node_type: ToolNodeExecutor,
     McpToolNodeExecutor.node_type: McpToolNodeExecutor,
+    # 嵌套调用：进程内起一条子工作流执行（可随子流程的审批一起挂起）
+    WorkflowNodeExecutor.node_type: WorkflowNodeExecutor,
 }
 
 # 前端节点类型全集（types.ts NodeType）
 ALL_NODE_TYPES = [
-    "START", "END", "LLM", "AGENT", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
+    "START", "END", "LLM", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
     "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "MCP_TOOL", "KNOWLEDGE_RETRIEVAL",
+    "WORKFLOW",
     "PARAMETER_EXTRACTOR", "QUESTION_CLASSIFIER", "LIST_OPERATOR",
     "VARIABLE_AGGREGATOR", "VARIABLE_ASSIGNER", "DOC_EXTRACTOR", "APPROVAL",
 ]

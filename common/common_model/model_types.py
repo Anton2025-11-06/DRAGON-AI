@@ -25,11 +25,13 @@ class ModelConfig:
     api_key: str = ""
     model_params: dict = field(default_factory=dict)
     status: int = 1
-    # 模型管理登记的模型能力位（tb_model.supports_stream / supports_thinking）：
-    # 与 BaseModel.supports_stream（该能力类型是否可流式）不同，这里表示该模型是否
-    # 真开启流式/思考；上层引擎据此决定是否向厂商下发流式/思考入参，未登记不外发。
+    # 模型管理登记的模型能力位（tb_model.supports_stream / supports_thinking /
+    # supports_function_call）：与 BaseModel.supports_stream（该能力类型是否可流式）不同，
+    # 这里表示该模型是否真开启流式/思考/工具调用；上层引擎据此决定是否向厂商
+    # 下发流式/思考入参或 tools 定义，未登记不外发。
     supports_stream: bool = False
     supports_thinking: bool = False
+    supports_function_call: bool = False
 
 
 @dataclass
@@ -58,6 +60,10 @@ class StreamChunk:
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
     raw: Optional[dict] = None
+    # 流式 function-call：厂商把 tool_calls 拆成带 index 的增量分片下发，由
+    # ChatMLMixin._chat_stream 按 index 累加后只在收尾片物化成完整列表（形状与
+    # ModelResult.tool_calls 一致），分片不外泄，调用方不必认识流式协议。
+    tool_calls: Optional[list] = None
 
 
 @dataclass

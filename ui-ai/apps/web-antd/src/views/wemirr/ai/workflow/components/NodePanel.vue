@@ -127,23 +127,23 @@ function getNodesByCategory(categoryKey: string) {
 
 /**
  * 获取节点项样式 - 参考官网：统一蓝色边框，白底
+ * 置灰项（后端 disabled，即平台能力尚未实现）走灰底灰边，不响应悬停位移
  */
-function getNodeItemStyle(nodeType: NodeType) {
-  const isHovered = hoveredNode.value === nodeType;
+function getNodeItemStyle(item: (typeof activeNodePanelItems.value)[number]) {
+  const notDraggable = props.disabled || !!item.disabled;
+  const isHovered = hoveredNode.value === item.type && !notDraggable;
 
   return {
-    backgroundColor: '#fff',
-    borderColor: '#5F95FF',
+    backgroundColor: item.disabled ? '#fafafa' : '#fff',
+    borderColor: item.disabled ? '#d9d9d9' : '#5F95FF',
     borderWidth: '1px',
     borderStyle: 'solid',
     borderRadius: '8px',
-    cursor: props.disabled ? 'not-allowed' : 'grab',
-    opacity: props.disabled ? 0.6 : 1,
-    boxShadow:
-      isHovered && !props.disabled
-        ? '0 2px 8px rgba(95, 149, 255, 0.25)'
-        : 'none',
-    transform: isHovered && !props.disabled ? 'translateY(-1px)' : 'none',
+    cursor: notDraggable ? 'not-allowed' : 'grab',
+    // 置灰项比整面板禁用更淡：一个是“这个节点没做”，一个是“现在不能拖”
+    opacity: notDraggable ? (item.disabled ? 0.5 : 0.6) : 1,
+    boxShadow: isHovered ? '0 2px 8px rgba(95, 149, 255, 0.25)' : 'none',
+    transform: isHovered ? 'translateY(-1px)' : 'none',
   };
 }
 
@@ -154,7 +154,7 @@ function handleDragStart(
   item: (typeof activeNodePanelItems.value)[number],
   event: DragEvent,
 ) {
-  if (props.disabled) {
+  if (props.disabled || item.disabled) {
     event.preventDefault();
     return;
   }
@@ -197,24 +197,30 @@ function handleDragStart(
           }}</span>
         </template>
         <div class="node-list">
-          <div
+          <a-tooltip
             v-for="item in getNodesByCategory(category.key)"
             :key="item.type"
-            class="node-item"
-            data-testid="workflow-node-panel-item"
-            :data-node-type="item.type"
-            :style="getNodeItemStyle(item.type)"
-            draggable="true"
-            @dragstart="(e) => handleDragStart(item, e)"
-            @mouseenter="hoveredNode = item.type"
-            @mouseleave="hoveredNode = null"
+            :title="
+              item.disabled ? `「${item.label}」的能力尚未实现，暂不可选` : ''
+            "
           >
-            <component :is="getIconComponent(item.icon)" class="node-icon" />
-            <div class="node-info">
-              <span class="node-label">{{ item.label }}</span>
-              <span class="node-desc">{{ item.description }}</span>
+            <div
+              class="node-item"
+              data-testid="workflow-node-panel-item"
+              :data-node-type="item.type"
+              :style="getNodeItemStyle(item)"
+              :draggable="!item.disabled && !disabled"
+              @dragstart="(e) => handleDragStart(item, e)"
+              @mouseenter="hoveredNode = item.type"
+              @mouseleave="hoveredNode = null"
+            >
+              <component :is="getIconComponent(item.icon)" class="node-icon" />
+              <div class="node-info">
+                <span class="node-label">{{ item.label }}</span>
+                <span class="node-desc">{{ item.description }}</span>
+              </div>
             </div>
-          </div>
+          </a-tooltip>
         </div>
       </a-collapse-panel>
     </a-collapse>

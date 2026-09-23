@@ -1,11 +1,21 @@
 <script setup lang="ts">
-import type { LLMNodeConfig, StructuredOutput } from '#/api/ai-workflow/types';
+import type {
+  DynamicToolOption,
+  ExecutableWorkflowOption,
+  LLMNodeConfig,
+  LlmToolBinding,
+  LlmToolKind,
+  McpServerOption,
+  StructuredOutput,
+  WorkflowVersionMode,
+  WorkflowVersionResp,
+} from '#/api/ai-workflow/types';
 
 /**
  * LLM 节点配置表单（对齐 common_model 12 能力类型）
  * 依据所选模型登记的能力类型（category）+ 模型管理的能力位（supports_stream/supports_thinking）
  * 动态展示对应输入项；页面上没有展示的字段不会写进节点配置：
- * - 文生文：系统/用户提示词、流式、深度思考、Vision、结构化输出
+ * - 文生文：系统/用户提示词、流式、深度思考、Vision、工具、结构化输出
  * - 图片理解/视频理解/OCR：媒体输入变量 +（提示词）
  * 温度/max_tokens 等模型调用参数在 12 类上都不占节点字段：统一由表单底部
  * 「常用参数」编辑（默认取模型管理登记值），运行时合并进 model_params 透传厂商。
@@ -23,6 +33,12 @@ import {
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
+import {
+  getWorkflowVersionHistory,
+  listDynamicTools,
+  listExecutableWorkflows,
+  listMcpServers,
+} from '#/api/ai-workflow';
 import {
   LLM_TYPE_OPTIONS,
   MODEL_TYPES_MEMORY,
@@ -72,7 +88,11 @@ const workflowStore = useAiWorkflowStore();
 
 // 表单数据（含 12 能力类型全部入参字段）
 const formData = reactive<
-  LLMNodeConfig & { structuredOutput: StructuredOutput }
+  {
+    structuredOutput: StructuredOutput;
+    // 配置里 tools 是可选项，但表单态必须始终有条数组可绑（空数组 = 没选工具）
+    tools: LlmToolBinding[];
+  } & LLMNodeConfig
 >({
   modelId: undefined,
   modelName: '',
@@ -95,6 +115,8 @@ const formData = reactive<
   visionEnabled: false,
   imageVariables: [],
   structuredOutput: { ...defaultStructuredOutput },
+  tools: [],
+  emitToolResult: false,
   memoryEnabled: false,
   memoryLimit: 10,
   memoryScope: 'SELF',
@@ -160,7 +182,11 @@ function castParamRow(p: ParamRow): ParamRow {
   };
 }
 // 所选模型在模型管理登记的能力位：开启了对应能力才展示开关，展示了才下发该参数
-const modelCaps = ref({ supportsStream: false, supportsThinking: false });
+const modelCaps = ref({
+  supportsFunctionCall: false,
+  supportsStream: false,
+  supportsThinking: false,
+});
 const capsLoading = ref(false);
 /** 已发起过详情拉取的 modelId（config 回灌时避免重复请求） */
 const capsRequestedFor = ref<number | undefined>(undefined);
@@ -196,7 +222,11 @@ async function loadModelMeta(seedParams: boolean) {
   const id = Number(formData.modelId);
   capsRequestedFor.value = id || undefined;
   if (!id) {
-    modelCaps.value = { supportsStream: false, supportsThinking: false };
+    modelCaps.value = {
+      supportsFunctionCall: false,
+      supportsStream: false,
+      supportsThinking: false,
+    };
     paramRows.value = [];
     handleChange();
     return;
@@ -205,13 +235,18 @@ async function loadModelMeta(seedParams: boolean) {
   try {
     const detail = await modelApi.GetDetail(id);
     modelCaps.value = {
+      supportsFunctionCall: !!detail.supports_function_call,
       supportsStream: !!detail.supports_stream,
       supportsThinking: !!detail.supports_thinking,
     };
     if (seedParams) paramRows.value = rowsFromCommonParams(detail);
   } catch {
     // 详情拉不到时按「未开启」处理：宁可不显示/不下发流式思考，也不要把默认值写进配置
-    modelCaps.value = { supportsStream: false, supportsThinking: false };
+    modelCaps.value = {
+      supportsFunctionCall: false,
+      supportsStream: false,
+      supportsThinking: false,
+    };
     if (seedParams) paramRows.value = [];
   } finally {
     capsLoading.value = false;
@@ -246,6 +281,7 @@ watch(
       structuredOutput: config.structuredOutput
         ? { ...defaultStructuredOutput, ...config.structuredOutput }
         : { ...defaultStructuredOutput },
+      emitToolResult: config.emitToolResult ?? false,
       memoryEnabled: config.memoryEnabled ?? false,
       memoryLimit: config.memoryLimit ?? 10,
       memoryScope: config.memoryScope || 'SELF',
@@ -262,6 +298,11 @@ watch(
         value: p.value,
         desc: p.desc || '',
       }));
+    }
+    // 工具绑定同口径：自身 emit 的回灌不重建数组，否则正在展开的子工作流行会被替掉
+    const incomingTools = Array.isArray(config.tools) ? config.tools : [];
+    if (!isSameTools(incomingTools)) {
+      formData.tools = incomingTools.map((t) => ({ ...t }));
     }
     // 尚未发起过该模型详情拉取（首次渲染 / 外部改了模型）：拉能力位，节点无已存参数时顺带预置
     if (
@@ -386,6 +427,274 @@ const memoryNodeOptions = computed(() => {
   return options;
 });
 
+// ==================== 插入工具（仅文生文 + 模型登记了 supports_function_call）====================
+
+/**
+ * 工具区块是否可见。
+ * 只有文生文有 function-call 通道，且要模型管理勾了能力位：两者缺一不展示也不下发，
+ * 与流式/思考两个能力位同一口径（后端执行时还有一道闸门兼容历史图）。
+ */
+const showTools = computed(
+  () => isChat.value && modelCaps.value.supportsFunctionCall,
+);
+
+/** 已选绑定的分组下发顺序（固定它，勾一下选不会把数组顺序换一遍） */
+const TOOL_KIND_ORDER: LlmToolKind[] = ['TOOL', 'MCP', 'WORKFLOW'];
+
+const mcpOptions = ref<McpServerOption[]>([]);
+const functionToolOptions = ref<DynamicToolOption[]>([]);
+const workflowOptions = ref<ExecutableWorkflowOption[]>([]);
+const toolsLoading = ref(false);
+const toolsLoadError = ref('');
+/** 三类候选已拉过一轮：区块首次可见才拉，不能每打开一个 LLM 节点发三个请求 */
+let toolOptionsLoaded = false;
+/** 子工作流 id → 版本列表（只在某条选了「指定版本」才拉，接口连图快照一起返回） */
+const versionCache = reactive<Record<string, WorkflowVersionResp[]>>({});
+const versionsLoading = ref(false);
+
+/** 已选工具数（控制「输出工具调用结果」开关只在有工具时出现） */
+const hasTools = computed(() => formData.tools.length > 0);
+
+async function loadToolOptions() {
+  if (toolOptionsLoaded || toolsLoading.value) return;
+  toolsLoading.value = true;
+  toolsLoadError.value = '';
+  try {
+    const [mcps, tools, workflows] = await Promise.all([
+      listMcpServers(),
+      listDynamicTools(),
+      listExecutableWorkflows(),
+    ]);
+    mcpOptions.value = mcps || [];
+    functionToolOptions.value = tools || [];
+    workflowOptions.value = workflows || [];
+    toolOptionsLoaded = true;
+  } catch (error: any) {
+    toolsLoadError.value = error?.message || '工具候选加载失败';
+  } finally {
+    toolsLoading.value = false;
+  }
+}
+
+// 能力位拉到后才试拉候选（模型详情是异步的，setup 阶段还看不出 showTools）
+watch(showTools, (visible) => {
+  if (visible) loadToolOptions();
+});
+
+/** 入参行与当前工具绑定等价 → 判定为自身 emit 的回灌，不重建数组 */
+function isSameTools(tools: LlmToolBinding[]): boolean {
+  if (tools.length !== formData.tools.length) return false;
+  return tools.every((t, i) => {
+    const row = formData.tools[i] as LlmToolBinding;
+    return (
+      row.kind === t.kind &&
+      String(row.id) === String(t.id) &&
+      row.apiKeyId === t.apiKeyId &&
+      (row.versionMode || 'LATEST') === (t.versionMode || 'LATEST') &&
+      row.version === t.version &&
+      (row.workflowName || '') === (t.workflowName || '')
+    );
+  });
+}
+
+/** 子工作流的版本策略选项（语义同【工作流】节点表单） */
+const VERSION_MODE_OPTIONS = [
+  { label: '始终使用最新版本', value: 'LATEST' },
+  { label: '指定版本', value: 'SPECIFIC' },
+];
+
+/** 按 id 取一条子工作流绑定（模板里的多个小下拉都读它） */
+function workflowBinding(id: string): LlmToolBinding | undefined {
+  return formData.tools.find(
+    (t) => t.kind === 'WORKFLOW' && String(t.id) === id,
+  );
+}
+
+function apiKeyOf(id: string): number | undefined {
+  return workflowBinding(id)?.apiKeyId;
+}
+
+function workflowNameOf(id: string): string | undefined {
+  return workflowBinding(id)?.workflowName;
+}
+
+function versionModeOf(id: string): WorkflowVersionMode {
+  return workflowBinding(id)?.versionMode === 'SPECIFIC'
+    ? 'SPECIFIC'
+    : 'LATEST';
+}
+
+function versionOf(id: string): number | undefined {
+  return workflowBinding(id)?.version;
+}
+
+/** 切版本策略：选「指定版本」才按需拉该条的版本列表；切回来就掉旧版本号 */
+function handleVersionModeChange(id: string, mode: WorkflowVersionMode) {
+  patchWorkflowBinding(id, {
+    version: mode === 'SPECIFIC' ? workflowBinding(id)?.version : undefined,
+    versionMode: mode === 'SPECIFIC' ? 'SPECIFIC' : 'LATEST',
+  });
+  if (mode === 'SPECIFIC' && !versionCache[id]) loadVersions(id);
+}
+
+/** 新勾上的一条：子工作流只有一把可用 key 时直接预选（它是必填项） */
+function blankBinding(kind: LlmToolKind, id: string): LlmToolBinding {
+  if (kind !== 'WORKFLOW') return { id, kind };
+  const wf = workflowOptions.value.find((item) => String(item.id) === id);
+  const keys = wf?.apiKeys || [];
+  return {
+    apiKeyId: keys.length === 1 ? keys[0]?.id : undefined,
+    id,
+    kind: 'WORKFLOW',
+    versionMode: 'LATEST',
+    workflowName: wf?.name || '',
+  };
+}
+
+/** 某一类来源的已选 id（多选控件的 value） */
+function idsOfKind(kind: LlmToolKind): string[] {
+  return formData.tools.filter((t) => t.kind === kind).map((t) => String(t.id));
+}
+
+/**
+ * 多选变更：已存在的项按 id 保留（子工作流的 key/版本不能因为重选丢了），
+ * 新勾的补一条空白绑定，已取消的直接掉出去。
+ */
+function setKindIds(kind: LlmToolKind, ids: string[]) {
+  const sameKind = formData.tools.filter((t) => t.kind === kind);
+  const next = ids.map(
+    (id) => sameKind.find((t) => String(t.id) === id) || blankBinding(kind, id),
+  );
+  formData.tools = TOOL_KIND_ORDER.flatMap((k) =>
+    k === kind ? next : formData.tools.filter((t) => t.kind === k),
+  );
+  handleChange();
+}
+
+/** 子工作流某条绑定就地改字段 */
+function patchWorkflowBinding(
+  id: string,
+  patch: Partial<LlmToolBinding>,
+): void {
+  const item = formData.tools.find(
+    (t) => t.kind === 'WORKFLOW' && String(t.id) === id,
+  );
+  if (!item) return;
+  Object.assign(item, patch);
+  handleChange();
+}
+
+async function loadVersions(id: number | string) {
+  const key = String(id);
+  if (versionCache[key]) return;
+  versionsLoading.value = true;
+  try {
+    versionCache[key] = await getWorkflowVersionHistory(id);
+  } catch {
+    versionCache[key] = [];
+  } finally {
+    versionsLoading.value = false;
+  }
+}
+
+function apiKeyOptionsOf(id: number | string) {
+  const wf = workflowOptions.value.find(
+    (item) => String(item.id) === String(id),
+  );
+  return (wf?.apiKeys || []).map((item) => ({
+    label: `${item.name}（${
+      item.rateLimit > 0 ? `${item.rateLimit} 次/分钟` : '不限流'
+    }）`,
+    value: item.id,
+  }));
+}
+
+function versionOptionsOf(id: number | string) {
+  // 只有已发布的版本能被调用（口径同【工作流】节点表单）
+  return (versionCache[String(id)] || [])
+    .filter((item) => item.published)
+    .map((item) => ({ label: `v${item.version}`, value: item.version }));
+}
+
+/** 子工作流显示名：候选列表里没有（已下线/取消发布）时用选择时的快照名兜底 */
+function workflowLabel(id: number | string, snapshotName?: string): string {
+  const wf = workflowOptions.value.find(
+    (item) => String(item.id) === String(id),
+  );
+  if (wf) return wf.name;
+  return snapshotName
+    ? `${snapshotName}（已不可调用）`
+    : `#${id}（已不可调用）`;
+}
+
+/** 工具多选选项（带登记名，已选但不在列表里的补一条展示，不让下拉回显为空） */
+const toolSelectOptions = computed(() => {
+  const options = functionToolOptions.value.map((item) => ({
+    label: item.description ? `${item.name} - ${item.description}` : item.name,
+    value: String(item.id),
+  }));
+  idsOfKind('TOOL').forEach((id) => {
+    if (!options.some((opt) => opt.value === id)) {
+      options.push({ label: `#${id}（工具已删除）`, value: id });
+    }
+  });
+  return options;
+});
+
+const mcpSelectOptions = computed(() => {
+  const options = mcpOptions.value.map((item) => ({
+    label: item.name,
+    value: String(item.id),
+  }));
+  idsOfKind('MCP').forEach((id) => {
+    if (!options.some((opt) => opt.value === id)) {
+      options.push({ label: `#${id}（连接已删除）`, value: id });
+    }
+  });
+  return options;
+});
+
+const workflowSelectOptions = computed(() => {
+  const options = workflowOptions.value.map((item) => ({
+    label: `${item.name}（v${item.currentVersion}）`,
+    value: String(item.id),
+  }));
+  formData.tools
+    .filter((t) => t.kind === 'WORKFLOW')
+    .forEach((t) => {
+      const id = String(t.id);
+      if (!options.some((opt) => opt.value === id)) {
+        options.push({
+          label: `${t.workflowName || id}（已不可调用）`,
+          value: id,
+        });
+      }
+    });
+  return options;
+});
+
+/**
+ * 下发前归一：按 kind 只带该带的字段。
+ * LATEST 下不留旧版本号：留着它，切回「始终最新」的图会带着旧版本号跑。
+ */
+function normalizedTools(): LlmToolBinding[] {
+  return formData.tools
+    .filter((t) => t && t.id !== undefined && t.id !== null && `${t.id}` !== '')
+    .map((t) => {
+      if (t.kind !== 'WORKFLOW') return { id: t.id, kind: t.kind };
+      const versionMode: WorkflowVersionMode =
+        t.versionMode === 'SPECIFIC' ? 'SPECIFIC' : 'LATEST';
+      return {
+        apiKeyId: t.apiKeyId,
+        id: t.id,
+        kind: 'WORKFLOW' as LlmToolKind,
+        version: versionMode === 'SPECIFIC' ? t.version : undefined,
+        versionMode,
+        workflowName: t.workflowName || '',
+      };
+    });
+}
+
 // ==================== 模型测试台（复用 ModelTryPanel，不影响配置字段保存）====================
 const testOpen = ref(false);
 const testLoading = ref(false);
@@ -499,6 +808,11 @@ function handleChange() {
     structuredOutput: formData.structuredOutput.enabled
       ? { ...formData.structuredOutput }
       : undefined,
+    // 工具只在文生文 + 模型开了工具调用能力时下发；一条没选也不下发（清掉旧图的残留）
+    tools: showTools.value && hasTools.value ? normalizedTools() : undefined,
+    // 「输出工具结果」只在真有工具时有意义：没工具时留着它只会让人以为它控制了正文输出
+    emitToolResult:
+      showTools.value && hasTools.value ? formData.emitToolResult : undefined,
     // 未开记忆时整组不下发：否则图里会多一堆用不上的开关字段
     memoryEnabled: showMemory.value ? formData.memoryEnabled : undefined,
     memoryLimit:
@@ -765,6 +1079,135 @@ async function handleTypeChange() {
         <div class="form-hint">
           列表只列上游节点输出的变量（开始节点文件参数、文生图输出等），可选多个
         </div>
+      </a-form-item>
+    </template>
+
+    <!-- 工具：仅文生文且模型登记了 supports_function_call 时展示。
+         三条来源都只「选上就算插入」、不配任何参数：工具入参定义、MCP 连接的
+         tools/list、子工作流的开始节点入参都在引擎执行时才读（只有单独使用
+         工作流/MCP/工具节点时才需要手配入参） -->
+    <template v-if="showTools">
+      <a-divider
+        orientation="left"
+        style="font-size: 12px; margin: 16px 0 12px"
+      >
+        工具
+      </a-divider>
+      <a-alert
+        v-if="toolsLoadError"
+        type="error"
+        show-icon
+        :message="toolsLoadError"
+        style="margin-bottom: 12px"
+      />
+
+      <a-form-item label="MCP 连接">
+        <a-select
+          :value="idsOfKind('MCP')"
+          mode="multiple"
+          :loading="toolsLoading"
+          :options="mcpSelectOptions"
+          option-filter-prop="label"
+          placeholder="选择一个或多个 MCP 连接"
+          @change="(v: any) => setKindIds('MCP', (v || []).map(String))"
+        />
+        <div class="form-hint">
+          插入粒度是整条连接：执行时读它的 tools/list，连接里有几个工具就算几个
+        </div>
+      </a-form-item>
+
+      <a-form-item label="工具">
+        <a-select
+          :value="idsOfKind('TOOL')"
+          mode="multiple"
+          :loading="toolsLoading"
+          :options="toolSelectOptions"
+          option-filter-prop="label"
+          placeholder="选择一个或多个已登记的工具"
+          @change="(v: any) => setKindIds('TOOL', (v || []).map(String))"
+        />
+        <div class="form-hint">
+          参数取工具登记里的定义，执行时现读，不需要在这里配
+        </div>
+      </a-form-item>
+
+      <a-form-item label="工作流">
+        <a-select
+          :value="idsOfKind('WORKFLOW')"
+          mode="multiple"
+          :loading="toolsLoading"
+          :options="workflowSelectOptions"
+          option-filter-prop="label"
+          placeholder="选择可调用的子工作流（已发布且配了可用 API Key）"
+          @change="(v: any) => setKindIds('WORKFLOW', (v || []).map(String))"
+        />
+        <div class="form-hint">
+          子执行在 workflow 服务内部直跑；子流程卡在审批会带着本节点一起挂起
+        </div>
+      </a-form-item>
+
+      <!-- 每条子工作流的凭证与版本策略（apiKeyId / versionMode / version 只对这一类有意义） -->
+      <div
+        v-for="id in idsOfKind('WORKFLOW')"
+        :key="`llm-tool-wf-${id}`"
+        class="sub-workflow-row"
+      >
+        <div class="sub-workflow-name">
+          {{ workflowLabel(id, workflowNameOf(id)) }}
+        </div>
+        <a-row :gutter="8">
+          <a-col :span="12">
+            <a-form-item
+              label="执行用 API Key"
+              :validate-status="apiKeyOf(id) ? '' : 'error'"
+              :help="apiKeyOf(id) ? '' : '必选：决定用哪套凭证与限流额度'"
+            >
+              <a-select
+                :value="apiKeyOf(id)"
+                :options="apiKeyOptionsOf(id)"
+                placeholder="选择 API Key"
+                @change="(v: any) => patchWorkflowBinding(id, { apiKeyId: v })"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="版本">
+              <a-select
+                :value="versionModeOf(id)"
+                :options="VERSION_MODE_OPTIONS"
+                @change="(v: any) => handleVersionModeChange(id, v)"
+              />
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <a-form-item v-if="versionModeOf(id) === 'SPECIFIC'" label="指定版本号">
+          <a-select
+            :value="versionOf(id)"
+            :loading="versionsLoading"
+            :options="versionOptionsOf(id)"
+            placeholder="选择已发布的版本"
+            @change="(v: any) => patchWorkflowBinding(id, { version: v })"
+          />
+        </a-form-item>
+      </div>
+
+      <a-form-item v-if="hasTools">
+        <template #label>
+          <span>
+            输出工具调用结果
+            <a-tooltip
+              title="打开后每次工具调用的结果会作为内容推给客户端；关闭时只记节点输出与调试事件"
+            >
+              <QuestionCircleOutlined
+                style="margin-left: 4px; color: #8c8c8c"
+              />
+            </a-tooltip>
+          </span>
+        </template>
+        <a-switch
+          v-model:checked="formData.emitToolResult"
+          @change="handleChange"
+        />
       </a-form-item>
     </template>
 
@@ -1095,6 +1538,27 @@ async function handleTypeChange() {
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
+  }
+
+  // 插入工具：每条子工作流的凭证/版本单独一块，与上方的多选拉开一点距离
+  .sub-workflow-row {
+    padding: 8px 10px 0;
+    margin-bottom: 12px;
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+
+    .sub-workflow-name {
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #262626;
+      word-break: break-all;
+    }
+
+    :deep(.ant-form-item) {
+      margin-bottom: 10px;
+    }
   }
 
   :deep(.ant-divider-inner-text) {

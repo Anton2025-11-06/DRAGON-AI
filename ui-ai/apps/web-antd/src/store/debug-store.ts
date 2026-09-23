@@ -2,11 +2,15 @@
  * 工作流调试状态 Store
  * 管理调试面板的状态，包括执行状态、节点追踪、审批挂起和变量等。
  *
- * 已随外部暂停链路废弃：断点（breakpoints）与「暂停/恢复接口」。暂停唯一来源
- * 是审批节点（node.paused / workflow.paused），恢复走 submit 接口。
+ * 已随外部暂停链路废弃：断点（breakpoints，表列已删）与「暂停/恢复接口」。暂停的唯一来源
+ * 是停在等人答：事件帧只报「停下了 + 哪个节点」，待办清单只从执行详情取（pendingApprovals）。
  */
 
-import type { ApprovalContext, NodeType } from '#/api/ai-workflow/types';
+import type {
+  LlmToolKind,
+  NodeType,
+  PendingApproval,
+} from '#/api/ai-workflow/types';
 import type { WorkflowDebugErrorType as WorkflowDebugErrorTypeValue } from '#/views/wemirr/ai/workflow/domain/debug-errors';
 import type { WorkflowRuntimeEventType } from '#/views/wemirr/ai/workflow/domain/runtime-events';
 
@@ -14,6 +18,7 @@ import { computed, ref } from 'vue';
 
 import { defineStore } from 'pinia';
 
+import { getExecution } from '#/api/ai-workflow';
 import { WorkflowDebugErrorType } from '#/views/wemirr/ai/workflow/domain/debug-errors';
 
 // ==================== 类型定义 ====================
@@ -33,6 +38,29 @@ export type NodeExecutionStatus =
   | 'running'
   | 'skipped'
   | 'timeout';
+
+/**
+ * 大模型节点插入工具后的一次调用（node.tool_call + node.tool_result 合并成一条）
+ *
+ * 两个事件靠 toolCallId 配对：只收到 call 时 result/error 为空，面板就画成「调用中」。
+ */
+export interface NodeToolCallTrace {
+  /** 模型给的入参 */
+  arguments?: Record<string, any>;
+  /** 调用失败原因（后端同时把原文回填给模型，让它有机会改口） */
+  error?: null | string;
+  /** 工具来源 */
+  kind?: LlmToolKind;
+  /** 第几轮 tool-call（恢复轮补记的那次为 0） */
+  round?: number;
+  /** 结果摘要（完整结果在节点输出的 toolCalls 里） */
+  result?: string;
+  /** true = 子工作流审批结束后补记的那次调用 */
+  resumed?: boolean;
+  toolCallId?: string;
+  /** 对外暴露的工具名（跨来源重名时会带来源前缀） */
+  toolName?: string;
+}
 
 /**
  * 节点追踪数据
@@ -79,6 +107,8 @@ export interface NodeTrace {
   streamingContent?: string;
   /** 流式思维链内容（reasoning 增量，与正文分开累加） */
   streamingReasoning?: string;
+  /** 插入工具后的调用过程（按事件到达顺序追加） */
+  toolCalls?: NodeToolCallTrace[];
   /** 本轮未重跑（沿用上一轮输出） */
   skip?: boolean;
 }
@@ -197,12 +227,16 @@ export interface DebugSSEEvent {
   branchId?: string;
   /** node.completed：本轮未重跑（沿用上一轮结果） */
   skip?: boolean;
-  /** node.paused / workflow.paused：审批上下文 */
-  approvalContext?: ApprovalContext;
-  /** workflow.paused：全部待审批节点 id */
-  awaitingNodeIds?: string[];
-  /** node.paused：审批节点的暂停范围 */
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
+  /** node.tool_call / node.tool_result：模型侧调用 id（两个事件靠它配对） */
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  /** node.tool_call：模型给的入参 */
+  arguments?: Record<string, any>;
+  /** node.tool_result：结果摘要 */
+  result?: string;
+  round?: number;
+  resumed?: boolean;
 }
 
 /**
@@ -296,10 +330,10 @@ export const useDebugStore = defineStore('debug', () => {
   const currentNodeId = ref<null | string>(null);
 
   /**
-   * 待审批节点及其审批上下文（node_id -> context）
-   * 面板的审批表单数据源；提交成功后由提交方的事件流重建
+   * 此刻欠人答的审批（执行详情 pendingApprovals 的镜像，审批面板的唯一数据源）
+   * 只从详情读一次，不从帧里拼：同一个 executionId 的任何后续动作都以它为准
    */
-  const awaitingApprovals = ref<Map<string, ApprovalContext>>(new Map());
+  const pendingApprovals = ref<PendingApproval[]>([]);
 
   /** 变量数据 */
   const variables = ref<Map<string, any>>(new Map());
@@ -321,13 +355,14 @@ export const useDebugStore = defineStore('debug', () => {
 
   // ==================== 计算属性 ====================
 
-  /** 待审批节点列表（按后端的 awaitingNodeIds 语义，多个 = 并行下同时挂起） */
-  const awaitingApprovalList = computed(() => [
-    ...awaitingApprovals.value.values(),
-  ]);
+  /** 欠人答的审批清单（并行下可能多份） */
+  const awaitingApprovalList = computed(() => pendingApprovals.value);
 
-  /** 是否在等待人工审批（收尾时存在未决策审批节点） */
-  const isAwaitingApproval = computed(() => awaitingApprovals.value.size > 0);
+  /**
+   * 是不是真的在等人答：空清单意味着 PAUSED 另有原因（已交给子执行跑），
+   * 再弹一次审批面板就是把同一份结论问第二遍
+   */
+  const isAwaitingApproval = computed(() => pendingApprovals.value.length > 0);
 
   /** 节点追踪列表(按开始时间排序) */
   const sortedNodeTraces = computed(() =>
@@ -430,30 +465,27 @@ export const useDebugStore = defineStore('debug', () => {
     currentNodeId.value = null;
     result.value = null;
     timelineItems.value = [];
-    clearAwaitingApprovals();
+    clearPendingApprovals();
   }
 
   /**
-   * 审批挂起（workflow.paused 的节点级对应：单个审批节点停在 AWAITING）
-   * @param nodeId 审批节点ID
-   * @param context 审批上下文（可编辑数据 + 审批人配置）
+   * 节点停在等人答（只改节点追踪与当前节点，不存审批内容）
+   * @param nodeId 正挂着的节点 id（等子流程时就是那个【工作流】节点）
    */
-  function markNodeAwaiting(nodeId: string, context?: ApprovalContext) {
+  function markNodeAwaiting(nodeId: string) {
     const trace = nodeTraces.value.get(nodeId);
     if (trace) {
       trace.status = 'awaiting';
       trace.endTime = new Date();
     }
-    if (context) awaitingApprovals.value.set(context.nodeId || nodeId, context);
-    else awaitingApprovals.value.set(nodeId, { nodeId });
     currentNodeId.value = nodeId;
   }
 
   /**
-   * 已提交审批结论（或新一轮执行开始）：清掉待审批登记，面板收起审批表单
+   * 已提交审批结论（或新一轮执行开始）：清掉待办清单，面板收起审批表单
    */
-  function clearAwaitingApprovals() {
-    awaitingApprovals.value.clear();
+  function clearPendingApprovals() {
+    pendingApprovals.value = [];
   }
 
   /**
@@ -465,10 +497,14 @@ export const useDebugStore = defineStore('debug', () => {
 
   /**
    * 提交后恢复推进（清审批残留 + 回到执行中）
+   *
+   * isRunning 必须一起置回：恢复提交沿用同一个连接继续跑，运行态不落回 true
+   * 就会让面板在整段续跑期间既没有「执行中」标识、也不拦重复的预览运行。
    */
   function resumeExecution() {
     isPaused.value = false;
-    clearAwaitingApprovals();
+    isRunning.value = true;
+    clearPendingApprovals();
   }
 
   /**
@@ -759,30 +795,112 @@ export const useDebugStore = defineStore('debug', () => {
   }
 
   /**
-   * 处理审批节点挂起事件（node.paused）
+   * 处理工具调用事件（node.tool_call / node.tool_result）
+   *
+   * 同一节点的多轮多次调用按到达顺序累加到 trace.toolCalls；结果帧靠 toolCallId
+   * 找回它对应的那一条（模型一轮可并行发多个调用，不能简单假定是最后一条）。
    */
-  function handleNodePaused(event: DebugSSEEvent) {
-    if (!event.nodeId) return;
-    markNodeAwaiting(event.nodeId, event.approvalContext);
+  function handleToolEvent(event: DebugSSEEvent) {
+    const { nodeId, toolCallId } = event;
+    if (!nodeId) return;
+    const trace = nodeTraces.value.get(nodeId);
+    if (!trace) return;
+
+    if (event.type === 'node.tool_call') {
+      trace.toolCalls = [
+        ...(trace.toolCalls || []),
+        {
+          arguments: event.arguments,
+          kind: event.toolKind,
+          round: event.round,
+          resumed: event.resumed,
+          toolCallId,
+          toolName: event.toolName,
+        },
+      ];
+      return;
+    }
+
+    const existed = (trace.toolCalls || []).find(
+      (item) => item.toolCallId && item.toolCallId === toolCallId,
+    );
+    if (existed) {
+      existed.error = event.error ?? null;
+      existed.result = event.result;
+      if (event.round !== undefined) existed.round = event.round;
+      if (event.resumed !== undefined) existed.resumed = event.resumed;
+      if (!existed.toolName && event.toolName) {
+        existed.toolName = event.toolName;
+      }
+      return;
+    }
+    // 只收到结果帧（调用帧丢了 / 订阅晚于该节点开始）：也得可见，不然过程看起来没调过工具
+    trace.toolCalls = [
+      ...(trace.toolCalls || []),
+      {
+        error: event.error ?? null,
+        kind: event.toolKind,
+        result: event.result,
+        round: event.round,
+        resumed: event.resumed,
+        toolCallId,
+        toolName: event.toolName,
+      },
+    ];
   }
 
   /**
-   * 处理执行暂停事件（workflow.paused：本轮跑完但存在未决策审批节点）
+   * 读一次执行详情，把本地待办清单刷成它给的那份
+   *
+   * 帧不承载审批内容，一份待办只有详情一个出处：收到暂停帧、连接掉线都回到这里取。
+   * @returns 行此刻的状态（RUNNING / PAUSED / 终态），取不到时返回空串
+   */
+  async function refreshPendingApprovals(): Promise<string> {
+    const execId = executionId.value;
+    if (!execId) return '';
+    try {
+      const detail = await getExecution(execId);
+      pendingApprovals.value = detail.pendingApprovals || [];
+      pendingApprovals.value.forEach((item) => markNodeAwaiting(item.nodeId));
+      return detail.status || '';
+    } catch {
+      // 详情读不到就不猜：面板维持现状，用户重试或刷新
+      return '';
+    }
+  }
+
+  /**
+   * 处理节点级挂起事件（node.paused）
+   *
+   * 只把那个节点画成「等人答」，不改 isRunning/isPaused：本轮还会继续跑无关分支，
+   * 整条流停下来由随后的 workflow.paused（或同步接口的收尾帧）确认。
+   */
+  function handleNodePaused(event: DebugSSEEvent) {
+    if (!event.nodeId) return;
+    markNodeAwaiting(event.nodeId);
+    void refreshPendingApprovals();
+  }
+
+  /**
+   * 本轮已停下来但没收到暂停/终态帧时的收尾（同步接口返回 / 连接断开）：
+   * 以详情为准——还真欠人答就落回「暂停等审批」，已跑完则不动（终态帧自己会复位）。
+   */
+  async function settleAwaitingRun() {
+    if (!isRunning.value) return;
+    if ((await refreshPendingApprovals()) !== 'PAUSED') return;
+    isRunning.value = false;
+    isPaused.value = true;
+  }
+
+  /**
+   * 处理执行暂停事件（workflow.paused：本轮跑完了，但有节点停在等人答）
    */
   function handleApprovalPaused(event: DebugSSEEvent) {
     isPaused.value = true;
-    const context = event.approvalContext;
-    const nodeId = event.nodeId;
-    if (nodeId) {
-      markNodeAwaiting(nodeId, context || { nodeId });
-    } else if (context) {
-      markNodeAwaiting(context.nodeId, context);
-    }
-    (event.awaitingNodeIds || []).forEach((id) => {
-      if (!awaitingApprovals.value.has(id)) {
-        markNodeAwaiting(id, { nodeId: id });
-      }
-    });
+    // 本轮已收尾（引擎不会再推节点事件），运行态不清就会一直转圈：
+    // 停止按钮、新的运行、继续运行全部卡在 isRunning 上
+    isRunning.value = false;
+    if (event.nodeId) markNodeAwaiting(event.nodeId);
 
     // 更新变量（暂停时的全局变量快照，仅供排障展示）
     if (event.variables) {
@@ -790,6 +908,7 @@ export const useDebugStore = defineStore('debug', () => {
         variables.value.set(key, value);
       });
     }
+    void refreshPendingApprovals();
   }
 
   /**
@@ -967,6 +1086,15 @@ export const useDebugStore = defineStore('debug', () => {
         );
         break;
       }
+      case 'WORKFLOW': {
+        suggestions.push(
+          '确认子工作流仍处于已发布状态，且那个版本没被作废（选「指定版本」时跑的是快照）',
+          '确认执行用 API Key 仍启用且未过期：子工作流的「API Key」页可查状态与限流额度',
+          '节点失败原因里带了子执行 id，拿它到执行历史里看子流程哪个节点挂了',
+          '子流程里有审批节点时本节点会跟着停在「待审批」，结论要提交给子执行',
+        );
+        break;
+      }
       default: {
         suggestions.push(
           '检查节点配置是否正确',
@@ -1077,6 +1205,11 @@ export const useDebugStore = defineStore('debug', () => {
         handleNodeTimeout(event);
         break;
       }
+      case 'node.tool_call':
+      case 'node.tool_result': {
+        handleToolEvent(event);
+        break;
+      }
       case 'workflow.cancelled': {
         cancelExecution();
         break;
@@ -1112,7 +1245,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId.value = null;
     nodeTraces.value.clear();
     currentNodeId.value = null;
-    clearAwaitingApprovals();
+    clearPendingApprovals();
     variables.value.clear();
     result.value = null;
     timelineItems.value = [];
@@ -1130,7 +1263,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId.value = null;
     nodeTraces.value.clear();
     currentNodeId.value = null;
-    clearAwaitingApprovals();
+    clearPendingApprovals();
     variables.value.clear();
     result.value = null;
     timelineItems.value = [];
@@ -1147,7 +1280,7 @@ export const useDebugStore = defineStore('debug', () => {
     executionId,
     nodeTraces,
     currentNodeId,
-    awaitingApprovals,
+    pendingApprovals,
     variables,
     result,
     timelineItems,
@@ -1181,10 +1314,13 @@ export const useDebugStore = defineStore('debug', () => {
     handleNodeTimeout,
     handleNodeCancelled,
     handleStreamingToken,
+    handleToolEvent,
     handleNodePaused,
     handleApprovalPaused,
     markNodeAwaiting,
-    clearAwaitingApprovals,
+    clearPendingApprovals,
+    refreshPendingApprovals,
+    settleAwaitingRun,
     getNodeTrace,
     setNodeNameResolver,
 

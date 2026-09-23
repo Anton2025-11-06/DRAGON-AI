@@ -1,4 +1,4 @@
-import type { NodeVariable, NodeWithVariables } from './VariableSelector.vue';
+import type { NodeVariable, NodeWithVariables } from './upstream-variables';
 
 export const WORKFLOW_INPUT_SCOPE = 'inputs.';
 export const WORKFLOW_NODE_SCOPE = 'nodes.';

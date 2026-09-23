@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from common.common_constants.constant import PREFIX_WORKFLOW_API_KEY
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
@@ -78,6 +78,44 @@ class WorkflowService:
                 "createTime": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
                 "updateTime": r.update_time.strftime("%Y-%m-%d %H:%M:%S") if r.update_time else None,
             }
+
+    @staticmethod
+    async def list_executable() -> list[dict]:
+        """可被【工作流】节点调用的工作流：已发布 + 至少有一把 ACTIVE 未过期 API Key。
+
+        口径与节点执行器的运行前校验一致（没可用 key 就调不动），否则用户会在下拉里
+        选到一个必然失败的子工作流。
+
+        顺手把可用 key 一起带出去：前端再拉一次 /workflow-api-keys/workflows/{id} 要多
+        一个 workflow:apikey:list 权限，编辑器使用者不一定有，拿不到就只能面对一个
+        「选不到 key」的死下拉。
+        """
+        now = _now()
+        async with mysql_client.get_session() as session:
+            wfs = (await session.execute(
+                select(Workflow).where(Workflow.status == "PUBLISHED",
+                                       Workflow.current_version > 0)
+                .order_by(Workflow.id.desc()))).scalars().all()
+            if not wfs:
+                return []
+            keys = (await session.execute(
+                select(WorkflowApiKey).where(
+                    WorkflowApiKey.workflow_id.in_([w.id for w in wfs]),
+                    WorkflowApiKey.status == "ACTIVE",
+                    or_(WorkflowApiKey.expire_time.is_(None),
+                        WorkflowApiKey.expire_time > now))
+                .order_by(WorkflowApiKey.id.desc()))).scalars().all()
+        grouped: dict[int, list] = {}
+        for k in keys:
+            grouped.setdefault(k.workflow_id, []).append({
+                "id": k.id, "name": k.name, "rateLimit": k.rate_limit,
+                "expireTime": k.expire_time.strftime("%Y-%m-%d %H:%M:%S") if k.expire_time else None,
+            })
+        return [{
+            "id": str(w.id), "name": w.name, "description": w.description,
+            "currentVersion": w.current_version, "apiKeyCount": len(grouped.get(w.id) or []),
+            "apiKeys": grouped.get(w.id) or [],
+        } for w in wfs if grouped.get(w.id)]
 
     # ==================== CRUD ====================
 

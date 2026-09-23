@@ -26,9 +26,11 @@ class Model(Base):
     rate_limit_qps: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="每秒并发限制 0=不限")
     # 模型调用参数（temperature/top_k/extra_body 等），JSON 字典；由 common_params 派生，供 common_model 注入
     model_params: Mapped[dict] = mapped_column(JSON, nullable=True, comment="模型调用参数(JSON 字典)")
-    # 是否支持流式消息 / 思考模式（能力标记，决定测试 UI 开关与广场展示）
+    # 是否支持流式消息 / 思考模式 / 工具调用（能力标记，决定测试 UI 开关、广场展示
+    # 与工作流节点能不能插入工具：未登记的工具调用位会让引擎忽略节点上的 tools）
     supports_stream: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="是否支持流消息 1支持 0不支持")
     supports_thinking: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="是否支持思考模式 1支持 0不支持")
+    supports_function_call: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="是否支持工具调用 1支持 0不支持")
     # 声明"开启流式/思考"的参数键名（广场展示 + 调用注入）
     stream_param: Mapped[str] = mapped_column(String(64), nullable=True, comment="开启流式的参数键名(默认 stream)")
     thinking_param: Mapped[str] = mapped_column(String(64), nullable=True, comment="开启思考的参数键名")

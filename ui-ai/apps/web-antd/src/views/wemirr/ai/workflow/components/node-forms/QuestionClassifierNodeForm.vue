@@ -42,11 +42,13 @@ function generateId(): string {
   return `class_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// 默认分类类别
-const defaultCategories: ClassCategory[] = [
-  { id: 'category_1', name: '类别1', description: '' },
-  { id: 'category_2', name: '类别2', description: '' },
-];
+// 默认分类类别：每次给新对象，避开模块级共享行被多个节点互相改掉
+function createDefaultCategories(): ClassCategory[] {
+  return [
+    { id: 'category_1', name: '类别1', description: '' },
+    { id: 'category_2', name: '类别2', description: '' },
+  ];
+}
 
 type QuestionClassifierFormData = Omit<
   QuestionClassifierConfig,
@@ -61,15 +63,46 @@ const formData = reactive<QuestionClassifierFormData>({
   modelType: MT_TEXT_TO_TEXT,
   inputVariable: '',
   instructions: '',
-  categories: [...defaultCategories],
+  categories: createDefaultCategories(),
   advancedMode: false,
   customPromptTemplate: '',
 });
+
+/**
+ * 本地刚 emit 出去的配置快照（nodeId + 配置内容），与参数提取器同一套守卫口径。
+ * 父层（PropertyPanel / selectedNode.data）会把自己刚收到的配置原样回传，不拦住的话
+ * watch 会用全新对象重建 formData.categories，加上 handleChange 还按 id/name 过滤行，
+ * 清空「类别ID」重打时整行会当场消失（行被卸载），ant-design-vue vc-input 在 nextTick
+ * 里读已销毁实例的 inputRef 还会抛「Cannot read properties of null (reading 'input')」。
+ */
+let emittedSignature = '';
+
+/** 配置内容签名（含类别行 id，既识别自己的回传，也不吞单字段的外部变更） */
+function signatureOf(config: QuestionClassifierConfig | undefined): string {
+  return JSON.stringify([
+    config?.modelId ?? null,
+    config?.inputVariable || '',
+    config?.instructions || '',
+    !!config?.advancedMode,
+    config?.customPromptTemplate ?? null,
+    (config?.categories || []).map((c) => [
+      c.id || '',
+      c.name || '',
+      c.description || '',
+      c.examples || [],
+    ]),
+  ]);
+}
 
 // 监听配置变化
 watch(
   () => props.config,
   (config) => {
+    if (`${props.nodeId}|${signatureOf(config)}` === emittedSignature) {
+      // 自己刚 emit 的内容，保留本地编辑状态（含未填完的类别行）与行对象身份
+      return;
+    }
+    emittedSignature = '';
     Object.assign(formData, {
       modelId: config.modelId,
       modelType: config.modelType || MT_TEXT_TO_TEXT,
@@ -77,8 +110,8 @@ watch(
       instructions: config.instructions || '',
       categories:
         config.categories && config.categories.length > 0
-          ? config.categories.map((c) => ({ ...c }))
-          : [...defaultCategories],
+          ? config.categories.map((c) => ({ ...c, id: c.id || generateId() }))
+          : createDefaultCategories(),
       advancedMode: config.advancedMode ?? false,
       customPromptTemplate: config.customPromptTemplate || '',
     });
@@ -112,14 +145,17 @@ function handleChange() {
     modelType: MT_TEXT_TO_TEXT,
     inputVariable: formData.inputVariable,
     instructions: formData.instructions,
-    categories: formData.categories.filter(
-      (c: ClassCategory) => c.id && c.name,
-    ),
+    // 空 id / 空名的类别行不写进图（它决定输出端口与分支路由），但本地保留正在编辑的那一行
+    categories: formData.categories
+      .filter((c: ClassCategory) => c.id && c.name)
+      // 拷一份再 emit：不把 reactive 行对象直接交给父层与持久化配置
+      .map((c: ClassCategory) => ({ ...c })),
     advancedMode: formData.advancedMode,
     customPromptTemplate: formData.advancedMode
       ? formData.customPromptTemplate
       : undefined,
   };
+  emittedSignature = `${props.nodeId}|${signatureOf(config)}`;
   emit('update:config', config);
 }
 </script>

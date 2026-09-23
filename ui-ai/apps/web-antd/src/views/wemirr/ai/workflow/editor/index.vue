@@ -447,7 +447,7 @@ async function handleStopDebug() {
 
 /**
  * 继续执行不在工具栏：暂停唯一来自 APPROVAL 节点，
- * 结论要在调试面板「预览运行」页里随审批表单一起提交（走 submit-sync）。
+ * 结论要在调试面板「预览运行」页里随审批表单一起提交（走 submit 的 decisions）。
  */
 
 /**

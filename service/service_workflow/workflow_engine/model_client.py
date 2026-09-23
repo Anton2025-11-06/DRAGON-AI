@@ -56,7 +56,10 @@ class ModelConfigProvider:
                         # 否则模型管理登记的常用参数与流式/思考开关会在命中缓存时被静默丢弃
                         if not cfg.model_params and secrets.get("model_params"):
                             cfg.model_params = secrets["model_params"]
-                        for flag in ("supports_stream", "supports_thinking"):
+                        for flag in (
+                            "supports_stream", "supports_thinking",
+                            "supports_function_call",
+                        ):
                             if data.get(flag) is None:
                                 setattr(cfg, flag, bool(secrets.get(flag)))
                         if cfg.status == 1:
@@ -79,6 +82,7 @@ class ModelConfigProvider:
             model_params=data.get("model_params") or {},
             supports_stream=bool(data.get("supports_stream")),
             supports_thinking=bool(data.get("supports_thinking")),
+            supports_function_call=bool(data.get("supports_function_call")),
             status=int(data.get("status", 1)),
         )
 
@@ -92,7 +96,8 @@ class ModelConfigProvider:
             async with self._mysql.get_session() as session:
                 row = (await session.execute(
                     select(Model.api_key, Model.model_params,
-                           Model.supports_stream, Model.supports_thinking)
+                           Model.supports_stream, Model.supports_thinking,
+                           Model.supports_function_call)
                     .where(Model.id == model_id))).first()
                 if row is None:
                     return {}
@@ -101,6 +106,7 @@ class ModelConfigProvider:
                     "model_params": row[1] or {},
                     "supports_stream": bool(row[2]),
                     "supports_thinking": bool(row[3]),
+                    "supports_function_call": bool(row[4]),
                 }
         except Exception as e:  # noqa: BLE001
             log.error("[WorkflowModel] 回源 api_key/model_params/能力位 失败 model_id={}: {}", model_id, e)
@@ -125,6 +131,7 @@ class ModelConfigProvider:
                     model_params=row.model_params or {}, status=row.status,
                     supports_stream=bool(row.supports_stream),
                     supports_thinking=bool(row.supports_thinking),
+                    supports_function_call=bool(row.supports_function_call),
                 )
         except Exception as e:  # noqa: BLE001
             log.error("[WorkflowModel] MySQL 读模型失败 model_id={}: {}", model_id, e)

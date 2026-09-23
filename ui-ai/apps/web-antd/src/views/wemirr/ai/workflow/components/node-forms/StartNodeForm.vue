@@ -27,7 +27,9 @@ import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import {
   DEFAULT_MAX_FILE_COUNT,
+  FILE_TYPE_GROUPS,
   getInputFieldTypeColor,
+  getInputFieldTypeHint,
   getInputFieldTypeLabel,
   isTextInputType,
   normalizeInputFieldType,
@@ -98,6 +100,22 @@ const maxFileSizeMB = computed({
 });
 
 // 字段类型标签/颜色映射统一维护在 domain/input-field-type.ts
+
+/** 当前所选字段类型的配置说明 */
+const fieldTypeHint = computed(() => getInputFieldTypeHint(editingField.type));
+
+/**
+ * 「允许的文件类型」下拉项：按用途分组，多选。
+ *
+ * 保留 tags 输入能力（而不是纯 multiple）：分组里没列到的扩展名还能手输，
+ * 不致于为了一个冷门类型去改代码。
+ */
+const fileTypeOptions = computed(() =>
+  FILE_TYPE_GROUPS.map((group) => ({
+    label: group.label,
+    options: group.types.map((type) => ({ label: type, value: type })),
+  })),
+);
 
 // 监听配置变化
 watch(
@@ -471,10 +489,7 @@ function handleChange() {
               <SafetyCertificateOutlined /> 审批人
             </a-select-option>
           </a-select>
-          <div class="form-hint">短文本与长文本已合并为「文本」类型</div>
-          <div v-if="editingField.type === 'APPROVER'" class="form-hint">
-            提交时传审批人标识数组（元素为数字或字符串），与审批节点的审批人配置取交集判定权限
-          </div>
+          <div class="form-hint">{{ fieldTypeHint }}</div>
         </a-form-item>
 
         <a-form-item label="字段描述">
@@ -604,9 +619,15 @@ function handleChange() {
                 <a-select
                   v-model:value="editingField.allowedFileTypes"
                   mode="tags"
-                  placeholder="如: .pdf, .docx"
+                  :options="fileTypeOptions"
+                  :max-tag-count="4"
+                  option-filter-prop="label"
+                  placeholder="分组里勾选，或输入扩展名后回车"
                   style="width: 100%"
                 />
+                <div class="form-hint">
+                  留空 = 不限类型；扩展名需带点，如 .pdf
+                </div>
               </a-form-item>
             </a-col>
             <a-col :span="12">

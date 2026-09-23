@@ -40,9 +40,10 @@ def config_from_row(row: Any) -> ModelConfig:
         base_url=g("base_url") or "",
         api_key=g("api_key") or "",
         model_params=g("model_params") or {},
-        # 能力位透传（来源无此键时按未开启），供上层判定是否下流式/思考入参
+        # 能力位透传（来源无此键时按未开启），供上层判定是否下流式/思考/工具定义
         supports_stream=bool(g("supports_stream")),
         supports_thinking=bool(g("supports_thinking")),
+        supports_function_call=bool(g("supports_function_call")),
         status=int(g("status") if g("status") is not None else 1),
     )
 

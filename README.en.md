@@ -76,9 +76,9 @@ ready to be enabled as the roadmap proceeds.
 ### Workflow Orchestration (`service_workflow` :9003)
 - Visual canvas: `{nodes, edges}` editing, draft / publish / version snapshot / rollback /
   copy, strict graph validation
-- **20 node types**: START/END/LLM/AGENT/IF_ELSE/LOOP/ITERATION/PARALLEL/CODE/TEMPLATE/REPLY/
-  HTTP_REQUEST/TOOL/KNOWLEDGE_RETRIEVAL/PARAMETER_EXTRACTOR/QUESTION_CLASSIFIER/
-  LIST_OPERATOR/VARIABLE_AGGREGATOR/VARIABLE_ASSIGNER/DOC_EXTRACTOR
+- **22 node types**: START/END/LLM/IF_ELSE/LOOP/ITERATION/PARALLEL/APPROVAL/WORKFLOW/CODE/
+  TEMPLATE/REPLY/HTTP_REQUEST/TOOL/MCP_TOOL/KNOWLEDGE_RETRIEVAL/PARAMETER_EXTRACTOR/
+  QUESTION_CLASSIFIER/LIST_OPERATOR/VARIABLE_AGGREGATOR/VARIABLE_ASSIGNER/DOC_EXTRACTOR
 - Sync / async execution (arq workers on sharded queues), SSE live event stream + DB replay
   (Redis Pub/Sub cross-process channel)
 - Pause / resume / cancel, pause TTL watchdog reclaim, per-node timeout guard, snapshot

@@ -41,6 +41,10 @@ MODEL_TYPES_ALL = [
 # 支持流式（astream）的类型集合：仅这三类实现 astream 抽象方法
 MODEL_TYPES_STREAMABLE = {MT_TEXT_TO_TEXT, MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND}
 
+# 可参与工具调用（OpenAI tools / tool_calls 协议）的类型集合：
+# 只有对话族的文生文能输出 tool_calls 并由引擎回填 tool 消息，其余 12 类均不具备。
+MODEL_TYPES_TOOL_CALLABLE = {MT_TEXT_TO_TEXT}
+
 # 类型 → 中文名（模型广场分类字典 /models/categories 接口数据源）
 MODEL_TYPE_LABELS = {
     MT_TEXT_TO_TEXT: "文生文",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { NodeVariable, NodeWithVariables } from './VariableSelector.vue';
+import type { NodeVariable, NodeWithVariables } from './upstream-variables';
 
 /**
  * VariableInput 变量输入组件

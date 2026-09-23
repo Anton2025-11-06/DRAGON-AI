@@ -1,4 +1,5 @@
 import os
+import platform
 import sys
 import uvicorn
 import asyncio
@@ -7,7 +8,7 @@ from common.common_constants.constant import SERVICE_SYSTEM_PORT, SERVICE_SYSTEM
 from service.service_system import app
 
 if __name__ == '__main__':
-    if sys.platform.__contains__("win"):
+    if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     uvicorn.run("service.service_system.system:app",

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { CommonParam, CommonParamType } from '../api';
+
 /**
  * 添加/编辑模型弹窗（对齐 common_model 设计）
  * 表单分组：
@@ -15,14 +17,12 @@
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue';
 
-import { message } from 'ant-design-vue';
-
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons-vue';
+import { message } from 'ant-design-vue';
 
 import { PROVIDER_DEFAULT_BASE_URL } from '#/api/ai-workflow/const';
 
 import * as api from '../api';
-import type { CommonParam, CommonParamType } from '../api';
 import ModelTryPanel from './ModelTryPanel.vue';
 
 // ==================== 入参/事件 ====================
@@ -78,6 +78,8 @@ const credential = reactive({
 const advanced = reactive({
   supports_stream: false,
   supports_thinking: false,
+  // 工具调用能力位：只有文生文具备（工作流 LLM 节点能不能插 MCP/工具/工作流由它裁定）
+  supports_function_call: false,
   stream_param: '',
   thinking_param: '',
 });
@@ -112,7 +114,7 @@ function onParamTypeChange(p: CommonParam) {
 }
 
 // ===== 模型标识注册表（后台已验证标识，按 类型×厂家 过滤，可下拉也可手动输入） =====
-const registryOptions = ref<{ value: string; label: string }[]>([]);
+const registryOptions = ref<{ label: string; value: string }[]>([]);
 const loadRegistry = async () => {
   const { provider, model_type } = base_form_data;
   if (!provider || !model_type) {
@@ -120,7 +122,8 @@ const loadRegistry = async () => {
     return;
   }
   try {
-    const list = (await api.GetRegistry({ provider, category: model_type })) || [];
+    const list =
+      (await api.GetRegistry({ provider, category: model_type })) || [];
     registryOptions.value = list.map((it) => ({
       value: it.model_name,
       label: it.model_name,
@@ -143,6 +146,11 @@ const PROVIDER_DEFAULT_URLS = new Set(
 const autoFillEnabled = ref(true);
 
 const isEdit = computed(() => !!props.model);
+
+/** 能力类型是不是文生文：工具调用只对文生文开放，其他类型不展示也不写入 */
+const isTextToText = computed(
+  () => base_form_data.model_type === 'text_to_text',
+);
 
 // 外部提供商变化时同步（打开弹窗/编辑回填依赖）
 watch(
@@ -197,6 +205,7 @@ const resetForm = () => {
   Object.assign(advanced, {
     supports_stream: false,
     supports_thinking: false,
+    supports_function_call: false,
     stream_param: '',
     thinking_param: '',
   });
@@ -228,6 +237,7 @@ const fillModel = (model: api.ModelDetailRep) => {
   credential.api_key = model.api_key || '';
   advanced.supports_stream = !!model.supports_stream;
   advanced.supports_thinking = !!model.supports_thinking;
+  advanced.supports_function_call = !!model.supports_function_call;
   advanced.stream_param = model.stream_param || '';
   advanced.thinking_param = model.thinking_param || '';
   commonParams.value = normalizeParams(model.common_params);
@@ -281,6 +291,10 @@ const buildSavePayload = (): api.ModelSaveReq => {
     rate_limit_qps: base_form_data.rate_limit_qps || 0,
     supports_stream: advanced.supports_stream,
     supports_thinking: advanced.supports_thinking,
+    // 非文生文：即使历史回填过也不把工具调用位存回后端
+    supports_function_call: isTextToText.value
+      ? advanced.supports_function_call
+      : false,
     stream_param: advanced.stream_param || undefined,
     thinking_param: advanced.thinking_param || undefined,
     common_params: cleanedParams,
@@ -377,9 +391,9 @@ const onTryRun = async (payload: {
     );
     // 汇总帧覆盖增量态（含 urls/vectors/scores/latency 等完整产出）
     testResult.value = res || null;
-  } catch (e: any) {
+  } catch (error: any) {
     testResult.value = null;
-    testError.value = e?.message || '测试请求失败，请稍后重试';
+    testError.value = error?.message || '测试请求失败，请稍后重试';
   } finally {
     testRunning.value = false;
   }
@@ -503,6 +517,18 @@ const onTryRun = async (payload: {
             </a-col>
           </a-row>
 
+          <a-row v-if="isTextToText" :gutter="16">
+            <a-col :span="12">
+              <a-form-item label="支持工具调用（工作流节点插 MCP/工具/工作流）">
+                <a-switch
+                  v-model:checked="advanced.supports_function_call"
+                  checked-children="支持"
+                  un-checked-children="不支持"
+                />
+              </a-form-item>
+            </a-col>
+          </a-row>
+
           <!-- 常用参数可编辑表 -->
           <a-form-item label="常用参数">
             <div class="param-edit">
@@ -513,7 +539,11 @@ const onTryRun = async (payload: {
                 <span class="pc-desc">说明</span>
                 <span class="pc-op"></span>
               </div>
-              <div v-for="(p, i) in commonParams" :key="i" class="param-edit__row">
+              <div
+                v-for="(p, i) in commonParams"
+                :key="i"
+                class="param-edit__row"
+              >
                 <a-input
                   v-model:value="p.name"
                   class="pc-name"

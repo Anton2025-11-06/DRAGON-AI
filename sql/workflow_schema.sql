@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `trigger_type`     VARCHAR(16)  NOT NULL DEFAULT 'DEBUG' COMMENT '触发来源',
   `inputs`           JSON                  DEFAULT NULL COMMENT '输入参数',
   `outputs`          JSON                  DEFAULT NULL COMMENT '输出结果',
-  `variables`        JSON                  DEFAULT NULL COMMENT '执行快照（仅暂停/终态写入，排障与详情用；恢复以 node_states 为准）',
+  -- 两段式跨轮状态：roundRequest（本轮待消费的结论）+ pauseState（此刻欠谁）
+  `variables`        JSON                  DEFAULT NULL COMMENT '两段式跨轮状态：roundRequest + pauseState',
   -- 节点执行状态聚合 {nodeId: {order,status,input,output,error,duration,branch,llmMessages,review*}}
   -- 跨轮恢复的权威源（大模型记忆与审批留痕都存在这里）
   `node_states`      JSON                  DEFAULT NULL COMMENT '节点状态聚合（跨轮恢复权威源）',
@@ -69,15 +70,19 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `current_node_id`  VARCHAR(64)           DEFAULT NULL COMMENT '当前节点（暂停时）',
   -- 再提交（RETRY 重新执行 / CONTINUE 审批后恢复）相关三列，见 sql/approval_memory_columns.sql
   `submit_mode`      VARCHAR(16)           DEFAULT NULL COMMENT '本轮提交模式 RETRY/CONTINUE，空=首次执行',
-  `awaiting_node_id` VARCHAR(64)           DEFAULT NULL COMMENT '等待人工审批的节点ID（PAUSED 时非空）',
+  `awaiting_node_id` VARCHAR(64)           DEFAULT NULL COMMENT '停在审批等待的节点ID（多份待办时记第一个）',
+  -- 挂起代次：每次开跑（含唤醒）+1，事件帧带它，消费方据此丢过期帧
+  `pause_generation` INT          NOT NULL DEFAULT 1 COMMENT '挂起代次：第几次开跑（含唤醒），事件过期判定用',
   `graph_hash`       VARCHAR(16)           DEFAULT NULL COMMENT '图拓扑指纹（节点id+边集合），再提交前漂移校验',
-  -- 已废弃：断点功能整体下线（暂停改由审批节点唯一驱动），列保留不再读写
-  `breakpoints`      JSON                  DEFAULT NULL COMMENT '已废弃：断点节点ID列表',
+  -- 【工作流】节点发起的子执行：子行指回父行，子执行进终态时按它找到等待中的父执行
+  `parent_exec_id`   VARCHAR(36)           DEFAULT NULL COMMENT '父执行ID（工作流节点发起的子执行）',
+  `parent_node_id`   VARCHAR(64)           DEFAULT NULL COMMENT '父执行中发起本子执行的节点ID',
   `user_id`          INT          NOT NULL DEFAULT 0 COMMENT '执行人',
   `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
   KEY `idx_exec_wf` (`workflow_id`, `create_time`),
-  KEY `idx_exec_status` (`status`)
+  KEY `idx_exec_status` (`status`),
+  KEY `idx_wf_exec_parent` (`parent_exec_id`, `parent_node_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='工作流执行实例表';
 
 -- 4. 节点执行明细表（调试面板 NodeTracePanel 数据源）

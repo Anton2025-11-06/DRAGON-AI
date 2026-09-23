@@ -71,6 +71,20 @@ class McpServerService:
             return (await session.execute(
                 select(McpServer).where(McpServer.id == id_))).scalar_one_or_none()
 
+    @staticmethod
+    def ensure_usable(row: Optional[McpServer]) -> None:
+        """业务侧可用性检查：连接不存在**或已停用**都不许用。
+
+        与 ToolService.load_for_node 的「工具已停用」同一口径：停用就是“暂时关掉”，
+        挂在这里的连接不能被 MCP_TOOL 节点、LLM 的 MCP 工具拿去跑，否则页面以为
+        已经摘干净了、实际工作流还在调。管理页的「测试连接」与「查看工具列表」
+        不走这里（停用状态下也得让人能排查，否则只能先启用才能测）。
+        """
+        if row is None:
+            raise ValueError("MCP 连接不存在（已被删除？）")
+        if not row.status:
+            raise ValueError(f"MCP 连接已停用: {row.name}")
+
     # ==================== SDK 连接与会话管理 ====================
 
     @staticmethod
@@ -163,8 +177,7 @@ class McpServerService:
         async def _one(server_id: int) -> None:
             try:
                 row = await McpServerService.get_by_id(server_id)
-                if not row:
-                    raise ValueError("MCP 连接不存在")
+                McpServerService.ensure_usable(row)
                 results.extend(await McpServerService.list_tools(row, server_id))
             except Exception as e:  # noqa: BLE001
                 log.warning("mcp list_tools failed server={}: {}", server_id, e)
@@ -182,8 +195,9 @@ class McpServerService:
         """
         arguments = arguments or {}
         row = await McpServerService.get_by_id(mcp_id)
-        if not row:
-            raise ValueError("MCP 连接不存在")
+        # 停用的连接不得调用：这一道是兵家必争——【MCP工具】节点与 LLM 的 MCP 工具
+        # 都走本方法，装配时启用、执行中途被停用的情况也能拦住
+        McpServerService.ensure_usable(row)
         async with McpServerService._session(row) as session:
             result = await session.call_tool(tool_name, arguments)
         return McpServerService._tool_result_to_dict(result)

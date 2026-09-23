@@ -17,11 +17,12 @@ import {
   DownOutlined,
   FieldTimeOutlined,
   RightOutlined,
+  ToolOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
-import { formatDuration } from './chat-output';
+import { formatDuration, toolCallState, toolKindText } from './chat-output';
 import OutputValue from './OutputValue.vue';
 
 const props = defineProps<{
@@ -84,6 +85,11 @@ function stepInput(step: ChatStep): any {
   return step.input;
 }
 
+/** 这一段的工具调用（只有配了工具的 LLM 节点会有） */
+function toolCallsOf(step: ChatStep): NonNullable<ChatStep['toolCalls']> {
+  return step.toolCalls || [];
+}
+
 /** 该段的输出：结构化 output 优先，流式节点退回累积正文 */
 function stepOutput(step: ChatStep): any {
   if (hasData(step.output)) return step.output;
@@ -104,7 +110,7 @@ function toggleStep(step: ChatStep) {
   activeNodeId.value = activeNodeId.value === step.nodeId ? null : step.nodeId;
   // 收起该段时一并收起它的输入/输出，重新点开回到总览口径
   if (activeNodeId.value !== step.nodeId) {
-    for (const part of ['input', 'output', 'reason']) {
+    for (const part of ['input', 'output', 'reason', 'tools']) {
       const key = partKey(step, part);
       if (openParts.value[key]) {
         openParts.value = { ...openParts.value, [key]: false };
@@ -117,6 +123,7 @@ function toggleStep(step: ChatStep) {
 function partData(step: ChatStep, part: string): any {
   if (part === 'input') return step.input;
   if (part === 'reason') return reasoningText(step);
+  if (part === 'tools') return toolCallsOf(step);
   return stepOutput(step);
 }
 
@@ -184,6 +191,14 @@ function partKey(step: ChatStep, part: string): string {
             <span v-if="step.nodeType" class="step-type">{{
               step.nodeType
             }}</span>
+            <span
+              v-if="toolCallsOf(step).length > 0"
+              class="step-tools"
+              title="该段调用过工具"
+            >
+              <ToolOutlined />
+              {{ toolCallsOf(step).length }}
+            </span>
             <span class="step-status">{{ statusText[step.status] }}</span>
             <span class="step-cost">
               <FieldTimeOutlined />
@@ -267,6 +282,64 @@ function partKey(step: ChatStep, part: string): string {
                 <div v-if="isPartOpen(step, 'reason')" class="io-body">
                   <div class="io-reason">
                     <MarkdownRenderer :content="reasoningText(step)" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- 工具调用过程：配了工具的 LLM 节点才会出现，不受「输出工具
+                   结果」开关约束（那个开关只管结果要不要推成可见正文） -->
+              <div v-if="toolCallsOf(step).length > 0" class="io-item">
+                <div class="io-head" @click="onPartHeadClick(step, 'tools')">
+                  <DownOutlined
+                    v-if="isPartOpen(step, 'tools')"
+                    class="io-caret"
+                  />
+                  <RightOutlined v-else class="io-caret" />
+                  <span class="io-name">工具调用</span>
+                  <span class="io-desc">
+                    共 {{ toolCallsOf(step).length }} 次 · 结果为截断摘要
+                  </span>
+                </div>
+                <div v-if="isPartOpen(step, 'tools')" class="io-body">
+                  <div
+                    v-for="(call, idx) in toolCallsOf(step)"
+                    :key="call.toolCallId || idx"
+                    class="tool-call"
+                  >
+                    <div class="tool-call-head">
+                      <ToolOutlined class="tool-call-icon" />
+                      <span class="tool-call-name">{{
+                        call.toolName || '未命名工具'
+                      }}</span>
+                      <a-tag size="small">{{ toolKindText(call.kind) }}</a-tag>
+                      <a-tag
+                        :color="toolCallState(call, call.resumed).color"
+                        size="small"
+                      >
+                        {{ toolCallState(call, call.resumed).text }}
+                      </a-tag>
+                      <span class="tool-call-round">
+                        第 {{ call.round || '-' }} 轮
+                      </span>
+                    </div>
+                    <div class="tool-call-line">
+                      <span class="tool-call-label">入参</span>
+                      <div class="tool-call-value">
+                        <OutputValue :value="call.arguments || {}" />
+                      </div>
+                    </div>
+                    <div class="tool-call-line">
+                      <span class="tool-call-label">结果</span>
+                      <pre v-if="call.result" class="tool-call-result">{{
+                        call.result
+                      }}</pre>
+                      <span v-else class="tool-call-pending">
+                        {{ call.error ? '无结果' : '等待返回…' }}
+                      </span>
+                    </div>
+                    <div v-if="call.error" class="tool-call-error">
+                      {{ call.error }}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -507,5 +580,93 @@ function partKey(step: ChatStep, part: string): string {
   background: #fffbe6;
   border: 1px solid #ffe58f;
   border-radius: 6px;
+}
+
+// 总览行的工具调用次数角标
+.step-tools {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  font-size: 11px;
+  color: #fa8c16;
+}
+
+// 调用详情：一次一块，紧凑堆叠（多轮多个调用时不至于把面板撑到看不清）
+.tool-call {
+  padding: 8px 0;
+
+  & + .tool-call {
+    margin-top: 8px;
+    border-top: 1px dashed #f0f0f0;
+  }
+}
+
+.tool-call-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+
+  .tool-call-icon {
+    font-size: 12px;
+    color: #fa8c16;
+  }
+
+  .tool-call-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: #262626;
+    overflow-wrap: anywhere;
+  }
+
+  .tool-call-round {
+    font-size: 11px;
+    color: #bfbfbf;
+  }
+}
+
+.tool-call-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 4px;
+
+  .tool-call-label {
+    flex: none;
+    padding-top: 1px;
+    font-size: 11px;
+    color: #8c8c8c;
+  }
+
+  .tool-call-value {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.tool-call-result {
+  max-height: 160px;
+  padding: 6px 8px;
+  margin: 0;
+  overflow: auto;
+  font-size: 12px;
+  color: #434343;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #fafafa;
+  border-radius: 4px;
+}
+
+.tool-call-pending {
+  font-size: 12px;
+  font-style: italic;
+  color: #bfbfbf;
+}
+
+.tool-call-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #ff4d4f;
+  overflow-wrap: anywhere;
 }
 </style>

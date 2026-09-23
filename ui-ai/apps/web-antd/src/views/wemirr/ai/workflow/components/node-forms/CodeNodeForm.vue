@@ -57,10 +57,41 @@ const formData = reactive<CodeNodeConfig>({
 // 代码全屏编辑弹窗
 const codeModalOpen = ref(false);
 
+/**
+ * 本地刚 emit 出去的配置快照（nodeId + 配置内容），与参数提取器同一套守卫口径。
+ * 父层（PropertyPanel / selectedNode.data）会把自己刚收到的配置原样回传，不拦住的话
+ * watch 会用全新对象重建 formData.inputs，参数行的 a-input 在键入过程中被销毁重建：
+ * 光标与选区丢失，且 ant-design-vue vc-input 在 nextTick 里读已销毁实例的 inputRef
+ * 会抛「Cannot read properties of null (reading 'input')」，整个表单渲染失败。
+ */
+let emittedSignature = '';
+
+/** 配置内容签名（含参数行 id，既识别自己的回传，也不吞单字段的外部变更） */
+function signatureOf(config: CodeNodeConfig | undefined): string {
+  return JSON.stringify([
+    config?.code || '',
+    config?.timeout ?? null,
+    (config?.inputs || []).map((p) => [
+      p.id || '',
+      p.name || '',
+      p.type || 'string',
+      !!p.required,
+      p.sourceType || 'REFERENCE',
+      p.sourceVariable ?? null,
+      p.value ?? null,
+    ]),
+  ]);
+}
+
 // 监听配置变化
 watch(
   () => props.config,
   (config) => {
+    if (`${props.nodeId}|${signatureOf(config)}` === emittedSignature) {
+      // 自己刚 emit 的内容，保留本地编辑状态与参数行对象身份，不重建列表
+      return;
+    }
+    emittedSignature = '';
     Object.assign(formData, {
       code: config.code || '',
       inputs: (config.inputs || []).map((p) => ({
@@ -143,6 +174,7 @@ function handleChange() {
     })),
     timeout: formData.timeout ?? 10_000,
   };
+  emittedSignature = `${props.nodeId}|${signatureOf(config)}`;
   emit('update:config', config);
 }
 </script>

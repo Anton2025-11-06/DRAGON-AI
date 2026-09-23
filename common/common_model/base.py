@@ -38,6 +38,7 @@ class ModelResult:
     - url / urls：生成类产物地址（文生图/视频/音频 直链）
     - audio_bytes：音频二进制（TTS 直接返回字节流时）
     - task_id：异步任务 ID（提交-轮询范式，未轮询完成时回传）
+    - tool_calls：模型请求调用的工具列表（function-call 通道，已摊平为 OpenAI dict）
     - usage / raw：token 统计 / 原始响应体
     """
     content: str = ""
@@ -49,6 +50,9 @@ class ModelResult:
     audio_bytes: Optional[bytes] = None
     task_id: Optional[str] = None
     parsed: Any = None
+    # 元素形如 {id, type: "function", function: {name, arguments(JSON 字符串)}}
+    # —— 与请求里传给厂商的 tools 同一套 OpenAI 规范，上层可直接原样塞回 messages
+    tool_calls: Optional[list] = None
     usage: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
@@ -77,6 +81,52 @@ def ensure_ok(resp, label: str = "模型调用") -> None:
     """
     if resp.status_code >= 400:
         raise ModelInvokeError(f"{label}失败({resp.status_code})：{resp.text}")
+
+
+def _normalize_tool_calls(msg) -> Optional[list]:
+    """SDK 的 ChatCompletionMessageToolCall 列表 → 纯 dict（无工具调用时给 None）。
+
+    不摊平的话，上层（工作流 LLM 节点的 tool-call 循环）就得认识 openai SDK 类型才能
+    把这条 assistant 消息回填进 messages；model_dump 后与厂商协议同构，也顺带兼容
+    个别返回 pydantic 对象之外的私有部署实现。
+    """
+    calls = getattr(msg, "tool_calls", None) or []
+    items = [c.model_dump() if hasattr(c, "model_dump") else c for c in calls]
+    return items or None
+
+
+def _merge_tool_call_deltas(acc: dict, delta) -> None:
+    """按 index 累加流式 tool_calls 分片（累加表 {index: 一条完整调用}）。
+
+    厂商会把一次调用拆成好几片：首片带 id/name、arguments 通行为空，后面的片往往
+    只剩 index + arguments 增量。拿到的片段不是合法 JSON（`{"ci` + `ty": "北`），
+    只能拼完再解析 —— 所以 arguments 必须串接；id/type/name 取最后一个非空值
+    （有的厂商每片都重发 name，串接会重复）。
+    """
+    for piece in (getattr(delta, "tool_calls", None) or []):
+        item = (piece.model_dump(exclude_unset=True)
+                if hasattr(piece, "model_dump")
+                else (piece if isinstance(piece, dict) else {}))
+        fn = item.get("function") or {}
+        # index 只是分片归属的编号：不带的实现本身就只发单条调用，归到 0 号即可
+        idx = item.get("index") or 0
+        slot = acc.setdefault(idx, {"id": "", "type": "function",
+                                    "function": {"name": "", "arguments": ""}})
+        if item.get("id"):
+            slot["id"] = str(item["id"])
+        if item.get("type"):
+            slot["type"] = str(item["type"])
+        if fn.get("name"):
+            slot["function"]["name"] = str(fn["name"])
+        if fn.get("arguments"):
+            slot["function"]["arguments"] += str(fn["arguments"])
+
+
+def _materialize_tool_calls(acc: dict) -> Optional[list]:
+    """累加表 → 与 ainvoke 同形状的 tool_calls（空片丢掉，无调用时给 None）。"""
+    calls = [acc[i] for i in sorted(acc)
+             if acc[i]["function"]["name"] or acc[i]["function"]["arguments"]]
+    return calls or None
 
 
 async def poll_task(fetch, is_done, is_fail, *, interval: float = 3.0, timeout: float = 600.0):
@@ -226,18 +276,38 @@ class ChatMLMixin:
         usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
         return ModelResult(content=msg.content or "",
                            reasoning_content=getattr(msg, "reasoning_content", "") or "",
+                           tool_calls=_normalize_tool_calls(msg),
                            usage=usage, raw=resp.model_dump())
 
     async def _chat_stream(self, messages: list, **kwargs) -> AsyncIterator[StreamChunk]:
-        """流式 chat：逐块产出增量 content 与 reasoning_content。"""
+        """流式 chat：逐块产出增量 content 与 reasoning_content。
+
+        带 tools 也能走流式：每片 delta.tool_calls 按 index 累加（见
+        _merge_tool_call_deltas），只在带 finish_reason 的那一片上挂出物化好的
+        完整列表，形状与 ainvoke 一致，调用方不需要认识分片。
+        """
         params = self._build_params(kwargs)
         params["stream"] = True
         stream = await self.oai().chat.completions.create(
             model=self.model, messages=messages, **params)
+        acc: dict = {}
+        materialized = False
         async for chunk in stream:
             if not chunk.choices:
                 continue
-            d = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            d = choice.delta
+            _merge_tool_call_deltas(acc, d)
+            calls = None
+            if choice.finish_reason and not materialized:
+                # 只物化一次：finish_reason 之后厂商还可能补空片，重复挂会让调用方
+                # 把同一批工具当成调了两遍
+                materialized = True
+                calls = _materialize_tool_calls(acc)
             yield StreamChunk(content=(d.content or "") if d else "",
                               reasoning_content=(getattr(d, "reasoning_content", "") or "") if d else "",
-                              finish_reason=chunk.choices[0].finish_reason)
+                              finish_reason=choice.finish_reason, tool_calls=calls)
+        if acc and not materialized:
+            # 没发 finish_reason 的厂商（少见实现）：流读完了也得把累加结果交出去，
+            # 否则调用方只看到一个「什么都没说」的回复
+            yield StreamChunk(tool_calls=_materialize_tool_calls(acc))

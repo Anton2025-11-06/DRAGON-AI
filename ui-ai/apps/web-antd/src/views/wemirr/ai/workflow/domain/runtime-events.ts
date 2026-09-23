@@ -1,6 +1,6 @@
 import type {
-  ApprovalContext,
   ExecutionEventType,
+  LlmToolKind,
   NodeType,
 } from '#/api/ai-workflow/types';
 
@@ -14,6 +14,8 @@ export interface WorkflowRuntimeEventBase {
   type: WorkflowRuntimeEventType;
   executionId?: string;
   timestamp?: number;
+  /** 发出这一帧时那一轮的挂起代次；迟到的旧轮帧靠它丢弃 */
+  pauseGeneration?: number;
 }
 
 export interface WorkflowStartedEvent extends WorkflowRuntimeEventBase {
@@ -83,22 +85,48 @@ export interface NodeCancelledEvent extends WorkflowRuntimeEventBase {
   error?: string;
 }
 
-/** 审批节点挂起（节点停在 AWAITING，本分支终止不路由下游） */
+/** 大模型节点插入工具后的一次调用（模型要求调哪个工具、传了什么参数） */
+export interface NodeToolCallEvent extends WorkflowRuntimeEventBase {
+  type: 'node.tool_call';
+  nodeId: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  arguments?: Record<string, unknown>;
+  round?: number;
+  /** true = 子工作流审批结束后补记的那次调用 */
+  resumed?: boolean;
+}
+
+/** 一次工具调用的结果摘要（完整结果在节点输出的 toolCalls 里） */
+export interface NodeToolResultEvent extends WorkflowRuntimeEventBase {
+  type: 'node.tool_result';
+  nodeId: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: LlmToolKind;
+  result?: string;
+  error?: null | string;
+  round?: number;
+  resumed?: boolean;
+}
+
+/**
+ * 审批节点挂起（节点停在 AWAITING，本分支终止不路由下游）
+ *
+ * 帧上只有「这个节点停下来了」：要审什么、欠着谁，一律去执行详情读 pendingApprovals。
+ */
 export interface NodePausedEvent extends WorkflowRuntimeEventBase {
   type: 'node.paused';
   nodeId: string;
   nodeType?: NodeType;
   duration?: number;
-  pauseScope?: 'ALL' | 'DOWNSTREAM';
-  approvalContext?: ApprovalContext;
 }
 
-/** 整条流暂停：本轮跑完但存在未决策的审批节点（唯一暂停来源） */
+/** 整条流暂停：本轮跑完但停在等人。同 node.paused，待办清单不在帧里 */
 export interface WorkflowPausedEvent extends WorkflowRuntimeEventBase {
   type: 'workflow.paused';
   nodeId?: string;
-  awaitingNodeIds?: string[];
-  approvalContext?: ApprovalContext;
   duration?: number;
   variables?: Record<string, unknown>;
 }
@@ -127,6 +155,8 @@ export type WorkflowRuntimeEvent =
   | NodePausedEvent
   | NodeStartedEvent
   | NodeTimeoutEvent
+  | NodeToolCallEvent
+  | NodeToolResultEvent
   | WorkflowCancelledEvent
   | WorkflowCompletedEvent
   | WorkflowFailedEvent

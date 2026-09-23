@@ -3,8 +3,17 @@
  * VariableSelector 变量选择器组件
  * 显示上游节点输出变量，支持搜索过滤，插入变量引用
  * Requirements: 7.7
+ *
+ * 「哪些变量可见」（上游回溯 / 审批透传）的推导在 ./upstream-variables.ts，
+ * 与审批节点表单的「选择输出参数」候选共用一份，不在此处另写一套。
  */
 import type { Component } from 'vue';
+
+import type {
+  GraphNode,
+  NodeVariable,
+  NodeWithVariables,
+} from './upstream-variables';
 
 import type { ExtendedVariableType, NodeType } from '#/api/ai-workflow/types';
 
@@ -20,6 +29,7 @@ import {
   CommentOutlined,
   DatabaseOutlined,
   InboxOutlined,
+  MergeCellsOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   RightOutlined,
@@ -28,39 +38,19 @@ import {
   StopOutlined,
   SyncOutlined,
   ToolOutlined,
-  UserOutlined,
 } from '@ant-design/icons-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import {
+  nodeOutputVariables,
+  readGraph,
+  upstreamNodeIds,
+} from './upstream-variables';
+import {
   buildWorkflowVariableReference,
   normalizeVariablePathSuffix,
 } from './variable-reference';
-
-// ==================== 类型定义 ====================
-
-/** 节点输出变量 */
-export interface NodeVariable {
-  /** 变量名 */
-  name: string;
-  /** 变量类型 */
-  type: ExtendedVariableType;
-  /** 描述 */
-  description?: string;
-}
-
-/** 节点及其变量 */
-export interface NodeWithVariables {
-  /** 节点ID */
-  id: string;
-  /** 节点标签 */
-  label: string;
-  /** 节点类型 */
-  type: NodeType;
-  /** 输出变量列表 */
-  variables: NodeVariable[];
-}
 
 // ==================== Props & Emits ====================
 
@@ -122,7 +112,6 @@ const iconComponents: Record<string, Component> = {
   KNOWLEDGE_RETRIEVAL: BookOutlined,
   TOOL: ToolOutlined,
   MCP_TOOL: CloudServerOutlined,
-  AGENT: UserOutlined,
   APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
@@ -138,6 +127,7 @@ const iconComponents: Record<string, Component> = {
   REPLY: CommentOutlined,
   DOC_EXTRACTOR: BookOutlined,
   LIST_OPERATOR: DatabaseOutlined,
+  WORKFLOW: MergeCellsOutlined,
 };
 
 // ==================== 类型颜色映射 ====================
@@ -156,50 +146,41 @@ const typeColors: Record<string, string> = {
 
 // ==================== 计算属性 ====================
 
+/** 画布拓扑的归一视图（节点类型/配置/边），上游与透传推导都吃它 */
+const graph = computed(() => readGraph(workflowStore.canvasRef));
+
+function toWithVariables(node: GraphNode): NodeWithVariables {
+  return {
+    id: node.id,
+    label: node.label,
+    type: node.type,
+    variables: nodeOutputVariables(node, graph.value),
+  };
+}
+
 /**
  * 获取上游节点及其输出变量
  */
 const upstreamNodes = computed<NodeWithVariables[]>(() => {
-  const canvas = workflowStore.canvasRef;
-  if (!canvas || !props.currentNodeId) return getAllNodes();
+  if (!workflowStore.canvasRef) return [];
+  if (!props.currentNodeId) return getAllNodes();
 
   // 获取所有上游节点
-  const upstreamNodeIds = getUpstreamNodeIds(props.currentNodeId);
-  const nodes = canvas.getNodes() || [];
-
-  return nodes
-    .filter((node: any) => upstreamNodeIds.has(node.id))
-    .map((node: any) => {
-      const nodeType = node.data?.nodeType as NodeType;
-      return {
-        id: node.id,
-        label: node.data?.label || node.id,
-        type: nodeType,
-        variables: getNodeOutputVariables(nodeType, node.data?.config || {}),
-      };
-    })
-    .filter((node: any) => node.variables.length > 0);
+  const visible = upstreamNodeIds(graph.value, props.currentNodeId);
+  return graph.value.nodes
+    .filter((node) => visible.has(node.id))
+    .map((node) => toWithVariables(node))
+    .filter((node) => node.variables.length > 0);
 });
 
 /**
  * 获取所有节点（当没有指定当前节点时）
  */
 function getAllNodes(): NodeWithVariables[] {
-  const canvas = workflowStore.canvasRef;
-  if (!canvas) return [];
-
-  const nodes = canvas.getNodes() || [];
-  return nodes
-    .map((node: any) => {
-      const nodeType = node.data?.nodeType as NodeType;
-      return {
-        id: node.id,
-        label: node.data?.label || node.id,
-        type: nodeType,
-        variables: getNodeOutputVariables(nodeType, node.data?.config || {}),
-      };
-    })
-    .filter((node: any) => node.variables.length > 0);
+  if (!workflowStore.canvasRef) return [];
+  return graph.value.nodes
+    .map((node) => toWithVariables(node))
+    .filter((node) => node.variables.length > 0);
 }
 
 /**
@@ -260,367 +241,6 @@ function typeMatchesFilter(
     if (wanted === 'array') return arrayLike || actual === 'object';
     return actual === wanted;
   });
-}
-
-/**
- * 获取上游节点ID集合
- */
-function getUpstreamNodeIds(nodeId: string): Set<string> {
-  const canvas = workflowStore.canvasRef;
-  if (!canvas) return new Set();
-
-  const edges = canvas.getEdges() || [];
-  const visited = new Set<string>();
-  const queue: string[] = [];
-
-  // 获取直接上游节点
-  edges.forEach((edge: any) => {
-    if (edge.target === nodeId && edge.source && !visited.has(edge.source)) {
-      visited.add(edge.source);
-      queue.push(edge.source);
-    }
-  });
-
-  // BFS 遍历所有上游节点
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    edges.forEach((edge: any) => {
-      if (
-        edge.target === currentId &&
-        edge.source &&
-        !visited.has(edge.source)
-      ) {
-        visited.add(edge.source);
-        queue.push(edge.source);
-      }
-    });
-  }
-
-  return visited;
-}
-
-/**
- * 根据节点类型获取输出变量
- */
-function getNodeOutputVariables(
-  nodeType: NodeType,
-  config: Record<string, any>,
-): NodeVariable[] {
-  const variables: NodeVariable[] = [];
-
-  switch (nodeType) {
-    case 'AGENT': {
-      variables.push({
-        name: config.outputVariable || 'response',
-        type: 'string',
-        description: '智能体响应',
-      });
-      break;
-    }
-
-    case 'APPROVAL': {
-      // 与后端 ApprovalNodeExecutor 输出对齐：审批结论（挂起中不产出，不可引用）
-      variables.push(
-        {
-          name: 'review',
-          type: 'boolean',
-          description: '审批结论（true=同意）',
-        },
-        {
-          name: 'reviewOpinion',
-          type: 'string',
-          description: '审批意见',
-        },
-        {
-          name: 'reviewBy',
-          type: 'string',
-          description: '审批人标识',
-        },
-      );
-      break;
-    }
-
-    case 'CODE': {
-      // 代码节点输出固定为 { result: <返回值> }（参照 MaxKB ToolExecutor）
-      variables.push({
-        name: 'result',
-        type: 'object',
-        description: '代码执行返回值（类型不限）',
-      });
-      break;
-    }
-
-    case 'DOC_EXTRACTOR': {
-      variables.push({
-        name: config.outputVariable || 'text',
-        type: 'string',
-        description: '提取的文本内容',
-      });
-      if (config.extractMetadata) {
-        variables.push({
-          name: 'metadata',
-          type: 'object',
-          description: '文档元数据',
-        });
-      }
-      break;
-    }
-
-    case 'HTTP_REQUEST': {
-      variables.push(
-        {
-          name: config.outputVariable || 'response',
-          type: 'object',
-          description: 'HTTP 响应',
-        },
-        {
-          name: 'status',
-          type: 'number',
-          description: 'HTTP 状态码',
-        },
-        {
-          name: 'headers',
-          type: 'object',
-          description: '响应头',
-        },
-        {
-          name: 'body',
-          type: 'object',
-          description: '响应体',
-        },
-      );
-      break;
-    }
-
-    case 'ITERATION': {
-      variables.push(
-        {
-          name: config.outputVariable || 'results',
-          type: 'array',
-          description: '迭代结果数组',
-        },
-        {
-          name: 'item',
-          type: 'object',
-          description: '当前迭代元素',
-        },
-        {
-          name: 'index',
-          type: 'number',
-          description: '当前迭代索引',
-        },
-      );
-      break;
-    }
-
-    case 'KNOWLEDGE_RETRIEVAL': {
-      variables.push({
-        name: config.outputVariable || 'results',
-        type: 'array',
-        description: '检索结果列表',
-      });
-      break;
-    }
-
-    case 'LIST_OPERATOR': {
-      // 默认输出名与后端 ListOperatorNodeExecutor（cfg.outputVariable or "output"）保持一致
-      variables.push(
-        {
-          name: config.outputVariable || 'output',
-          type: 'array',
-          description: '列表操作结果',
-        },
-        {
-          name: 'count',
-          type: 'number',
-          description: '输入数组元素数量',
-        },
-      );
-      break;
-    }
-
-    case 'LLM': {
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'string',
-        description: 'LLM 输出内容',
-      });
-      if (config.structuredOutput?.enabled) {
-        variables.push({
-          name: 'structured_output',
-          type: 'object',
-          description: '结构化输出',
-        });
-      }
-      break;
-    }
-
-    case 'MCP_TOOL': {
-      // 与后端 McpToolNodeExecutor 输出对齐：主变量 + content/urls
-      variables.push(
-        {
-          name: config.outputVariable || 'result',
-          type: 'object',
-          description: 'MCP 工具结果（结构化输出优先，否则文本内容）',
-        },
-        {
-          name: 'content',
-          type: 'string',
-          description: 'MCP 返回的文本内容',
-        },
-        {
-          name: 'urls',
-          type: 'array',
-          description: '图片/音频等资源链接',
-        },
-      );
-      break;
-    }
-
-    case 'PARAMETER_EXTRACTOR': {
-      if (config.parameters && Array.isArray(config.parameters)) {
-        config.parameters.forEach((param: any) => {
-          variables.push({
-            name: param.name,
-            type: param.type || 'string',
-            description: param.description,
-          });
-        });
-      }
-      variables.push(
-        {
-          name: '__is_success',
-          type: 'boolean',
-          description: '提取是否成功',
-        },
-        {
-          name: '__reason',
-          type: 'string',
-          description: '失败原因',
-        },
-      );
-      break;
-    }
-
-    case 'QUESTION_CLASSIFIER': {
-      variables.push(
-        {
-          name: 'category',
-          type: 'string',
-          description: '分类结果',
-        },
-        {
-          name: 'selectedBranch',
-          type: 'string',
-          description: '选中的分支ID',
-        },
-      );
-      break;
-    }
-
-    case 'REPLY': {
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'string',
-        description: '回复内容',
-      });
-      break;
-    }
-
-    case 'START': {
-      // START 节点的输出是其定义的输入字段
-      if (config.fields && Array.isArray(config.fields)) {
-        config.fields.forEach((field: any) => {
-          variables.push({
-            name: field.name,
-            type: mapInputFieldType(field.type),
-            description: field.description || field.label,
-          });
-        });
-      }
-      break;
-    }
-
-    case 'TEMPLATE': {
-      variables.push({
-        name: config.outputVariable || 'output',
-        type: 'string',
-        description: '模板渲染结果',
-      });
-      break;
-    }
-
-    case 'TOOL': {
-      // 工具节点与代码节点同口径，输出 { [outputVariable]: 返回值 }，默认 result
-      variables.push({
-        name: config.outputVariable || 'result',
-        type: 'object',
-        description: '工具执行结果',
-      });
-      break;
-    }
-
-    case 'VARIABLE_AGGREGATOR': {
-      if (config.groups && Array.isArray(config.groups)) {
-        config.groups.forEach((group: any) => {
-          // 未填写输出名的聚合组属于待配置状态，不作为可引用变量输出
-          if (!group.outputVariable) {
-            return;
-          }
-          variables.push({
-            name: group.outputVariable,
-            type: group.variableType || 'object',
-            description: '聚合变量',
-          });
-        });
-      }
-      break;
-    }
-
-    case 'VARIABLE_ASSIGNER': {
-      if (config.assignments && Array.isArray(config.assignments)) {
-        config.assignments.forEach((assignment: any) => {
-          variables.push({
-            name: assignment.variableName,
-            type: assignment.variableType || 'string',
-            description: assignment.description,
-          });
-        });
-      }
-      break;
-    }
-
-    default: {
-      // 默认输出
-      variables.push({
-        name: 'output',
-        type: 'object',
-        description: '节点输出',
-      });
-    }
-  }
-
-  return variables;
-}
-
-/**
- * 映射输入字段类型到变量类型
- */
-function mapInputFieldType(fieldType: string): ExtendedVariableType {
-  const typeMap: Record<string, ExtendedVariableType> = {
-    // 短/长文本已合并为 TEXT，旧图的 SHORT_TEXT / PARAGRAPH 仍保留映射
-    TEXT: 'string',
-    SHORT_TEXT: 'string',
-    PARAGRAPH: 'string',
-    NUMBER: 'number',
-    SELECT: 'string',
-    CHECKBOX: 'boolean',
-    SINGLE_FILE: 'File',
-    FILE_LIST: 'Array[File]',
-    // 审批入参：一组审批人标识（数字或字符串）
-    APPROVER: 'array',
-  };
-  return typeMap[fieldType] || 'string';
 }
 
 /**

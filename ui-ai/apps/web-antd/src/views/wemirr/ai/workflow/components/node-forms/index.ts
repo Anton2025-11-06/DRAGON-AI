@@ -3,7 +3,6 @@
  * 同步自后端 NodeType 枚举，支持所有 工作流节点
  */
 
-export { default as AgentNodeForm } from './AgentNodeForm.vue';
 // 控制流节点（人工审批）
 export { default as ApprovalNodeForm } from './ApprovalNodeForm.vue';
 // 能力节点
@@ -34,3 +33,4 @@ export { default as ToolNodeForm } from './ToolNodeForm.vue';
 
 export { default as VariableAggregatorNodeForm } from './VariableAggregatorNodeForm.vue';
 export { default as VariableNodeForm } from './VariableNodeForm.vue';
+export { default as WorkflowNodeForm } from './WorkflowNodeForm.vue';
