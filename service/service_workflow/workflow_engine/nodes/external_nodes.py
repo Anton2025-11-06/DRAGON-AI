@@ -86,21 +86,16 @@ class HttpRequestNodeExecutor(BaseNodeExecutor):
         duration = int((time.monotonic() - started) * 1000)
 
         output_var = cfg.get("outputVariable") or "response"
-        output = {
-            output_var: {"statusCode": resp.status_code},
-            "statusCode": resp.status_code,
-            "duration": duration,
-        }
+        # 响应只填进配置的输出变量：顶层不再重复写 statusCode/body（同值别名，客户端会多出重复行）
+        payload: dict = {"statusCode": resp.status_code}
+        output = {output_var: payload, "duration": duration}
         if cfg.get("parseJsonResponse", True):
             try:
-                output["body"] = resp.json()
-                output[output_var]["body"] = output["body"]
+                payload["body"] = resp.json()
             except (json.JSONDecodeError, ValueError):
-                output["body"] = resp.text
-                output[output_var]["body"] = resp.text[:10000]
+                payload["body"] = resp.text[:10000]
         else:
-            output["body"] = resp.text[:10000]
-            output[output_var]["body"] = output["body"]
+            payload["body"] = resp.text[:10000]
         # failOnError（默认 true）：非 2xx 视为节点失败；false 时错误响应作为输出返回，
         # 供下游条件分支处理（对齐 Dify/MaxKB 的 continue-on-error 用法）
         fail_on_error = cfg.get("failOnError")
@@ -204,8 +199,8 @@ class McpToolNodeExecutor(BaseNodeExecutor):
 
     配置：mcpServerId + toolName（工具下拉来自该连接的 tools/list）、
     inputs 参数绑定行（同 CODE / TOOL 节点），输出：
-    - result：structuredContent 优先，否则为文本 content（下游最常引用的形态）
-    - content / urls：原始文本与资源链接（图片/音频等）
+    - 配置的输出变量（默认 result）：structuredContent 优先，否则为文本 content
+    - urls：图片/音频等资源链接（不重复的辅助键）
     isError 视为节点失败上抛（对齐 Dify/MaxKB：工具报错不静默成正常输出）。
     """
 
@@ -228,7 +223,6 @@ class McpToolNodeExecutor(BaseNodeExecutor):
         output_var = cfg.get("outputVariable") or "result"
         return NodeResult(output={
             output_var: structured if structured is not None else content,
-            "content": content,
             "urls": result.get("urls") or [],
         })
 

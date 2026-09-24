@@ -9,7 +9,7 @@
 - 节点异常分支（exception） →  result.branch_id="exception" 走 branch:exception 端口
 
 新增能力（MaxKB 无 / 前端契约要求）：
-- 复合节点子图执行（run_subgraph：LOOP/ITERATION/PARALLEL 的循环体/分支体）
+- 复合节点子图执行（run_subgraph：LOOP/PARALLEL 的循环体/分支体）
 - 审批暂停（APPROVAL 节点）：节点边界落快照 + run() 以 PAUSED 收尾，恢复由
   「同一条 executionId 再提交」驱动（对外契约见 docs/workflow-execution-contract.md）
 - 两种提交模式：RETRY 全量重跑 / CONTINUE 命中已完成节点则 skip（发 skip 事件不重跑）
@@ -30,8 +30,8 @@ from service.service_workflow.workflow_engine.events import EventBus
 from service.service_workflow.workflow_engine.graph import OUTPUT_HANDLE, WorkflowGraph
 from service.service_workflow.workflow_engine.nodes import NODE_REGISTRY
 from service.service_workflow.workflow_engine.nodes.base import (
-    APPROVAL_SCOPE_ALL, EMIT_OUTPUT_KEY, AwaitingApproval, NodeExecutionError,
-    NodeResult,
+    APPROVAL_SCOPE_ALL, EMIT_OUTPUT_KEY, EMIT_TOOL_RESULT_KEY, AwaitingApproval,
+    NodeExecutionError, NodeResult,
 )
 from common.common_log.log_init import log
 
@@ -101,7 +101,8 @@ class NodeState:
     __slots__ = ("order", "status", "input", "output", "error", "duration",
                  "started_at", "label", "nodeType", "branch", "llmMessages",
                  "review", "reviewBy", "reviewOpinion", "reviewDiff", "skip",
-                 "childExecutionId", "emitted")
+                 "childExecutionId", "childToolResults", "emitted",
+                 "emittedToolResult")
 
     def __init__(self):
         self.order: int = 0
@@ -130,11 +131,22 @@ class NodeState:
         # 【工作流】节点发起的子执行 id：子流程落 PAUSED 时父节点跟着挂起，
         # 恢复轮靠它认出「这个子执行已经跑过了」，避免重新起一份子执行
         self.childExecutionId: Optional[str] = None
+        # 大模型节点的工作流工具：本轮此节点已跑过的子执行 {缓存键: 子执行 id}。
+        # 键 = 工作流 id + 该次调用入参（见 ai_nodes._workflow_tool_cache_key）。
+        # 与 childExecutionId 分工：后者只记「当前正挂着的那一份」，恢复轮消费完即清；
+        # 本表跨轮留存「同参数已跑到终态的那一份」，让模型重复调用同一工具时复用结果、
+        # 不再起新子执行（否则带审批的子流程每次重调都会再要一遍审批）。
+        self.childToolResults: dict = {}
         # 节点「返回内容」开关（data.emitOutput）的执行时快照：父侧取子执行结果要靠它
         # 筛出哪些节点的输出允许对外给（见 service.child_result_outputs）。开关本体住在
         # 图里、node_states 原本没有，取数就得回读一次发布快照再按节点匹配；落一份布尔值
         # 就不必。默认 True：存量行缺这个字段按「开」处理，语义与图里没配该键时一致。
         self.emitted: bool = True
+        # 「输出工具结果」开关（LLM 节点 data.emitToolResult）的执行时快照：同样只为了
+        # 父侧取数时不必读图（不勾时子流的工具返回值不该给父流程）。默认 True 只为兼容
+        # 存量行（落库前没有这个字段）；新执行由引擎按节点配置写实际值（未配即 False）。
+        # 非 LLM 节点没有这个开关，快照为 False，但它们的输出里也没有 toolCalls。
+        self.emittedToolResult: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -154,7 +166,9 @@ class NodeState:
             "reviewDiff": self.reviewDiff,
             "skip": self.skip,
             "emitted": self.emitted,
+            "emittedToolResult": self.emittedToolResult,
             "childExecutionId": self.childExecutionId,
+            "childToolResults": self.childToolResults,
         }
 
 
@@ -619,6 +633,7 @@ class WorkflowRuntime:
         # 「返回内容」开关同样在此快照（不是广播处）：主表 node_states 在节点边界就会落库，
         # 放到成功分支里写会让 RUNNING 中崩溃的行丢掉这个字段
         state.emitted = node.data.get(EMIT_OUTPUT_KEY, True) is True
+        state.emittedToolResult = node.data.get(EMIT_TOOL_RESULT_KEY, False) is True
         self.node_states[node.id] = state
 
         input_view = self._node_input_view(node)
@@ -975,20 +990,16 @@ class WorkflowRuntime:
                 return False
         return True
 
-    # ==================== 子图执行（LOOP/ITERATION/PARALLEL 用） ====================
+    # ==================== 子图执行（LOOP/PARALLEL 用） ====================
 
     async def run_subgraph(self, entry_node_id: str, exit_node_id: Optional[str] = None,
-                           scope_vars: Optional[dict] = None,
                            wait_all: bool = True) -> dict:
         """执行 entry 起始的子图，遇到 exit_node_id（不执行它）或无出边即止。
 
         返回子图内所有已完成节点的输出聚合 {node_id: output}。
-        scope_vars 压入局部作用域（ITERATION 的 item/index）。
-        复合节点（LOOP/ITERATION）每轮都会重复调用本方法，因此进入前重置子图节点
+        复合节点（LOOP）每轮都会重复调用本方法，因此进入前重置子图节点
         的完成状态，避免 _schedule 的「已完成则跳过」守卫导致循环体只跑一次。
         """
-        if scope_vars:
-            self.ctx.push_scope(scope_vars)
         order_before = self._order_counter
         self._reset_subgraph_nodes(entry_node_id, exit_node_id)
         # 快照进入前已存在的任务（含调用方——复合节点的调度 task）。
@@ -998,21 +1009,16 @@ class WorkflowRuntime:
         # 导致内层一直等待正阻塞在 run_subgraph 返回上的祖先 → 自死锁。
         # 故用进入时刻的快照排除所有祖先/pre-existing 任务，仅等待本子图「衍生」的任务。
         preexisting = set(self._running_tasks)
-        try:
-            await self._checkpoint()
-            await self._schedule(entry_node_id)
-            deadline = time.monotonic() + 3600
-            while time.monotonic() < deadline:
-                pending = [t for t in self._running_tasks if t not in preexisting]
-                if not pending:
-                    break
-                await asyncio.wait(pending, timeout=0.2,
-                                   return_when=asyncio.FIRST_COMPLETED)
-            result = self._collect_new_outputs(entry_node_id, order_before)
-            return result
-        finally:
-            if scope_vars:
-                self.ctx.pop_scope()
+        await self._checkpoint()
+        await self._schedule(entry_node_id)
+        deadline = time.monotonic() + 3600
+        while time.monotonic() < deadline:
+            pending = [t for t in self._running_tasks if t not in preexisting]
+            if not pending:
+                break
+            await asyncio.wait(pending, timeout=0.2,
+                               return_when=asyncio.FIRST_COMPLETED)
+        return self._collect_new_outputs(entry_node_id, order_before)
 
     def _collect_new_outputs(self, entry_node_id, order_before: int) -> dict:
         """收集入口可达子图内「本轮（order>order_before）新增执行完成」节点的最新输出。
@@ -1021,8 +1027,8 @@ class WorkflowRuntime:
         端口多出口时，一个分支可能对应多个入口节点）。
 
         与旧实现（executed 集合差）的区别：
-        - LOOP/ITERATION body 节点每轮重复执行且 id 相同，集合差会把第二轮及以后的
-          输出全部丢弃（loopResult/items 为空）；按 order 过滤只认本轮新执行的
+        - LOOP body 节点每轮重复执行且 id 相同，集合差会把第二轮及以后的
+          输出全部丢弃（loopResult 为空）；按 order 过滤只认本轮新执行的
         - PARALLEL 分支并发执行时全局 executed 交错，集合差会把相邻分支的节点
           误收进本分支结果；按入口可达闭包过滤只收本分支子图的节点
         """
@@ -1056,7 +1062,7 @@ class WorkflowRuntime:
                 self._memory_archive[nid] = old.llmMessages
             self._completed_with_branch.pop(nid, None)
             # 子图重跑前释放调度登记，否则 _schedule 的「已派生过」守卫会让
-            # LOOP/ITERATION 第二轮起整个循环体直接空跑
+            # LOOP 第二轮起整个循环体直接空跑
             self._scheduled_nodes.discard(nid)
             if nid == exit_node_id:
                 continue  # exit 节点不被执行，不继续向下传播
@@ -1185,7 +1191,7 @@ class WorkflowRuntime:
     # ==================== 状态检查(DB 状态驱动控制) ====================
 
     def _check_cancelled(self) -> None:
-        """复合节点（LOOP/ITERATION 等）轮询内的取消检查：
+        """复合节点（LOOP 等）轮询内的取消检查：
         任意节点调度入口或 run() 收尾已把 status 置为 CANCELLED 时立即终止。"""
         if self.status == STATUS_CANCELLED:
             raise WorkflowCancelled()
@@ -1355,10 +1361,13 @@ class WorkflowRuntime:
             state.reviewBy = s.get("reviewBy")
             state.reviewOpinion = s.get("reviewOpinion")
             state.reviewDiff = s.get("reviewDiff")
-            # skip 是本轮属性，不随历史状态带过来；emitted 是节点配置快照，必须带回来
-            # （否则恢复轮落库时会把上轮关掉的「返回内容」开关重置成开）
+            # skip 是本轮属性，不随历史状态带过来；emitted* 是节点配置快照，必须带回来
+            # （否则恢复轮落库时会把上轮关掉的「返回内容」/「输出工具结果」开关重置成开）
             state.emitted = bool(s.get("emitted", True))
+            state.emittedToolResult = bool(s.get("emittedToolResult", True))
             state.childExecutionId = s.get("childExecutionId")
+            cached = s.get("childToolResults")
+            state.childToolResults = dict(cached) if isinstance(cached, dict) else {}
             self.node_states[nid] = state
         self._order_counter = max((s.order for s in self.node_states.values()), default=0)
         for nid, state in self.node_states.items():

@@ -95,7 +95,6 @@ const iconComponent = computed(() => {
     PARAMETER_EXTRACTOR: ApiOutlined,
     APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: BranchesOutlined,
-    ITERATION: SyncOutlined,
     VARIABLE_AGGREGATOR: ApartmentOutlined,
     LOOP: SyncOutlined,
     PARALLEL: ApartmentOutlined,

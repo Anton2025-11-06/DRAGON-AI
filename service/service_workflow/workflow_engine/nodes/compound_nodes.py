@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
-"""复合节点：LOOP / ITERATION / PARALLEL（子图执行，参照 MaxKB LoopWorkflowManage 思想）。
+"""复合节点：LOOP / PARALLEL（子图执行，参照 MaxKB LoopWorkflowManage 思想）。
 
 端口约定（需与前端画布联调确认，详见 README）：
 - LOOP：branch:body → 循环体；output 端口 → 满足退出条件后的正常出口
-- ITERATION：branch:body → 逐元素处理体（体内引用 item/index）；output → 汇总出口
 - PARALLEL：branch:{id} → 并行分支；output → 全部/任一完成后出口
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Optional
 
@@ -57,8 +55,9 @@ class LoopNodeExecutor(BaseNodeExecutor):
 
         output_var = cfg.get("outputVariable") or "loopResult"
         # 循环计数变量一并进 output：跨轮恢复时 global_vars 由「已落库的节点输出」重放
-        # 得到（快照不再存 global 副本），只写 ctx.global_vars 会让恢复后的计数归零
-        output = {output_var: last_outputs, "iterations": iterations, loop_var: iterations}
+        # 得到（快照不再存 global 副本），只写 ctx.global_vars 会让恢复后的计数归零。
+        # 不再另写 iterations 别名 —— 与 loopVariable 同值，只会让客户端多显示一行重复数据。
+        output = {output_var: last_outputs, loop_var: iterations}
         return NodeResult(output=output, branch_id=None)  # 走默认 output 端口（退出）
 
     def _eval_exit(self, ctx: ExecutionContext, condition: Optional[str]) -> bool:
@@ -88,71 +87,6 @@ class LoopNodeExecutor(BaseNodeExecutor):
         data = node.data or {}
         if not data.get("exitCondition"):
             issues.append(issue("LOOP_NO_EXIT", "ERROR", "循环节点未配置退出条件", node))
-        return issues
-
-
-class IterationNodeExecutor(BaseNodeExecutor):
-    """ITERATION：for-each —— arrayVariable 解析为数组，逐元素（或并行）执行 branch:body
-    子图，体内通过 {{item}} / {{index}} 引用当前元素。输出 = 每次迭代 body 输出聚合数组。"""
-
-    node_type = "ITERATION"
-
-    async def execute(self, ctx: ExecutionContext) -> NodeResult:
-        cfg = self.config
-        arr = ctx.resolve_ref(cfg.get("arrayVariable"))
-        if arr is None:
-            raise ValueError(f"迭代数组变量无法解析: {cfg.get('arrayVariable')}")
-        if not isinstance(arr, list):
-            raise ValueError(f"迭代变量不是数组: {type(arr).__name__}")
-        max_iter = int(cfg.get("maxIterations") or 1000)
-        if len(arr) > max_iter:
-            raise ValueError(f"迭代元素数量 {len(arr)} 超过上限 {max_iter}")
-
-        mode = (cfg.get("processingMode") or "SEQUENTIAL").upper()
-        parallel_count = int(cfg.get("parallelCount") or 3)
-        output_var = cfg.get("outputVariable") or "items"
-
-        body_pairs = self.graph.get_next_nodes(self.node.id, "body")
-        if not body_pairs:
-            return NodeResult(output={output_var: [], "count": len(arr)})
-        entry = body_pairs[0][0]
-        item_key = self._body_output_key(entry.id)
-
-        results: list = []
-
-        async def _run_one(index: int, item):
-            scoped = {"item": item, "index": index}
-            outputs = await self.runtime.run_subgraph(entry.id, scope_vars=scoped)
-            return outputs.get(item_key, outputs)
-
-        if mode == "PARALLEL":
-            sem = asyncio.Semaphore(max(1, parallel_count))
-
-            async def _limited(i, item):
-                async with sem:
-                    return await _run_one(i, item)
-            results = list(await asyncio.gather(*[_limited(i, x) for i, x in enumerate(arr)]))
-        else:
-            for i, item in enumerate(arr):
-                self.runtime._check_cancelled()
-                timeout_ms = int(cfg.get("iterationTimeout") or 0)
-                if timeout_ms:
-                    results.append(await asyncio.wait_for(_run_one(i, item), timeout_ms / 1000))
-                else:
-                    results.append(await _run_one(i, item))
-
-        return NodeResult(output={output_var: results, "count": len(arr)})
-
-    def _body_output_key(self, entry_id: str) -> str:
-        """body 首节点的输出作为每次迭代的代表输出。"""
-        return entry_id
-
-    @staticmethod
-    def validate_node(node, graph) -> list:
-        issues = []
-        data = node.data or {}
-        if not data.get("arrayVariable"):
-            issues.append(issue("ITER_NO_ARRAY", "ERROR", "迭代节点未配置数组变量", node))
         return issues
 
 

@@ -61,6 +61,9 @@ APPROVAL_SCOPE_DOWNSTREAM = "DOWNSTREAM"
 
 # 节点「返回内容」开关字段名(画布 data 中):显式 false 时该节点的数据事件不广播给客户端
 EMIT_OUTPUT_KEY = "emitOutput"
+# 大模型节点「输出工具结果」开关字段名(画布 data 中):不勾时工具调用的返回值不外发——
+# node.tool_result 事件不带结果，父侧取子执行结果也拿不到 toolCalls 里的 result
+EMIT_TOOL_RESULT_KEY = "emitToolResult"
 
 
 class BaseNodeExecutor:

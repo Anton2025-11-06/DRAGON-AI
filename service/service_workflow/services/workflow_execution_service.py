@@ -78,12 +78,25 @@ def get_shared_http():
 # - IF_ELSE/PARALLEL：执行器把入边上游输出整块透传进自己的 output（见各节点的
 #   input_pass_through），收进来全是重复；
 # - LOOP：output 里的 loopResult 就是循环体子图的全部节点输出，而体内节点会被逐个单独收。
-# ITERATION 不在列：它的 items 是逐次迭代的聚合结果，循环体每轮会被 _reset_subgraph_nodes
-# 重置，体内节点的 output 只剩最后一轮，只有这个聚合键是完整的。
 # 新增节点类型时要想清楚它属不属于这一类，否则父侧（【工作流】节点、LLM 的工作流工具）
 # 会白吃一份重复数据。
 CHILD_RESULT_SKIP_TYPES = frozenset(
     {"START", "END", "REPLY", "IF_ELSE", "LOOP", "PARALLEL"})
+
+
+def hide_tool_call_results(output: dict) -> dict:
+    """抹掉节点输出里工具调用的返回值，保留「调了哪个工具、传了什么参数」的轨迹。
+
+    不改传入的 dict：它就是 row.node_states 里的那个对象，就地改等于把裁剪写回执行记录。
+    没有 toolCalls 的输出原样返回（LLM 以外的节点本来就没有这个键，
+    但它们的 emittedToolResult 快照同样是 False，这里必须能吃下空键）。
+    """
+    calls = output.get("toolCalls")
+    if not isinstance(calls, list):
+        return output
+    stripped = [{k: v for k, v in item.items() if k != "result"}
+                if isinstance(item, dict) else item for item in calls]
+    return {**output, "toolCalls": stripped}
 
 
 def child_result_outputs(row: WorkflowExecution) -> dict:
@@ -100,6 +113,10 @@ def child_result_outputs(row: WorkflowExecution) -> dict:
       拿 output 等于什么都不给）；
     - skip=false：CONTINUE 轮被跳过的上轮节点不算本轮结果；
     - emitted=true：节点「返回内容」开关关掉的对外不给（存量行缺这个字段按开处理）。
+
+    过了这三关的输出也不是原样给：LLM 节点没勾「输出工具结果」（emittedToolResult=false）
+    时，toolCalls 里每次调用的返回值要抹掉——开关管的就是「结果要不要外发」，父侧拿到的
+    应是调用轨迹而不是工具原文（存量行缺这个字段按给处理）。
 
     节点类型在 CHILD_RESULT_SKIP_TYPES 里的一律不收（入参回显 / 顶层已平铺 / 整块透传）。
     """
@@ -126,6 +143,8 @@ def child_result_outputs(row: WorkflowExecution) -> dict:
                 output = st.get("output")
             if not isinstance(output, dict) or not output:
                 continue
+            if st.get("emittedToolResult", True) is False:
+                output = hide_tool_call_results(output)
             merged[nid] = output
     merged.update(outputs)
     return merged
@@ -151,7 +170,9 @@ class WorkflowExecutionService:
 
     @staticmethod
     async def submit(req: WorkflowSubmitReq, *, websocket: Optional[WebSocket] = None,
-                     user_id: int = 0, trigger_type: str = "API",
+                     user_id: Optional[int] = 0,
+                     ip: Optional[str],
+                     trigger_type: str = "API",
                      retry_times: int = 3) -> dict:
         """把一次提交落到执行行上并让它跑起来，返回对外统一的那份结果。
 
@@ -165,7 +186,7 @@ class WorkflowExecutionService:
                                     user_id=user_id)
         if plan.is_new:
             plan.execution_id = await WorkflowExecutionService._create_run(
-                plan, user_id=user_id, trigger_type=trigger_type)
+                plan, user_id=user_id, ip=ip, trigger_type=trigger_type)
         return await WorkflowExecutionService._run_plan(
             plan, websocket=websocket, user_id=user_id, retry_times=retry_times)
 
@@ -260,7 +281,7 @@ class WorkflowExecutionService:
         await ExecutionStateStore.change_pause_state(execution_id, mark)
 
     @staticmethod
-    async def _create_run(plan: SubmitPlan, *, user_id: int,
+    async def _create_run(plan: SubmitPlan, *, user_id: int, ip: str,
                           trigger_type: str) -> str:
         """新开一行执行并摆成第一轮要跑的样子，返回它的 executionId。
 
@@ -284,7 +305,7 @@ class WorkflowExecutionService:
         execution_id = str(uuid.uuid4())
         await ExecutionStateStore.create_for_run(execution_id, NewRun(
             workflow_id=plan.workflow_id, workflow_version=version,
-            trigger_type=trigger_type, user_id=user_id,
+            trigger_type=trigger_type, user_id=user_id,ip=ip,
             graph_hash=compute_graph_hash(graph_raw), inputs=plan.values or {},
             round_request=RoundRequest(round_no=1)))
         return execution_id

@@ -115,7 +115,6 @@ const iconComponents: Record<string, Component> = {
   APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
-  ITERATION: SyncOutlined,
   PARALLEL: ApartmentOutlined,
   HTTP_REQUEST: ApiOutlined,
   CODE: CodeOutlined,

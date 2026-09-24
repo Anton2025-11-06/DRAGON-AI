@@ -14,7 +14,6 @@ export { default as EndNodeForm } from './EndNodeForm.vue';
 export { default as HttpNodeForm } from './HttpNodeForm.vue';
 // 控制流节点
 export { default as IfElseNodeForm } from './IfElseNodeForm.vue';
-export { default as IterationNodeForm } from './IterationNodeForm.vue';
 export { default as KnowledgeNodeForm } from './KnowledgeNodeForm.vue';
 
 export { default as ListOperatorNodeForm } from './ListOperatorNodeForm.vue';

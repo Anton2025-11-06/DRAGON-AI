@@ -410,11 +410,11 @@ class ApprovalNodeExecutor(BaseNodeExecutor):
         if not graph.get_out_edges(node.id):
             issues.append(issue("APPROVAL_NO_OUTPUT", "SUGGESTION",
                                 "审批节点没有下游连线，同意后无节点继续执行", node))
-        # 子图内暂停不在一期范围：LOOP/ITERATION 循环体、PARALLEL 分支里每轮都会
+        # 子图内暂停不在一期范围：LOOP 循环体、PARALLEL 分支里每轮都会
         # 重新执行审批节点，恢复语义（skip/覆写）在这里不成立
         if node.id in graph.compound_body_node_ids():
             issues.append(issue("APPROVAL_IN_SUBGRAPH", "ERROR",
-                                "审批节点不能放在循环/迭代/并行的子图内", node,
+                                "审批节点不能放在循环/并行的子图内", node,
                                 suggestion="请把审批节点移到主干上"))
         # 透传参数只能校验到「源节点还在 + 输出键名能当引用用」这一层（变量名与子路径
         # 都是节点配置推出来的，两边易漂）：源节点被删时运行期会默默少一个键；

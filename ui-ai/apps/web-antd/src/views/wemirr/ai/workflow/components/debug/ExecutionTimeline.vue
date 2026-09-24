@@ -159,7 +159,6 @@ function getNodeIcon(nodeType: string) {
     PARAMETER_EXTRACTOR: FunctionOutlined,
     APPROVAL: SafetyCertificateOutlined,
     IF_ELSE: ThunderboltOutlined,
-    ITERATION: LoadingOutlined,
     VARIABLE_AGGREGATOR: FunctionOutlined,
     VARIABLE_ASSIGNER: FunctionOutlined,
     LOOP: LoadingOutlined,

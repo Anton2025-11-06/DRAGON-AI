@@ -94,7 +94,7 @@ async def replay_frames(execution_id: str, resp: dict) -> AsyncIterator[str]:
                         {"executionId": execution_id, "nodeId": nid,
                          "duration": st.get("duration", 0),
                          "error": st.get("error")
-                                or "分支已取消（并行短路或审批不同意）"}, generation)
+                                  or "分支已取消（并行短路或审批不同意）"}, generation)
         elif st.get("error"):
             yield frame("node.failed", {"executionId": execution_id, "nodeId": nid,
                                         "error": st["error"]}, generation)
@@ -140,10 +140,10 @@ async def stream_frames(execution_id: str, *, read_detail: DetailReader,
         resp = await read_detail(execution_id)
         if resp is None:
             return
-        async for item in replay_frames(execution_id, resp):
-            yield item
+        # 非 （PAUSED状态 且已提交审批结论）的工作流，才可以补历史，否则会重复发node.paused and workflow.paused
         if not awaiting_resume:
-            return
+            async for item in replay_frames(execution_id, resp):
+                yield item
     async for item in live_frames(
             execution_id, max_wait_s=PARENT_RESUME_WINDOW_S if awaiting_resume else None):
         if not is_expired(item, watch.pause_generation):

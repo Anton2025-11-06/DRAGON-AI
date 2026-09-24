@@ -20,7 +20,6 @@ export type NodeType =
   | 'END' // 结束/回答
   | 'HTTP_REQUEST' // HTTP请求
   | 'IF_ELSE' // 条件分支
-  | 'ITERATION' // 迭代
   | 'KNOWLEDGE_RETRIEVAL' // 知识检索
   // 控制流节点
   | 'LIST_OPERATOR' // 列表处理
@@ -1462,34 +1461,6 @@ export interface IfElseNodeConfig {
   branches?: ConditionBranch[];
 }
 
-// ==================== ITERATION 节点配置 ====================
-// 同步自: com.wemirr.platform.ai.core.workflow.config.node.IterationNodeConfig
-
-/**
- * 迭代处理模式枚举
- */
-export type ProcessingMode = 'PARALLEL' | 'SEQUENTIAL';
-
-/**
- * 迭代节点配置 (Workflow Iteration)
- * 对数组元素进行批量处理，支持顺序和并行模式
- * 内置变量: item (当前迭代元素), index (当前索引)
- */
-export interface IterationNodeConfig {
-  /** 要迭代的数组变量 (支持变量引用格式: {{nodeName.variableName}}) */
-  arrayVariable?: string;
-  /** 处理模式 */
-  processingMode?: ProcessingMode;
-  /** 并行数量（并行模式时有效） */
-  parallelCount?: number;
-  /** 单次迭代超时时间（毫秒） */
-  iterationTimeout?: number;
-  /** 最大迭代次数限制（默认 1000） */
-  maxIterations?: number;
-  /** 输出变量名（存储迭代结果数组） */
-  outputVariable?: string;
-}
-
 // ==================== VARIABLE_AGGREGATOR 节点配置 ====================
 // 同步自: com.wemirr.platform.ai.core.workflow.config.node.VariableAggregatorConfig
 
@@ -2159,7 +2130,6 @@ export interface NodeConfigMap {
   QUESTION_CLASSIFIER: QuestionClassifierConfig;
   PARAMETER_EXTRACTOR: ParameterExtractorConfig;
   IF_ELSE: IfElseNodeConfig;
-  ITERATION: IterationNodeConfig;
   VARIABLE_AGGREGATOR: VariableAggregatorConfig;
   LOOP: LoopNodeConfig;
   PARALLEL: ParallelNodeConfig;

@@ -4,7 +4,7 @@
 作用域（从高到低）：
 1. global  —— 全局变量（工作流级， VARIABLE_ASSIGNER 写入）
 2. node    —— 节点输出上下文 {node_id: {var: value}}（含 START 输入）
-3. local   —— LOOP/ITERATION 迭代内 item / index
+3. local   —— 模板类节点渲染期注入的临时变量
 
 变量引用语法（对齐前端 types.ts 注释）：{{nodeName.variableName}}
 解析顺序：node_id 精确匹配 → node label 匹配 → global 作用域。
@@ -75,7 +75,7 @@ class ExecutionContext:
         self.inputs: dict = dict(inputs or {})
         self.global_vars: dict = {}          # VARIABLE_ASSIGNER / 调试 API 写入
         self.node_outputs: dict = {}          # {node_id: {var: value}}
-        self.scopes: list[dict] = []          # 局部作用域栈（LOOP/ITERATION item/index）
+        self.scopes: list[dict] = []          # 局部作用域栈（TEMPLATE 渲染变量）
         self.executed: list[str] = []         # 已执行节点顺序（nodeStates.order）
 
     # ==================== 写入 ====================
@@ -130,7 +130,7 @@ class ExecutionContext:
         # 已写入的节点输出兜底（快照恢复/图变更场景）
         if ref in self.node_outputs:
             return self.node_outputs[ref]
-        # 作用域栈（栈顶优先）：item/index
+        # 作用域栈（栈顶优先）：模板类节点的临时变量
         for scope in reversed(self.scopes):
             if ref in scope:
                 return scope[ref]

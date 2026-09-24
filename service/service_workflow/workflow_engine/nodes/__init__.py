@@ -13,7 +13,7 @@ from service.service_workflow.workflow_engine.nodes.approval_nodes import (
 )
 from service.service_workflow.workflow_engine.nodes.base import BaseNodeExecutor
 from service.service_workflow.workflow_engine.nodes.compound_nodes import (
-    IterationNodeExecutor, LoopNodeExecutor, ParallelNodeExecutor,
+    LoopNodeExecutor, ParallelNodeExecutor,
 )
 from service.service_workflow.workflow_engine.nodes.control_nodes import (
     EndNodeExecutor, IfElseNodeExecutor, StartNodeExecutor,
@@ -41,7 +41,6 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
     # 控制流
     IfElseNodeExecutor.node_type: IfElseNodeExecutor,
     LoopNodeExecutor.node_type: LoopNodeExecutor,
-    IterationNodeExecutor.node_type: IterationNodeExecutor,
     ParallelNodeExecutor.node_type: ParallelNodeExecutor,
     VariableAssignerNodeExecutor.node_type: VariableAssignerNodeExecutor,
     VariableAggregatorNodeExecutor.node_type: VariableAggregatorNodeExecutor,
@@ -64,7 +63,7 @@ NODE_REGISTRY: dict[str, type[BaseNodeExecutor]] = {
 
 # 前端节点类型全集（types.ts NodeType）
 ALL_NODE_TYPES = [
-    "START", "END", "LLM", "IF_ELSE", "ITERATION", "LOOP", "PARALLEL",
+    "START", "END", "LLM", "IF_ELSE", "LOOP", "PARALLEL",
     "CODE", "TEMPLATE", "REPLY", "HTTP_REQUEST", "TOOL", "MCP_TOOL", "KNOWLEDGE_RETRIEVAL",
     "WORKFLOW",
     "PARAMETER_EXTRACTOR", "QUESTION_CLASSIFIER", "LIST_OPERATOR",

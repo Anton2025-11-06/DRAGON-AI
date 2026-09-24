@@ -249,7 +249,8 @@ def restart_node_states(node_states: dict) -> dict:
     """重开一轮的节点状态：只清「本轮跑过什么」，大模型记忆与产出留着。
 
     review* 必须清：重新执行后审批要从头拿结论，上轮结论留在页面上会被当成本轮已审。
-    childExecutionId 也要清：留着【工作流】节点会把上轮那份子执行的结果当成本轮答案。
+    childExecutionId/childToolResults 也要清：留着【工作流】节点或 LLM 工作流工具会
+    把上轮那份子执行的结果当成本轮答案（重开一轮就是要重新跑一遍子流程）。
     """
     cleaned = {}
     for node_id, state in (node_states or {}).items():
@@ -258,7 +259,7 @@ def restart_node_states(node_states: dict) -> dict:
         cleaned[node_id] = dict(
             state, status=STATUS_PENDING, duration=0, error=None, skip=False,
             branch=None, review=None, reviewBy=None, reviewOpinion=None,
-            reviewDiff=None, childExecutionId=None)
+            reviewDiff=None, childExecutionId=None, childToolResults=None)
     return cleaned
 
 

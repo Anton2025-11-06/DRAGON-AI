@@ -73,8 +73,8 @@ async def submit_execution(request: Request, body: WorkflowSubmitReq,
 
         result = await WorkflowExecutionService.submit(
             body,
-            user_id=get_client_ip(request) if request.headers.__contains__("X-Workflow-Token") else await get_user_id(
-                request),
+            user_id=None if request.headers.__contains__("X-Workflow-Token") else await get_user_id(request),
+            ip=get_client_ip(request),
             trigger_type="API" if request.headers.__contains__("X-Workflow-Token") else "DEBUG",
             retry_times=retry_times
         )
@@ -137,7 +137,7 @@ async def submit_execution_ws(websocket: WebSocket):
         websocket.scope["login_user"] = login_user
         body = WorkflowSubmitReq(**data)
         result = await WorkflowExecutionService.submit(
-            body, websocket=websocket, user_id=await get_user_id(websocket),
+            body, websocket=websocket, user_id=await get_user_id(websocket), ip=get_client_ip(websocket),
             trigger_type="DEBUG")
         status = 200
         await stop_ws_event_channel(websocket)

@@ -28,7 +28,7 @@ from service.service_workflow.workflow_engine.model_client import (
 )
 from service.service_workflow.workflow_engine.nodes.base import (
     APPROVAL_SCOPE_DOWNSTREAM, AwaitingApproval, BaseNodeExecutor,
-    NodeExecutionError, NodeResult, file_url, issue,
+    EMIT_TOOL_RESULT_KEY, NodeExecutionError, NodeResult, file_url, issue,
 )
 # 子工作流调用核与【工作流】节点共用一份实现（本包内模块，无 service 依赖，不会成环）
 from service.service_workflow.workflow_engine.nodes.subworkflow_nodes import (
@@ -69,6 +69,18 @@ def _coerce_type(json_type: str) -> str:
 
 def _dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _workflow_tool_cache_key(workflow_id, inputs: dict) -> str:
+    """工作流工具一次调用的去重键：子工作流 id + 规范化后的入参。
+
+    同一个 LLM 节点里，模型对同一子工作流以同一组参数反复调用时应复用已跑完的那份
+    子执行（见 invoke_child_workflow 的 cache_key），不能让带审批的子流程每调一次就
+    再要一遍审批。键取排序后的入参 JSON，与调用处 coerce_constant 之后的值同口径。
+    """
+    canonical = json.dumps(inputs or {}, sort_keys=True,
+                           ensure_ascii=False, default=str)
+    return f"{workflow_id}:{canonical}"
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -144,8 +156,8 @@ class LLMNodeExecutor(BaseNodeExecutor):
       向量输入(inputVariable)、重排(queryVariable/documentsVariable) —— 均支持 {{节点.变量}} 引用；
     - 对话类可选 Vision（visionEnabled + imageVariables → user 消息拼多模态 content，
       每项按 _ref_list 解析：变量引用/文件数组/直接 URL）；
-    - 下游输出：文本类产出 text、向量类产出 vectors/dimension、重排产出 scores、
-      生成类产出 url/urls，供下游节点参数引用。
+    - 下游输出：只写节点配置的输出变量本身（默认 output）+ 不重复的辅助键
+      （reasoning/usage/structured/toolCalls 等），不再另写同值别名键。
     - 模型调用参数（温度/max_tokens 等）在 12 类上都不占节点字段：全部来自模型管理
       「常用参数」（tb_model.model_params）+ 节点 params 覆盖，合并后由 common_model 注入；
     - 支持 stream 的三类（文生文/图片理解/视频理解）流式逐 token 发 node.delta；
@@ -232,7 +244,7 @@ class LLMNodeExecutor(BaseNodeExecutor):
             result = await self._invoke_typed(ctx, inst, category, output_var, cfg)
         if mem_warning:
             result.output["memoryWarning"] = mem_warning
-        self._record_memory(result.output)
+        self._record_memory(result.output, output_var)
         return result
 
     async def _invoke_typed(self, ctx, inst, category, output_var, cfg) -> NodeResult:
@@ -272,27 +284,23 @@ class LLMNodeExecutor(BaseNodeExecutor):
             raw = "\n".join(str(x) for x in raw)
         return (ctx.render(str(raw)) if raw else "").strip()
 
-    def _record_memory(self, output: dict) -> None:
+    def _record_memory(self, output: dict, output_var: str) -> None:
         """把本轮问答写回 node_states；未开记忆（`_memory_user` 为 None）直接跳过。
 
         节点失败时走不到这里（execute 抛异常），因此不会在历史里留下「助手答了个空」
         这种会把后续轮带偏的记录。
+
+        助手侧只读配置的输出变量（别名键已不再写入），列表形态（生成类的 url 数组）取首个。
         """
         if self._memory_user is None:
             return
-        assistant = ""
-        for key in ("text", "url"):
-            value = (output or {}).get(key)
-            if isinstance(value, str) and value:
-                assistant = value
-                break
-        else:
-            urls = (output or {}).get("urls")
-            if isinstance(urls, (list, tuple)) and urls:
-                assistant = str(urls[0])
+        value = (output or {}).get(output_var)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        assistant = str(value) if value else ""
         memory.append_round(self.runtime.node_states.get(self.node.id),
                             self.runtime.round, self._memory_user, assistant,
-                            # 循环体/迭代体/并行分支内的节点每轮覆盖：一个 LOOP 跑 3 轮就把
+                            # 循环体/并行分支内的节点每轮覆盖：一个 LOOP 跑 3 轮就把
                             # limit=10 的额度用掉 6 条同一轮的历史，真正跨轮的信息反而被顶掉
                             overwrite=memory.is_compound_body(self.graph, self.node.id))
 
@@ -381,7 +389,8 @@ class LLMNodeExecutor(BaseNodeExecutor):
         if usage:
             self.runtime.bump_usage(usage.get("prompt_tokens", 0),
                                     usage.get("completion_tokens", 0))
-        output = {output_var: full_text, "text": full_text}
+        # 只填配置的输出变量：不再写 text 别名（与 output 同值，客户端会多一行重复数据）
+        output = {output_var: full_text}
         if reasoning:
             output["reasoning"] = reasoning
         if usage:
@@ -505,30 +514,29 @@ class LLMNodeExecutor(BaseNodeExecutor):
     # ---------- 产出映射为下游可引用变量 ----------
 
     def _map_output(self, category, r: ModelResult, output_var) -> dict:
+        """按能力类型映射产出：结果只填进配置的输出变量，不再写同值别名键。
+
+        保留的是不重复的辅助键（reasoning/usage/count/dimension/url）；
+        count/dimension 是向量长度信息，url 是多图时的首图快捷取法，都不是主值的副本。
+        """
         out: dict = {}
         if category in (MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR, MT_AUDIO_TO_TEXT):
             out[output_var] = r.content
-            out["text"] = r.content
             if r.reasoning_content:
                 out["reasoning"] = r.reasoning_content
         elif category in (MT_TEXT_EMBEDDING, MT_IMAGE_EMBEDDING, MT_MULTIMODAL_EMBEDDING):
             vectors = r.vectors or []
             out[output_var] = vectors
-            out["vectors"] = vectors
             out["count"] = len(vectors)
             out["dimension"] = len(vectors[0]) if vectors else 0
         elif category == MT_TEXT_RERANK:
             out[output_var] = r.scores or []
-            out["scores"] = r.scores or []
         elif category == MT_TEXT_TO_IMAGE:
             urls = r.urls or ([r.url] if r.url else [])
             out[output_var] = urls
-            out["urls"] = urls
             out["url"] = urls[0] if urls else None
         elif category in (MT_TEXT_TO_VIDEO, MT_IMAGE_TO_VIDEO):
             out[output_var] = r.url
-            out["url"] = r.url
-            out["video_url"] = r.url
         elif category == MT_TEXT_TO_AUDIO:
             # 不同厂商 TTS 返回形态不同：通义 qwen-tts 返回远程 url，智谱 glm-tts 直接返回音频字节流。
             # 无 url 但有二进制时，编码为 base64 data URI，保证下游/前端拿到可直接播放的 audio 源。
@@ -539,8 +547,6 @@ class LLMNodeExecutor(BaseNodeExecutor):
                 audio_url = "data:audio/{};base64,{}".format(
                     fmt, base64.b64encode(r.audio_bytes).decode())
             out[output_var] = audio_url
-            out["url"] = audio_url
-            out["audio_url"] = audio_url
         if r.usage:
             out["usage"] = {"inputTokens": r.usage.get("prompt_tokens"),
                             "outputTokens": r.usage.get("completion_tokens")}
@@ -820,7 +826,6 @@ class LLMNodeExecutor(BaseNodeExecutor):
                                  "tool_call_id": str(call.get("id") or ""),
                                  "content": tool_text})
         output[output_var] = full_text
-        output["text"] = full_text
         if reasoning:
             output["reasoning"] = reasoning
         if usage:
@@ -902,10 +907,10 @@ class LLMNodeExecutor(BaseNodeExecutor):
         call_log.append({"name": real_name, "kind": kind, "arguments": args,
                          "round": rounds, "result": payload, "error": item_error})
         await self._emit_tool_result(call_id, real_name, kind, rounds, payload, item_error)
-        if self.cfg("emitToolResult") and item_error is None:
-            # 需求 8：只有勾选「输出工具调用结果」才把结果作为可见内容 emit；
-            # emit_delta 自带节点级「返回内容」开关判定，关掉广播时这里自然也不发
-            await self.emit_delta(f"{text}\n", reasoning=False)
+        # if self.cfg("emitToolResult") and item_error is None:
+        #     # 需求 8：只有勾选「输出工具调用结果」才把结果作为可见内容 emit；
+        #     # emit_delta 自带节点级「返回内容」开关判定，关掉广播时这里自然也不发
+        #     await self.emit_delta(f"{text}\n", reasoning=False)
         return text
 
     async def _call_bound_tool(self, ctx, spec: dict, args: dict):
@@ -935,13 +940,14 @@ class LLMNodeExecutor(BaseNodeExecutor):
         # 类型回正：开始节点只校验必填不转类型（见 StartNodeExecutor），模型把数字
         # 写成 "3" 就得在这里按装配时记下的字段类型转好，否则子流程里的数值判断会跑偏
         types = spec.get("param_types") or {}
+        child_inputs = {k: py_sandbox.coerce_constant(v, types.get(k, "string"))
+                        for k, v in (args or {}).items()}
         payload = await invoke_child_workflow(
             workflow_id=int(spec["workflow_id"]),
             api_key_id=int(spec.get("api_key_id") or 0),
             cfg=spec["binding"], runtime=self.runtime, node_id=self.node.id,
-            label=self.node.label, output_var="result",
-            inputs={k: py_sandbox.coerce_constant(v, types.get(k, "string"))
-                    for k, v in (args or {}).items()})
+            label=self.node.label, output_var="result", inputs=child_inputs,
+            cache_key=_workflow_tool_cache_key(int(spec["workflow_id"]), child_inputs))
         return {"result": payload.get("result"), "text": payload.get("text")}
 
     async def _replay_resumed_child(self, messages: list, specs: dict,
@@ -1009,8 +1015,8 @@ class LLMNodeExecutor(BaseNodeExecutor):
                                    resumed=True)
         await self._emit_tool_result(call_id, real_name, TOOL_KIND_WORKFLOW, 0, payload,
                                      None, resumed=True)
-        if self.cfg("emitToolResult"):
-            await self.emit_delta(f"{text}\n", reasoning=False)
+        # if self.cfg("emitToolResult"):
+        #     await self.emit_delta(f"{text}\n", reasoning=False)
 
     @staticmethod
     def _workflow_tool_spec(specs: dict, workflow_id):
@@ -1047,12 +1053,15 @@ class LLMNodeExecutor(BaseNodeExecutor):
 
     async def _emit_tool_result(self, call_id: str, tool_name: str, kind: str,
                                 rounds: int, payload, error,
-                                resumed: bool = False) -> None:
+                                resumed: bool = False,
+                                ) -> None:
         await self.runtime.emit("node.tool_result", nodeId=self.node.id,
                                 toolCallId=call_id, toolName=tool_name, toolKind=kind,
                                 round=rounds, error=error, resumed=resumed,
                                 result=_truncate(_dumps(payload),
-                                                 self.TOOL_EVENT_SUMMARY_CHARS))
+                                                 self.TOOL_EVENT_SUMMARY_CHARS)
+                                if self.cfg(EMIT_TOOL_RESULT_KEY) else None
+                                )
 
     @staticmethod
     def validate_node(node, graph) -> list:

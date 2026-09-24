@@ -52,6 +52,7 @@ class NewRun:
     inputs: dict
     round_request: RoundRequest
     user_id: int = 0
+    ip: str = ''
     parent_exec_id: Optional[str] = None
     parent_node_id: Optional[str] = None
 
@@ -240,7 +241,7 @@ class ExecutionStateStore:
                 variables=ExecutionStateStore.encode_variables(
                     run.round_request, PauseState(FIRST_GENERATION)),
                 graph_hash=run.graph_hash, pause_generation=FIRST_GENERATION,
-                user_id=run.user_id, parent_exec_id=run.parent_exec_id,
+                user_id=run.user_id, ip=run.ip, parent_exec_id=run.parent_exec_id,
                 parent_node_id=run.parent_node_id, started_at=datetime.now()))
             await session.commit()
         return FIRST_GENERATION
@@ -329,8 +330,8 @@ class ExecutionStateStore:
 
     @staticmethod
     async def change_pause_state(execution_id: str,
-                                apply_change: Callable[[PauseState], Any],
-                                only_while_paused: bool = True) -> Optional[PauseState]:
+                                 apply_change: Callable[[PauseState], Any],
+                                 only_while_paused: bool = True) -> Optional[PauseState]:
         """在同一事务里改这份挂起事实再写回；回调返回假值即不落库。
 
         :param only_while_paused: 行已不在 PAUSED（终态或已被推起）时不写，
@@ -352,8 +353,8 @@ class ExecutionStateStore:
 
     @staticmethod
     async def wake_to_running(execution_id: str,
-                             expected_generation: Optional[int] = None,
-                             reset_node_ids: Optional[list] = None) -> int:
+                              expected_generation: Optional[int] = None,
+                              reset_node_ids: Optional[list] = None) -> int:
         """把这条执行推回 RUNNING 并推进代次，返回新代次；抢不到返回 0。
 
         同一事务里清掉本轮不再有效的事实：上轮结论与待办清单，以及 reset_node_ids

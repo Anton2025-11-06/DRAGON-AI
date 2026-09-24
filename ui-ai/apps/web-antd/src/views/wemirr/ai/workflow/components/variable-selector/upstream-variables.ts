@@ -592,49 +592,12 @@ export function nodeOutputVariables(
     }
 
     case 'HTTP_REQUEST': {
-      variables.push(
-        {
-          name: config.outputVariable || 'response',
-          type: 'object',
-          description: 'HTTP 响应',
-        },
-        {
-          name: 'status',
-          type: 'number',
-          description: 'HTTP 状态码',
-        },
-        {
-          name: 'headers',
-          type: 'object',
-          description: '响应头',
-        },
-        {
-          name: 'body',
-          type: 'object',
-          description: '响应体',
-        },
-      );
-      break;
-    }
-
-    case 'ITERATION': {
-      variables.push(
-        {
-          name: config.outputVariable || 'results',
-          type: 'array',
-          description: '迭代结果数组',
-        },
-        {
-          name: 'item',
-          type: 'object',
-          description: '当前迭代元素',
-        },
-        {
-          name: 'index',
-          type: 'number',
-          description: '当前迭代索引',
-        },
-      );
+      // 与后端 HttpRequestNodeExecutor 对齐：状态码/响应体都装在输出变量这个对象里
+      variables.push({
+        name: config.outputVariable || 'response',
+        type: 'object',
+        description: 'HTTP 响应（statusCode / body）',
+      });
       break;
     }
 
@@ -672,7 +635,8 @@ export function nodeOutputVariables(
       });
       if (config.structuredOutput?.enabled) {
         variables.push({
-          name: 'structured_output',
+          // 后端写入的键名就是 structured
+          name: 'structured',
           type: 'object',
           description: '结构化输出',
         });
@@ -680,18 +644,30 @@ export function nodeOutputVariables(
       break;
     }
 
+    case 'LOOP': {
+      // 与后端 LoopNodeExecutor 对齐：循环体输出聚合 + 循环计数变量
+      variables.push(
+        {
+          name: config.outputVariable || 'loopResult',
+          type: 'object',
+          description: '循环体本轮各节点的输出聚合',
+        },
+        {
+          name: config.loopVariable || 'loopIndex',
+          type: 'number',
+          description: '已执行的循环轮数',
+        },
+      );
+      break;
+    }
+
     case 'MCP_TOOL': {
-      // 与后端 McpToolNodeExecutor 输出对齐：主变量 + content/urls
+      // 与后端 McpToolNodeExecutor 输出对齐：主变量（结构化输出优先，否则文本）+ urls
       variables.push(
         {
           name: config.outputVariable || 'result',
           type: 'object',
           description: 'MCP 工具结果（结构化输出优先，否则文本内容）',
-        },
-        {
-          name: 'content',
-          type: 'string',
-          description: 'MCP 返回的文本内容',
         },
         {
           name: 'urls',

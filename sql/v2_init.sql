@@ -441,6 +441,7 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `parent_exec_id`   VARCHAR(36)           DEFAULT NULL COMMENT '父执行ID（【工作流】节点发起的子执行）',
   `parent_node_id`   VARCHAR(64)           DEFAULT NULL COMMENT '父执行中发起本子执行的节点ID',
   `user_id`          INT          NOT NULL DEFAULT 0 COMMENT '执行人',
+  `ip`           VARCHAR(64)            COMMENT '客户端IP',
   `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
   KEY `idx_exec_wf` (`workflow_id`, `create_time`),

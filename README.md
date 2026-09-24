@@ -38,7 +38,7 @@
 ### 3. 工作流 / 智能体编排
 
 - **可视化画布**：`{nodes, edges}` 编辑、草稿 / 发布 / 版本快照 / 回滚 / 复制、发布前严格图校验（连通性、端口、必填参数、环路）
-- **22 类节点**：边界（START/END）、AI（LLM / 问题分类器 / 参数提取器）、控制流（IF_ELSE / LOOP / ITERATION / PARALLEL / 变量赋值 / 变量聚合 / 指定回复 / **审批**）、数据（模板 / 代码 / 列表处理 / 文档提取 / 知识检索）、外部（HTTP / 工具 / MCP 工具 / **子工作流**）
+- **21 类节点**：边界（START/END）、AI（LLM / 问题分类器 / 参数提取器）、控制流（IF_ELSE / LOOP / PARALLEL / 变量赋值 / 变量聚合 / 指定回复 / **审批**）、数据（模板 / 代码 / 列表处理 / 文档提取 / 知识检索）、外部（HTTP / 工具 / MCP 工具 / **子工作流**）
 - **执行契约收敛为三个概念**：`executionId`（一次执行的全部身份）、`pendingApprovals`（当前欠的审批）、`submit`（唯一入口的唯一动作）。首跑、续跑、重跑、答审批都是同一个 `POST /workflow-executions/submit`
 - **人工审批（含嵌套）**：审批节点在节点边界挂起等结论，快照落库、跨进程恢复；子工作流的审批会冒泡到主执行，`approvalToken` 一次性凭据
 - **实时事件**：WebSocket（预览页同步驱动）+ SSE（第三方长连接）+ DB 回放，帧带 `pauseGeneration` 代次防串台
@@ -69,7 +69,7 @@
 | 登录注册 | `service_login` :9004 | 登录 / 注册 / 登出 / 刷新令牌（滑动续期）、JWT + Redis 会话 |
 | 业务网关 | `service_gateway` :18000 | 服务路由转发（Nacos 发现）、JWT 鉴权、模块限流、操作日志、trace-id、API Key 鉴权翻译 |
 | AI 模型网关 | `service_gateway` | `/api/model` OpenAI 兼容入口、12 类能力分发、流式透传、双层限流 |
-| 工作流编排 | `service_workflow` :9003 | 画布、22 类节点、submit 契约、审批与嵌套、SSE/WS、快照恢复、超时与看门狗、记忆、工具/MCP/技能/沙箱、模板、API Key 开放 |
+| 工作流编排 | `service_workflow` :9003 | 画布、21 类节点、submit 契约、审批与嵌套、SSE/WS、快照恢复、超时与看门狗、记忆、工具/MCP/技能/沙箱、模板、API Key 开放 |
 | 异步执行 | `arq_tasks` | 分片队列、多进程 worker、健康上报、幂等投递 |
 | 统一存储 | `common_storage` | 本地 / 阿里云 OSS 双实现、预签名 URL、无盘化读写 |
 | 前端 | `ui-ai` :5666 | vben v5 单页应用：以上全部模块的界面 |

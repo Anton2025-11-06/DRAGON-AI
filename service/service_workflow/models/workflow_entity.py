@@ -91,6 +91,7 @@ class WorkflowExecution(Base):
     parent_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True,
                                                           comment="父执行中发起本子执行的节点ID")
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ip: Mapped[str] = mapped_column(String(64), nullable=True)
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 

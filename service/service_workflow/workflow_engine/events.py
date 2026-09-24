@@ -23,7 +23,8 @@ SSE 帧格式：event: {type}\ndata: {json}\n\n（前端 runtime-events.ts 按�
 node.tool_call / node.tool_result 由大模型节点插入工具后补发（见
 nodes/ai_nodes.py::_emit_tool_call/_emit_tool_result）：前者是模型要求调哪个工具、
 传了什么参数，后者是这一次调用的结果摘要（按 TOOL_EVENT_SUMMARY_CHARS 截断，
-完整结果在节点输出的 toolCalls 里）。两者靠 payload 的 toolCallId 配对。payload 的
+完整结果在节点输出的 toolCalls 里；不勾 emitToolResult 时事件不带摘要，父侧取
+子执行结果也看不到那份返回值）。两者靠 payload 的 toolCallId 配对。payload 的
 toolName 就是工具登记时的真实名称（工具名不做字符归一；只有重名时引擎内部注册表
 会另用带来路前缀的 key 占位，那个名字不外泄）。
 不受节点「返回内容」开关（emitOutput）约束——那是给面向业务的输出内容用的，这两个

@@ -46,7 +46,6 @@ import EndNodeForm from './node-forms/EndNodeForm.vue';
 import HttpNodeForm from './node-forms/HttpNodeForm.vue';
 // 节点配置表单组件 - 控制流节点
 import IfElseNodeForm from './node-forms/IfElseNodeForm.vue';
-import IterationNodeForm from './node-forms/IterationNodeForm.vue';
 import KnowledgeNodeForm from './node-forms/KnowledgeNodeForm.vue';
 import ListOperatorNodeForm from './node-forms/ListOperatorNodeForm.vue';
 // 节点配置表单组件 - 智能体节点
@@ -128,7 +127,6 @@ const iconComponents: Record<NodeType, Component> = {
   APPROVAL: SafetyCertificateOutlined,
   IF_ELSE: BranchesOutlined,
   LOOP: SyncOutlined,
-  ITERATION: SyncOutlined,
   PARALLEL: ApartmentOutlined,
   VARIABLE_AGGREGATOR: ApartmentOutlined,
   // 能力节点
@@ -161,7 +159,6 @@ const nodeConfigForms: Partial<Record<NodeType, Component>> = {
   // 控制流节点
   APPROVAL: ApprovalNodeForm,
   IF_ELSE: IfElseNodeForm,
-  ITERATION: IterationNodeForm,
   VARIABLE_AGGREGATOR: VariableAggregatorNodeForm,
   LOOP: LoopNodeForm,
   PARALLEL: ParallelNodeForm,

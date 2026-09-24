@@ -66,7 +66,7 @@ def supports_category(category: str) -> bool:
 
 
 def is_compound_body(graph, node_id: str) -> bool:
-    """节点是否落在 LOOP/ITERATION/PARALLEL 的子图里（子图内记忆每轮覆盖）。
+    """节点是否落在 LOOP/PARALLEL 的子图里（子图内记忆每轮覆盖）。
 
     子图成员关系靠拓扑算（画布没有父子字段），每次模型调用都重算一遍太浪费，
     结果缓存在图上（graph 本身与图数据同生命周期，不会失效）。
@@ -138,7 +138,7 @@ def append_round(state, round_no: int, user_text: Optional[str],
     退化为「已有最大 round + 1」，保证同一节点内单调递增——排序键坏掉的话，
     WORKFLOW 范围聚合出来的对话顺序就会乱。
 
-    overwrite：LOOP/ITERATION 体内的节点用覆写（一次循环里同一节点跑 N 轮，
+    overwrite：LOOP 体内的节点用覆写（一次循环里同一节点跑 N 轮，
     追加会把额度刷完）；主干节点始终追加。
     """
     if state is None:

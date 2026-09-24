@@ -39,7 +39,7 @@
 ### 1.3 Workflow / agent orchestration
 
 - **Visual canvas**: `{nodes, edges}` editing, draft / publish / version snapshot / rollback / duplicate, strict graph validation before publish (reachability, ports, required params, cycles)
-- **22 node types**: boundary (START/END), AI (LLM / question classifier / parameter extractor), control (IF_ELSE / LOOP / ITERATION / PARALLEL / variable assigner / aggregator / reply / **approval**), data (template / code / list operator / document extractor / knowledge retrieval), external (HTTP / tool / MCP tool / **sub-workflow**)
+- **21 node types**: boundary (START/END), AI (LLM / question classifier / parameter extractor), control (IF_ELSE / LOOP / PARALLEL / variable assigner / aggregator / reply / **approval**), data (template / code / list operator / document extractor / knowledge retrieval), external (HTTP / tool / MCP tool / **sub-workflow**)
 - **The execution contract has exactly three concepts**: `executionId` (the whole identity of one run), `pendingApprovals` (approvals currently owed), `submit` (the only action on the only entry point). First run, continue, re-run and answering an approval are all the same `POST /workflow-executions/submit`
 - **Human approval (nested)**: an approval node suspends at the node boundary; snapshots persist and recovery works across processes; a sub-workflow's approval bubbles up to the parent run, answered with a one-shot `approvalToken`
 - **Real-time events**: WebSocket (drives the preview page synchronously) + SSE (third-party long connection) + DB replay; every frame carries `pauseGeneration` so generations never interleave
@@ -70,7 +70,7 @@
 | Login / register | `service_login` :9004 | Login / register / logout / token refresh (sliding expiry), JWT + Redis session |
 | Business gateway | `service_gateway` :18000 | Route forwarding (Nacos discovery), JWT auth, module rate limiting, audit log, trace-id, API-key translation |
 | AI model gateway | `service_gateway` | `/api/model` OpenAI-compatible entry, 12-type dispatch, streaming passthrough, two-layer quotas |
-| Workflow orchestration | `service_workflow` :9003 | Canvas, 22 node types, submit contract, nested approval, SSE/WS, snapshot recovery, timeouts & watchdog, memory, tool/MCP/skill/sandbox, templates, API-key serving |
+| Workflow orchestration | `service_workflow` :9003 | Canvas, 21 node types, submit contract, nested approval, SSE/WS, snapshot recovery, timeouts & watchdog, memory, tool/MCP/skill/sandbox, templates, API-key serving |
 | Async execution | `arq_tasks` | Sharded queues, multi-process workers, health reporting, idempotent enqueue |
 | Storage abstraction | `common_storage` | Local + Aliyun OSS, presigned URLs, diskless byte transfer |
 | Front end | `ui-ai` :5666 | vben v5 SPA covering every module above |

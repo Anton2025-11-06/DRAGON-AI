@@ -100,8 +100,10 @@ def build_node_definitions() -> list[dict]:
         "LLM", "大模型", "按模型能力类型调用（支持全部 12 类：文生文/向量/重排/图文理解/OCR/图像音视频生成等）", "ai", "Robot", "#1677ff",
         form_component="LlmNodeForm",
         required_fields=["modelId"],
-        output_variables=["output", "text", "reasoning", "usage", "memoryWarning",
-                          "toolCalls", "vectors", "scores", "urls", "url"],
+        # 只声明执行器真实写入的键：配置的输出变量（默认 output）+ 非重复的辅助键。
+        # 不再声明与输出变量同值的别名（text/url/urls/vectors/scores）。
+        output_variables=["output", "reasoning", "usage", "memoryWarning",
+                          "toolCalls", "structured"],
         fields=[
             _field("modelId", "模型", "ModelSelect", "number", True, None, "", "模型广场中启用的模型（能力类型决定入参形态）"),
             _field("systemPrompt", "系统提示词", "Textarea", "string", False, ""),
@@ -134,7 +136,8 @@ def build_node_definitions() -> list[dict]:
             _field("tools", "工具", "LlmToolList", "array", False, [],
                    "仅文生文且模型登记了 supports_function_call 时生效：插入 MCP 连接 / 工具 / 工作流"),
             _field("emitToolResult", "输出工具结果", "Switch", "boolean", False, False,
-                   "勾选后把工具调用结果作为内容一并流给客户端；不勾只记节点输出与调试事件"),
+                   "勾选后把工具调用结果作为内容一并流给客户端，【工作流】/LLM 工具取子流结果时也带着它；"
+                   "不勾只记节点输出与调试事件"),
             _field("structuredOutput", "结构化输出", "StructuredOutputForm", "object", False,
                    {"enabled": False}),
             # 记忆（需求 1）：历史存在 node_states[nid].llmMessages，跨轮（同一 execution_id）生效。
@@ -215,27 +218,12 @@ def build_node_definitions() -> list[dict]:
         outputs=[_port("branch:body", "循环体", "output"), _port("output", "退出", "output")],
         form_component="LoopNodeForm",
         required_fields=["exitCondition"],
-        output_variables=["loopResult", "iterations"],
+        output_variables=["loopResult", "loopIndex"],
         fields=[
             _field("exitCondition", "退出条件", "ExpressionInput", "string", True,
                    "{{flag}} == true", "", "支持 true/false 或简单比较表达式"),
             _field("maxIterations", "最大迭代", "InputNumber", "number", False, 1000),
             _field("loopVariable", "循环变量名", "Input", "string", False, "loopIndex"),
-        ],
-    ))
-    defs.append(_def(
-        "ITERATION", "迭代", "对数组逐元素执行子图（体内用 {{item}}/{{index}}）", "control", "RetweetOutlined", "#2f54eb",
-        outputs=[_port("branch:body", "迭代体", "output"), _port("output", "汇总", "output")],
-        form_component="IterationNodeForm",
-        required_fields=["arrayVariable"],
-        output_variables=["items", "count"],
-        fields=[
-            _field("arrayVariable", "数组变量", "VariableSelect", "string", True),
-            _field("processingMode", "处理模式", "Select", "string", False, "SEQUENTIAL",
-                   options=[("SEQUENTIAL", "顺序"), ("PARALLEL", "并行")]),
-            _field("parallelCount", "并行数", "InputNumber", "number", False, 3),
-            _field("iterationTimeout", "单次超时(ms)", "InputNumber", "number", False, 0),
-            _field("maxIterations", "最大迭代", "InputNumber", "number", False, 1000),
         ],
     ))
     defs.append(_def(
@@ -387,7 +375,8 @@ def build_node_definitions() -> list[dict]:
         "HTTP_REQUEST", "HTTP 请求", "调用外部 HTTP 接口", "external", "ApiOutlined", "#d4380d",
         form_component="HttpRequestNodeForm",
         required_fields=["url"],
-        output_variables=["response", "statusCode", "body"],
+        # 响应体/状态码在 output 变量这个对象里，顶层只剩耗时一个辅助键
+        output_variables=["response", "duration"],
         fields=[
             _field("url", "请求地址", "Input", "string", True, "",
                    rules=[{"type": "url", "value": None, "message": "请输入合法 URL"}]),
@@ -425,7 +414,7 @@ def build_node_definitions() -> list[dict]:
         "CloudServerOutlined", "#0e7fa8",
         form_component="McpNodeForm",
         required_fields=["mcpServerId", "toolName"],
-        output_variables=["result", "content", "urls"],
+        output_variables=["result", "urls"],
         fields=[
             _field("mcpServerId", "MCP 连接", "McpServerSelect", "number", True),
             _field("toolName", "MCP 工具", "McpToolSelect", "string", True,

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from common.common_log.log_init import log
 from service.service_workflow.workflow_engine import py_sandbox
 from service.service_workflow.workflow_engine.context import ExecutionContext
 from service.service_workflow.workflow_engine.nodes.approval_nodes import (
@@ -180,7 +181,8 @@ def parent_approver_identity(runtime) -> Optional[list]:
 async def invoke_child_workflow(
     *, workflow_id: int, api_key_id: int, cfg: dict, runtime, node_id: str,
     label: str, output_var: str, inputs: Optional[dict] = None,
-    resumed_child_id: Optional[str] = None) -> dict:
+    resumed_child_id: Optional[str] = None,
+    cache_key: Optional[str] = None) -> dict:
     """执行（或取回）一次子工作流，返回父节点输出 payload。
 
     子流程 PAUSED → 把 childExecutionId 记进父节点状态后抛 AwaitingApproval，
@@ -188,6 +190,10 @@ async def invoke_child_workflow(
 
     resumed_child_id 非空即恢复轮：只按 id 取结果、绝不重新起一份子执行。inputs
     只在首跑时需要（恢复轮上轮已解析过，本轮再解析可能被未执行分支卡住）。
+
+    cache_key(子workflow_id + 子inputs) 非空即 LLM 工具路径：本节点已用同一组入参起过子执行时直接复用那份
+    结果（当恢复轮取），不重起——否则带审批的子流程每次重调都会再要一遍审批。
+    首跑起出新子执行后按 cache_key 记下它的 id，供后续同参调用命中。
     """
     from service.service_workflow.services.workflow_execution_service import (
         WorkflowExecutionService,
@@ -197,10 +203,31 @@ async def invoke_child_workflow(
         STATUS_CANCELLED, STATUS_COMPLETED, STATUS_PAUSED,
     )
 
+    state = runtime.node_states.get(node_id)
+
     child_id = resumed_child_id
+    # 同参复用：LLM 工具带了 cache_key，本节点此前已用同一组入参起过一份子执行，
+    # 就把它当恢复轮直接取那份结果，绝不重起
+    if not child_id and cache_key and state is not None:
+        child_id = (state.childToolResults or {}).get(cache_key)
+
+    result = None
     if child_id:
-        result = await WorkflowExecutionService.get_child_result(child_id)
-    else:
+        try:
+            result = await WorkflowExecutionService.get_child_result(child_id)
+        except ValueError as e:
+            # 缓存指向的子执行已不存在（被清理）：作废这条缓存，按首跑重起一份；
+            # 恢复轮（resumed_child_id）取不到就是真错，不能默默重跑，直接上抛
+            if not resumed_child_id and cache_key and state is not None:
+                log.warning("workflow tool cache stale exec={} node={} child={}: {}",
+                            runtime.execution_id, node_id, child_id, e)
+                if isinstance(state.childToolResults, dict):
+                    state.childToolResults.pop(cache_key, None)
+                child_id = None
+            else:
+                raise
+
+    if not child_id:
         await check_api_key(int(api_key_id), workflow_id, label)
         version = await resolve_version(workflow_id, cfg, label)
         result = await WorkflowExecutionService.run_child(
@@ -209,13 +236,17 @@ async def invoke_child_workflow(
             parent_node_id=node_id,
             approver_identity=parent_approver_identity(runtime))
         child_id = result["executionId"]
+        # 记下这份子执行：同参数的再次调用直接复用它的终态结果
+        if cache_key and state is not None:
+            if not isinstance(state.childToolResults, dict):
+                state.childToolResults = {}
+            state.childToolResults[cache_key] = child_id
 
     status = result.get("status")
     if status == STATUS_COMPLETED:
         return child_output_payload(result.get("outputs"), output_var)
     if status == STATUS_PAUSED:
         # 子流程卡在审批：父节点跟着在节点边界挂起（本轮拿不到子流程的终态）
-        state = runtime.node_states.get(node_id)
         if state is not None:
             state.childExecutionId = child_id
         raise AwaitingApproval(

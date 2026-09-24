@@ -295,7 +295,7 @@ class WorkflowGraph:
         return seen
 
     def compound_body_node_ids(self) -> set[str]:
-        """复合节点子图（LOOP/ITERATION 循环体、PARALLEL 分支体）内的节点 id 集合。
+        """复合节点子图（LOOP 循环体、PARALLEL 分支体）内的节点 id 集合。
 
         画布上没有父子节点字段，子图成员关系完全由拓扑决定：从复合节点的 branch:*
         端口出边出发正向可达，回边（指回复合节点自身）即止。output 端口是复合节点的
@@ -303,7 +303,7 @@ class WorkflowGraph:
         """
         result: set[str] = set()
         for n in self.nodes:
-            if n.type not in ("LOOP", "ITERATION", "PARALLEL"):
+            if n.type not in ("LOOP", "PARALLEL"):
                 continue
             for edge in self.get_out_edges(n.id):
                 if not is_branch_handle(edge.source_handle):
@@ -324,12 +324,12 @@ class WorkflowGraph:
         简化实现：普通环（不含 LOOP 回边）返回 True。"""
         WHITE, GRAY, BLACK = 0, 1, 2
         color = {n.id: WHITE for n in self.nodes}
-        loop_nodes = {n.id for n in self.nodes if n.type in ("LOOP", "ITERATION")}
+        loop_nodes = {n.id for n in self.nodes if n.type in ("LOOP",)}
 
         def dfs(nid: str) -> bool:
             color[nid] = GRAY
             for e in self.get_out_edges(nid):
-                # LOOP 体回边：目标是 LOOP/ITERATION 节点本身 → 语义环，豁免
+                # LOOP 体回边：目标是 LOOP 节点本身 → 语义环，豁免
                 if e.target in loop_nodes and nid not in loop_nodes:
                     continue
                 if color.get(e.target) == GRAY:

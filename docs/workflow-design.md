@@ -223,9 +223,9 @@ result.branch_id 非空 → 匹配 "branch:{id}" 端口出边；否则匹配 "ou
 
 `_is_reachable`（:372）是**动态可达性分析**：基于"已执行的决策"（_completed_with_branch）判断未激活分支上的节点是否还可能到达，避免未执行分支把汇聚节点永久阻塞。环保守视为可达。
 
-### 5.6 复合节点子图（LOOP/ITERATION/PARALLEL）
+### 5.6 复合节点子图（LOOP/PARALLEL）
 
-- `run_subgraph(entry, exit, scope_vars)`（:430）：执行 entry 起始子图。**每轮进入前 `_reset_subgraph_nodes` 重置子图完成状态**（否则"已完成跳过"守卫会让循环体只跑一次）。`scope_vars` 压栈（ITERATION 的 item/index）。
+- `run_subgraph(entry, exit)`（:430）：执行 entry 起始子图。**每轮进入前 `_reset_subgraph_nodes` 重置子图完成状态**（否则"已完成跳过"守卫会让循环体只跑一次）。
 - `run_branches(node, branch_ids, wait_strategy)`（:490）：PARALLEL 并行分支，ALL/ANY/FIRST 等待策略，超时取消 pending。**分支内异常必须上抛**（:537-541，否则并行节点"假成功"）。
 - **自死锁防御**（三处注释都在讲这个坑）：`_wait_running`/`run_subgraph`/`run_branches` 等待的都是"进入时刻快照之后**衍生**的任务"（`preexisting = set(self._running_tasks)`），因为复合节点自身以 task 形式在 `_running_tasks` 里，且 `asyncio.current_task()` 在 wait_for 内层拿到的不是外层调度 task——凭"非自身"过滤必漏祖先 → 死锁。**二开改等待逻辑时必须沿用快照排除法**。
 
@@ -242,7 +242,7 @@ result.branch_id 非空 → 匹配 "branch:{id}" 端口出边；否则匹配 "ou
 ```
 global   工作流级全局变量（VARIABLE_ASSIGNER 写入 / 调试 API 写入）
 node     {node_id: {var: value}} 节点输出（含 START 输入）
-local    scopes 栈（LOOP/ITERATION 的 item/index，栈顶优先）
+local    scopes 栈（TEMPLATE 节点渲染变量，栈顶优先）
 ```
 
 ### 6.2 引用语法与解析顺序
@@ -320,9 +320,7 @@ local    scopes 栈（LOOP/ITERATION 的 item/index，栈顶优先）
    - 节点类型在 `CHILD_RESULT_SKIP_TYPES`（START/END/REPLY/IF_ELSE/LOOP/PARALLEL）里的不收：
      START 只有入参回显，END/REPLY 的输出已在顶层平铺，IF_ELSE/PARALLEL 的 output 主体是
      入边上游的整块透传，LOOP 的 `loopResult` 又是循环体全部节点输出的副本（体内节点会被
-     逐个单独收）。**ITERATION 不在列** —— 循环体每轮被 `_reset_subgraph_nodes` 重置，
-     体内节点只剩最后一轮的 output，只有它的 `items` 是逐次迭代的完整聚合。
-     加新节点类型时得想清楚属不属于这一类。
+     逐个单独收）。加新节点类型时得想清楚属不属于这一类。
    - 别指望订阅事件流补：`workflow.completed` 的 outputs 就是同一个 `_collect_outputs()`；
      `node.completed` 带 output 又有两个前置（emitOutput 开着、节点非流式），而父侧是 await
      到子执行终态才取数，那时再订阅只会走 DB 回放，回放读的仍是 `node_states`。
