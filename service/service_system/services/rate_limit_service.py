@@ -1,11 +1,11 @@
 import json
 
 import httpx
-from fastapi import Request
 from pydantic import BaseModel, Field
 
 from common.common_constants.constant import PREFIX_RATE_LIMIT_CONFIG, SERVICE_GATEWAY
 from common.common_log.log_init import log
+from common.common_nacos.nacos_client import nacos_client
 from common.common_redis.redis import client
 
 
@@ -60,14 +60,13 @@ class RateLimitConfigService:
         return removed > 0
 
     @staticmethod
-    async def publish(request: Request) -> dict:
+    async def publish() -> dict:
         """
         发布限流配置：通知所有存活网关从 Redis 重新加载内存策略。
         单个网关失败不中断其余网关，返回成功/失败网关数量与发布策略数。
         网关实例地址通过 Nacos 服务发现获取（与网关转发同一来源，保证地址可达）。
         """
-        nacos_service = request.app.state.nacos_service
-        targets = await nacos_service.get_all_healthy_instance(SERVICE_GATEWAY)
+        targets = await nacos_client.get_all_healthy_instance(SERVICE_GATEWAY)
         if not targets:
             raise ValueError("网关服务无可用实例，发布失败")
         result = {

@@ -16,6 +16,7 @@ from common.common_constants.constant import (PREFIX_LOGIN, PREFIX_WORKFLOW_API_
                                               SERVICE_ALIASES)
 from common.common_entity.response_schema import ApiResponse
 from common.common_httpx.httpx import httpx_pool
+from common.common_nacos.nacos_client import nacos_client
 from common.common_redis.redis import client
 from common.common_utils.jwt_util import decode_token
 from common.common_utils.rate_limiter import RateLimiter
@@ -57,22 +58,21 @@ async def proxy(service_name: str, path: str, request: Request):
     if service_name is None:
         raise HTTPException(status_code=404, detail="无效请求")
 
-    # Nacos 发现失败（服务端不可用/实例未注册）时回退到静态实例表
-    # nacos_service = getattr(request.app.state, "nacos_service", None)
-    # target = None
-    # if nacos_service is not None:
-    #     try:
-    #         target = await nacos_service.get_one_healthy_instance(service_name)
-    #     except Exception as e:
-    #         log.warning(f"Nacos discovery failed for {service_name}: {e}")
-    # if target is None:
-    #     raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
-    if service_name == "service_workflow":
-        target = ("127.0.0.1", 9003)
-    if service_name == "service_login":
-        target = ("127.0.0.1", 9004)
-    if service_name == "service_system":
-        target = ("127.0.0.1", 9001)
+    # 服务发现走进程级单例（与 common_mysql 同一口径）；Nacos 不可用即 503，
+    # 没有静态实例表可回退
+    target = None
+    try:
+        target = await nacos_client.get_one_healthy_instance(service_name)
+    except Exception as e:
+        log.warning(f"Nacos discovery failed for {service_name}: {e}")
+    if target is None:
+        raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
+    # if service_name == "service_workflow":
+    #     target = ("127.0.0.1", 9003)
+    # if service_name == "service_login":
+    #     target = ("127.0.0.1", 9004)
+    # if service_name == "service_system":
+    #     target = ("127.0.0.1", 9001)
 
     ip, port = target
     url = f"http://{ip}:{port}/{path}"
@@ -108,21 +108,12 @@ async def ws_proxy(websocket: WebSocket, service_name: str, path: str):
             {"code": 400, "message": "无效的请求"}, ensure_ascii=False))
         await websocket.close(code=4400)
         return
-    # Nacos 发现失败（服务端不可用/实例未注册）时回退到静态实例表
-    # nacos_service = getattr(request.app.state, "nacos_service", None)
-    # if nacos_service is not None:
-    #     try:
-    #         target = await nacos_service.get_one_healthy_instance(service_name)
-    #     except Exception as e:
-    #         log.warning(f"Nacos discovery failed for {service_name}: {e}")
-    # if target is None:
-    #     raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
-    if service_name == "service_workflow":
-        target = ("127.0.0.1", 9003)
-    if service_name == "service_login":
-        target = ("127.0.0.1", 9004)
-    if service_name == "service_system":
-        target = ("127.0.0.1", 9001)
+    # 服务发现走进程级单例；拿不到实例即以 4404 关闭连接（WS 里抛 HTTPException 无意义）
+    target = None
+    try:
+        target = await nacos_client.get_one_healthy_instance(service_name)
+    except Exception as e:
+        log.warning(f"Nacos discovery failed for {service_name}: {e}")
 
     if target is None:
         await websocket.close(code=4404)

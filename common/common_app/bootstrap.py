@@ -21,7 +21,7 @@ from common.common_middleware.rate_limit_middleware import RateLimitMiddleware
 from common.common_middleware.operate_log_middleware import OperateLogMiddleware
 from common.common_mysql.mysql import mysql_client
 from common.common_nacos.config import Config
-from common.common_nacos.nacos_client import NacosClient
+from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 from common.common_httpx.httpx import httpx_pool
 from common.common_storage import close_storage, init_storage
@@ -97,7 +97,8 @@ def create_app(service_name: str,
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nacos_service = NacosClient(
+        # 与 mysql_client 同一用法：直接用模块级单例，不再自行构造/挂 app.state
+        await nacos_client.init(
             user_name=os.environ.get("nacos_name", Config.nacos_name),
             password=os.environ.get("nacos_password", Config.nacos_password),
             server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
@@ -108,12 +109,8 @@ def create_app(service_name: str,
             namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
             log_level=Config.nacos_log_level,
         )
-
-        await nacos_service.init()
-        # 供网关等需要在运行时做服务发现的场景使用
-        app.state.nacos_service = nacos_service
-        await nacos_service.register_service()
-        yml_config = await nacos_service.get_config_content(service_name)
+        await nacos_client.register_service()
+        yml_config = await nacos_client.get_config_content(service_name)
 
         # 暴露给业务扩展（如 Milvus、向量化配置），保持 app.state.config 全服务可用
         app.state.config = yml_config
@@ -134,7 +131,7 @@ def create_app(service_name: str,
                 log.info("Storage initialized")
                 await init_storage(yml_config.get("storage", {}))
             if enbale_arq_workflow_redis:
-                CustomRedisSettings.yml = await nacos_service.get_config_content(ARQ_WORKFLOW)
+                CustomRedisSettings.yml = await nacos_client.get_config_content(ARQ_WORKFLOW)
                 await get_arq_redis()
                 log.info("Arq workflow Redis initialized")
 
@@ -142,8 +139,8 @@ def create_app(service_name: str,
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
             log.error(f"Service {service_name} init dependencies failed: {str(e)}")
             try:
-                await nacos_service.deregister_service()
-                await nacos_service.close_config_client()
+                await nacos_client.deregister_service()
+                await nacos_client.close()
             except Exception as deregister_err:
                 log.warning(f"Nacos deregister skipped: {deregister_err}")
             raise e
@@ -156,8 +153,8 @@ def create_app(service_name: str,
 
         # Nacos 不可用时客户端可能未初始化/连接失效，注销失败不阻断进程退出
         try:
-            await nacos_service.deregister_service()
-            await nacos_service.close_config_client()
+            await nacos_client.deregister_service()
+            await nacos_client.close()
             if enable_redis:
                 await redis.client.close()
             if enable_mysql:

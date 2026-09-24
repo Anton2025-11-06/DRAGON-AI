@@ -40,5 +40,5 @@ async def delete_config(request: Request, bucket: str):
 @router.post("/publish", summary="发布限流策略到网关（刷新网关内存）")
 @has_permission("system:rate-limit:publish")
 async def publish(request: Request):
-    result = await RateLimitConfigService.publish(request)
+    result = await RateLimitConfigService.publish()
     return ApiResponse.success(data=result, message="已发布到网关")

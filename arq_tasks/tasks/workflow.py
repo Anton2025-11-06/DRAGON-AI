@@ -26,26 +26,28 @@ from common.common_httpx.httpx import httpx_pool
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from common.common_nacos.config import Config
-from common.common_nacos.nacos_client import NacosClient
+from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 from common.common_storage import close_storage, init_storage
 from service.service_workflow.services.workflow_execution_service import WorkflowExecutionService
 
 
 async def prepare_config():
-    nacos_service = NacosClient(
+    """worker_settings 模块 import 期读一次 arq 的 Redis 配置(此时还没建 loop 之外的池)。
+
+    读完即 close:单例被打回未初始化,bootstrap 里再 init 一次拿服务配置(幂等守卫
+    会跳过已初始化的情况,不先关就再也读不到配置)。
+    """
+    await nacos_client.init(
         user_name=os.environ.get("nacos_name", Config.nacos_name),
         password=os.environ.get("nacos_password", Config.nacos_password),
         server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
         service_name=SERVICE_WORKFLOW,
-        ip=None,
-        port=0,
         namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
         log_level=logging.NOTSET,
     )
-    await nacos_service.init()
-    CustomRedisSettings.yml = await nacos_service.get_config_content(ARQ_WORKFLOW)
-    await nacos_service.close_config_client()
+    CustomRedisSettings.yml = await nacos_client.get_config_content(ARQ_WORKFLOW)
+    await nacos_client.close()
 
 
 # bootstrap 幂等标记(同一进程内只初始化一次,防止异常重启路径重复初始化)
@@ -78,18 +80,15 @@ async def bootstrap(ctx: dict) -> None:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     # 1. 加载 workflow 服务的 Nacos 配置(内含 mysql/redis 连接参数)
-    nacos_service = NacosClient(
+    await nacos_client.init(
         user_name=os.environ.get("nacos_name", Config.nacos_name),
         password=os.environ.get("nacos_password", Config.nacos_password),
         server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
         service_name=SERVICE_WORKFLOW,
-        ip=None,
-        port=0,
         namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
         log_level=logging.NOTSET,
     )
-    await nacos_service.init()
-    yml_config = await nacos_service.get_config_content(SERVICE_WORKFLOW)
+    yml_config = await nacos_client.get_config_content(SERVICE_WORKFLOW)
 
     # 2. 初始化 MySQL / Redis / httpx 连接池(与 FastAPI 服务共用同一套配置)
     mysql_cfg = yml_config.get("mysql", {})
@@ -128,6 +127,8 @@ async def shutdown(ctx: dict) -> None:
     """
     await mysql_client.close()
     await redis.client.close()
+    # worker 不注册服务,nacos 只用于启动时拉配置;这里的 close 对未初始化单例是空操作
+    await nacos_client.close()
     try:
         await close_storage()
     except Exception as e:  # noqa: BLE001
