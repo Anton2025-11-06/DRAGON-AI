@@ -32,7 +32,7 @@ async def can_manage_models(request: Request) -> bool:
     login_user = await get_login_user(request)
     if is_admin(login_user):
         return True
-    return bool({PERM_ADD, PERM_EDIT} & set(login_user.get("permissions") or []))
+    return bool({PERM_EDIT} & set(login_user.get("permissions") or []))
 
 
 # ==================== 模型 CRUD ====================

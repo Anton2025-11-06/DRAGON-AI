@@ -59,7 +59,15 @@ PREFIX_WORKFLOW_API_KEY_QPS = "workflow_api_key_qps"
 PREFIX_MODEL_RATE_LIMIT_QPS = "model_rate_limit_qps"
 
 
-# 可配置的模块桶候选（与网关 _SERVICE_ALIASES 对应）
+# 限流桶保留名（不等于可转发的模块段，不会与业务模块撞名）
+BUCKET_GATEWAY = "gateway"    # /api/{无效模块} 与路径探测类垃圾流量的归口桶
+BUCKET_GLOBAL = "global"      # 非 /api/** 的其余请求
+# 网关自带的第一方入口段：不是业务模块，但属于正常入口，不并入 gateway 桶
+# （/api/model 的限流走 api-key + 模型 QPS，见 model_proxy_router）
+GATEWAY_OWN_ENTRIES = {"model"}
+
+
+# 可配置的模块桶候选（前端下拉数据源，与 _bucket_of 的分桶口径对应）
 # 限流单位：每个client ip 一个window + limit
 MODULES = [
     {"bucket": "login", "name": "登录认证", "default": {"limit": 300, "window": 60}},
@@ -71,14 +79,16 @@ MODULES = [
     {"bucket": "inference", "name": "模型推理", "default": {"limit": 300, "window": 60}},
     {"bucket": "notebook", "name": "Notebook", "default": {"limit": 300, "window": 60}},
     {"bucket": "eval_model", "name": "模型评测", "default": {"limit": 300, "window": 60}},
-    # AI 模型网关 /api/model 入口：默认按 IP 60 次/分钟防爆破
-    {"bucket": "model", "name": "AI模型网关", "default": {"limit": 60, "window": 60}},
+    # 网关模块自身：随机前缀/探测流量每个新前缀都是一个无限流的新桶，故统一归口到这里
+    {"bucket": BUCKET_GATEWAY, "name": "网关（无效模块/探测流量）",
+     "default": {"limit": 60, "window": 60}},
 ]
 
+# 模块名别名 → Nacos 注册名（网关转发的唯一依据，不在表内即 404）
+# 不含 gateway：网关不把自己代理给自己，/internal/** 只能内网直连调用
 SERVICE_ALIASES = {
     "system": "service_system",
     "login": "service_login",
-    "gateway": "service_gateway",
     "rag": "service_rag",
     "workflow": "service_workflow",
     "datasets": "service_datasets",

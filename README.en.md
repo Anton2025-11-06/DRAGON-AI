@@ -98,15 +98,14 @@ These reserve a package directory, a rate-limit bucket name and a gateway alias 
 
 ### 3.1 Requirements
 
-| Dependency | Version | Purpose |
-|---|---|---|
-| Python | 3.11+ | Back end |
-| Node.js / pnpm | 20.12+ / 10+ | Front-end build |
-| MySQL | 8.x (5.7 works) | Business data |
+| Dependency | Version              | Purpose |
+|---|----------------------|---|
+| Python | 3.11+                | Back end |
+| Node.js / pnpm | 20.12+ / 10+         | Front-end build |
+| MySQL | 8.x (5.7 works)      | Business data |
 | Redis | 5+ (7.x recommended) | Sessions / rate limits / queues / config cache |
-| Nacos | 2.x | Registry + config centre, **mandatory** — every environment difference lives there |
-| Aliyun OSS | optional | Enabled with `storage.type=oss` |
-| LibreOffice | optional | Only needed to parse legacy `.doc/.ppt` in workflow nodes |
+| Nacos | 2.x+                 | Registry + config centre, **mandatory** — every environment difference lives there |
+| Aliyun OSS | optional             | Enabled with `storage.type=oss` |
 
 ### 3.2 Initialising a fresh environment (four steps)
 

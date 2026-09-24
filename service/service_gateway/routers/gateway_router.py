@@ -42,7 +42,12 @@ async def model_proxy_entry(path: str, request: Request):
 
 # 模块名别名归一化：/api/system/... 映射到 Nacos 注册名 service_system
 def _normalize_service_name(name: str) -> str:
-    """模块名别名 → Nacos 注册名（已带 service_ 前缀的路径原样转发）"""
+    """模块名别名 → Nacos 注册名；不在 SERVICE_ALIASES 内返回 None，由调用方 404
+
+    表里没有 gateway：拿掉这条别名后，/api/gateway/** 不再能把网关代理到自己身上
+    （旧口径下任何登录用户可通过公网入口 GET 限流策略、POST 触发 reload），
+    /internal/** 只保留内网直连调用。
+    """
     return SERVICE_ALIASES.get(name, None)
 
 

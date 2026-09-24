@@ -5,7 +5,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from common.common_constants.constant import PREFIX_RATE_LIMIT_CONFIG
+from common.common_constants.constant import (
+    BUCKET_GATEWAY, BUCKET_GLOBAL, GATEWAY_OWN_ENTRIES, PREFIX_RATE_LIMIT_CONFIG,
+    SERVICE_ALIASES)
 from common.common_entity.response_schema import ApiResponse
 from common.common_log.log_init import log
 from common.common_redis.redis import client
@@ -15,12 +17,20 @@ _SERVICE_PATH = re.compile(r"^/api/([^/]+)")
 
 
 def _bucket_of(request: Request) -> str:
-    """把请求归类到限流桶：/api/{service}/... 取第一段，其余归 global"""
+    """把请求归类到限流桶：/api/{段} 按段归属，非 /api/** 归 global。
+
+    段只有三种去向：可转发的业务模块（段名即桶）、网关第一方入口（/api/model）、
+    其余一律归 gateway。网关对未知模块名字只做一次字典查询就 404，但请求已经进了网关；
+    按段名成桶的话，每个随机前缀都是一个没策略的新桶 = 等于不限流，故无效段必须归口。
+    """
     path = request.url.path
     match = _SERVICE_PATH.match(path)
-    if match:
-        return match.group(1)
-    return "global"
+    if not match:
+        return BUCKET_GLOBAL
+    seg = match.group(1)
+    if seg in SERVICE_ALIASES or seg in GATEWAY_OWN_ENTRIES:
+        return seg
+    return BUCKET_GATEWAY
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
