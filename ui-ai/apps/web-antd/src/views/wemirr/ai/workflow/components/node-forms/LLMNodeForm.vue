@@ -61,6 +61,10 @@ import { useAiWorkflowStore } from '#/store/ai-workflow';
 
 import * as modelApi from '../../../model-plaza/api';
 import ModelTryPanel from '../../../model-plaza/components/ModelTryPanel.vue';
+import {
+  invokeModel,
+  parseExperienceResult,
+} from '../../../model-plaza/experience/api';
 import { ModelSelect } from '../model-select';
 import { VariableInput, VariableSelector } from '../variable-selector';
 
@@ -700,12 +704,17 @@ const testOpen = ref(false);
 const testLoading = ref(false);
 const testRunning = ref(false);
 const testDetail = ref<modelApi.ModelDetailRep | null>(null);
+/** 当前用户在该模型上被授权的虚拟 api-key：测试只能以它走网关，管理端密钥不进浏览器 */
+const testUserKey = ref('');
 const testResult = ref<modelApi.ModelTestRep | null>(null);
 const testError = ref<null | string>(null);
 const getTestContainer = () =>
   typeof document === 'undefined' ? undefined : document.body;
 
-/** 拉取所选模型详情（supports 能力位 / common_params 常用参数 / 凭据），打开测试台 */
+/**
+ * 打开测试台：详情只用来取能力位与登记的常用参数（不再取凭据），
+ * 调用凭据取当前用户自己审批通过的虚拟 key。
+ */
 async function openModelTest() {
   const id = Number(formData.modelId);
   if (!id) {
@@ -715,8 +724,22 @@ async function openModelTest() {
   testLoading.value = true;
   testResult.value = null;
   testError.value = null;
+  testUserKey.value = '';
   try {
-    testDetail.value = await modelApi.GetDetail(id);
+    const [detail, myKeys] = await Promise.all([
+      modelApi.GetDetail(id),
+      modelApi.GetMyKeys(),
+    ]);
+    testDetail.value = detail;
+    // my-keys 按申请倒序返回，取该模型最新一条已通过的 key
+    testUserKey.value =
+      (myKeys || []).find((k) => k.model_id === id)?.api_key || '';
+    if (!testUserKey.value) {
+      message.warning(
+        '你还没有该模型的授权 API Key，请先在模型广场申请并通过审批',
+      );
+      return;
+    }
     testOpen.value = true;
   } catch (error: any) {
     message.error(error?.message || '模型详情加载失败');
@@ -725,7 +748,11 @@ async function openModelTest() {
   }
 }
 
-/** 测试台提交：携带 inputs/stream/thinking/params 走 SSE 调 /models/test，逐块实时显示 */
+/**
+ * 测试台提交：走网关 /api/model + 用户自己的授权 key，不碰 /models/test
+ * （那个接口只服务于模型新增/编辑时的未保存凭据试跑，且已收归模型管理权限）。
+ * 面板产出的 inputs 键（prompt/input/image_url/query/documents/…）就是网关 body 的原生字段。
+ */
 async function onTryRun(payload: {
   inputs: Record<string, any>;
   params: Record<string, any>;
@@ -733,24 +760,24 @@ async function onTryRun(payload: {
   thinking: boolean;
 }) {
   const d = testDetail.value;
-  if (!d) return;
+  const userKey = testUserKey.value;
+  if (!d || !userKey) return;
   testRunning.value = true;
   testError.value = null;
   testResult.value = null;
   let accContent = '';
   let accReasoning = '';
   try {
-    const res = await modelApi.TestModelStream(
+    const res = await invokeModel(
       {
-        category: d.category,
-        provider: d.provider,
-        model_name: d.model_name,
-        base_url: d.base_url,
-        api_key: d.api_key,
-        inputs: payload.inputs,
-        stream: payload.stream,
-        thinking: payload.thinking,
-        params: payload.params,
+        apiKey: userKey,
+        model: d.model_name,
+        body: {
+          ...payload.inputs,
+          stream: payload.stream,
+          thinking: payload.thinking,
+          params: payload.params,
+        },
       },
       (chunk) => {
         // 流式增量：逐块累积并回填结果区（面板读 result.data.content/reasoning 渲染）
@@ -765,8 +792,23 @@ async function onTryRun(payload: {
         }
       },
     );
-    // 汇总帧覆盖增量态（含 urls/vectors/scores/latency 等完整产出）
-    testResult.value = res || null;
+    // 流式时网关不回填 raw，用累积正文兜底；非流式时 raw 即完整响应
+    const parsed = parseExperienceResult(d.category, res.raw);
+    const content = parsed.text || accContent;
+    const reasoning = parsed.reasoning || accReasoning || undefined;
+    testResult.value = {
+      success: true,
+      message: res.usage?.total_tokens
+        ? `调用成功 · tokens ${res.usage.total_tokens}`
+        : '调用成功',
+      data: {
+        content,
+        reasoning,
+        urls: parsed.urls,
+        vectors: parsed.vectors,
+        scores: parsed.scores,
+      },
+    };
   } catch (error: any) {
     testResult.value = null;
     testError.value = error?.message || '测试请求失败，请稍后重试';
@@ -1467,7 +1509,7 @@ async function handleTypeChange() {
       />
     </a-form-item>
 
-    <!-- 模型测试台：按所选模型 detail 的 supports_*/common_params 驱动，试跑走 /models/test -->
+    <!-- 模型测试台：按所选模型 detail 的 supports_*/common_params 驱动，试跑走网关 + 用户授权 key -->
     <a-modal
       :open="testOpen"
       title="模型测试"

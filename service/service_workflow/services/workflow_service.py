@@ -355,7 +355,6 @@ class WorkflowService:
         stmt = (
             select(
                 Model.id, Model.provider, Model.category, Model.name, Model.model_name,
-                Model.base_url,
             )
             .join(ModelApply, ModelApply.model_id == Model.id)
             .where(
@@ -370,7 +369,9 @@ class WorkflowService:
             rows = (await session.execute(stmt)).mappings().all()
             return [{
                 "id": r["id"], "provider": r["provider"], "type": r["category"],
-                "name": r["name"], "modelName": r["model_name"], "baseUrl": r["base_url"],
+                "name": r["name"], "modelName": r["model_name"],
+                # 不带 baseUrl：节点配置只需要选模型，调用统一走网关 + 用户自己的授权 key，
+                # 厂商基址属于管理端凭据
             } for r in rows]
 
     @staticmethod

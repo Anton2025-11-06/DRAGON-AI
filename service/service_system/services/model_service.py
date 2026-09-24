@@ -102,7 +102,11 @@ class ModelService:
 
     @staticmethod
     def _dict(m: Model, with_secret: bool = False) -> dict:
-        """ORM 实体 → 响应字典"""
+        """ORM 实体 → 响应字典
+
+        不变量：base_url/gateway_url/api_key 是同一组管理端凭据，只在 with_secret=True 时出现。
+        对外调用统一走网关，普通用户不需要厂商基址；调用方按“是否模型管理场景”决定 with_secret。
+        """
         data = {
             "id": m.id,
             "name": m.name,
@@ -111,8 +115,6 @@ class ModelService:
             "provider": m.provider,
             "provider_label": PROVIDERS.get(m.provider, m.provider),
             "model_name": m.model_name,
-            "base_url": m.base_url,
-            "gateway_url": m.gateway_url,
             "rate_limit_qps": m.rate_limit_qps,
             "status": bool(m.status),
             "supports_stream": bool(m.supports_stream),
@@ -127,6 +129,8 @@ class ModelService:
             "tutorial_md": m.tutorial_md or ""
         }
         if with_secret:
+            data["base_url"] = m.base_url
+            data["gateway_url"] = m.gateway_url
             data["api_key"] = m.api_key
         return data
 
@@ -176,7 +180,7 @@ class ModelService:
 
     @staticmethod
     async def detail(model_id: int, with_secret: bool = False) -> dict:
-        """模型详情：with_secret=True 时包含 api_key/tutorial_md（管理员场景）"""
+        """模型详情：with_secret=True 时才带 base_url/gateway_url/api_key（模型管理场景）"""
         async with mysql_client.get_session() as session:
             m = await session.get(Model, model_id)
             if not m:
@@ -515,7 +519,9 @@ class ModelService:
                 "apply_id": a.id, "model_id": m.id, "name": m.name,
                 "category": m.category, "category_label": CATEGORIES.get(m.category, m.category),
                 "provider": m.provider, "provider_label": PROVIDERS.get(m.provider, m.provider),
-                "model_name": m.model_name, "base_url": m.base_url, "api_key": a.api_key,
+                "model_name": m.model_name, "api_key": a.api_key,
+                # 不给 base_url：用户调用入口是 gateway_url（缺省前端自己拼 /api/model），
+                # 厂商基址属于管理端凭据
                 "gateway_url": m.gateway_url,
                 "tutorial_md": m.tutorial_md or "",
                 "rate_limit_qps": m.rate_limit_qps,

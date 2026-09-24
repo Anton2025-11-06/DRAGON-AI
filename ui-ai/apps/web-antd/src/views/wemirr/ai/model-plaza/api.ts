@@ -49,9 +49,7 @@ export interface ModelPageRep {
   provider: ModelProvider;
   provider_label: string;
   model_name: string;
-  base_url: string;
-  /** 模型网关地址（展示给调用方） */
-  gateway_url?: string;
+  // 列表不返回 base_url/gateway_url/api_key：上游地址与管理端密钥属于凭据，只随详情下发给模型管理账号
   rate_limit_qps: number;
   status: boolean;
   supports_stream?: boolean;
@@ -68,7 +66,10 @@ export interface ModelPageRep {
   apply_status?: null | number;
 }
 
-/** 模型详情（管理员含 api_key） */
+/**
+ * 模型详情：凭据字段（base_url/gateway_url/api_key）仅对 ADMIN 或有模型新增/编辑权限的账号返回，
+ * 故均为可选；普通用户拿不到也不该拿。
+ */
 export interface ModelDetailRep {
   id: number;
   name: string;
@@ -77,7 +78,7 @@ export interface ModelDetailRep {
   provider: ModelProvider;
   provider_label: string;
   model_name: string;
-  base_url: string;
+  base_url?: string;
   gateway_url?: string;
   api_key?: string;
   rate_limit_qps: number;
@@ -149,8 +150,7 @@ export interface MyKeyRep {
   provider: ModelProvider;
   provider_label: string;
   model_name: string;
-  base_url: string;
-  /** 模型网关地址（展示用，替代真实地址） */
+  /** 模型网关地址（用户调用入口，代替真实厂商地址） */
   gateway_url?: string;
   api_key: string;
   tutorial_md: string;

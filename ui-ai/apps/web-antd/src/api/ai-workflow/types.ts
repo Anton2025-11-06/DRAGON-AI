@@ -615,7 +615,6 @@ export interface AiModelOption {
   name: string;
   /** 模型标识（API 调用名，tb_model.model_name，如画布节点展示） */
   modelName?: string;
-  baseUrl?: string;
 }
 
 export interface KnowledgeBaseOption {

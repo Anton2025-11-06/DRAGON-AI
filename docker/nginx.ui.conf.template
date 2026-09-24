@@ -16,10 +16,11 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # 构建产物里有 .mjs，基础镜像的 mime.types 不一定认，不补上浏览器会当二进制拒绝执行
-    types {
-        application/javascript mjs;
-    }
+    # 不能在这里写 types {} 去补 .mjs：低层级的 types 块是整体覆盖而不是追加，
+    # 一旦写了，nginx.conf 里 http 段的 include mime.types 就全部作废，
+    # html/js/css 都不认识、一律按 default_type 发 application/octet-stream，
+    # 浏览器会把首页当文件下载、模块脚本也因 MIME 不对被拒执行。
+    # 下面只给 .mjs 单独一条 location 改默认类型，其余类型继续用镜像自带的 mime.types。
 
     # 单页应用：静态资源直出，路由交给前端（hash 模式，history 模式也靠这条兜底）
     location / {
@@ -28,8 +29,21 @@ server {
         add_header Cache-Control "no-store";
     }
 
-    # 带内容 hash 的构建产物可以长期强缓存
-    location /assets/ {
+    # 正则 location 按出现顺序取首个命中，所以 .mjs 这条要写在下面的强缓存之前，
+    # 否则 /mjs/ 目录下的文件会先被目录规则接走、拿不到正确类型。
+    # 基础镜像的 mime.types 不一定收录 .mjs，这里显式补上类型并跟着走长缓存。
+    location ~* \.mjs$ {
+        default_type application/javascript;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # 带内容 hash 的构建产物可以长期强缓存。目录名由 vben 的 vite 配置决定
+    # （entryFileNames=jse/、chunkFileNames=js/、assetFileNames=[ext]/），
+    # 所以这里按目录枚举而不是写死 /assets/（原来那条 /assets/ 在这套产物里一个也匹不到，
+    # 强缓存从未生效）；根目录的 index.html / favicon.ico / print-lock.css / _app.config.js
+    # 不带 hash，仍走上面的 no-store。/api/ 不会被这些模式匹到。
+    location ~* ^/(jse|js|css|assets|img|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|mp4|webm)/ {
         expires 30d;
         add_header Cache-Control "public, immutable";
     }

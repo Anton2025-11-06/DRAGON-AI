@@ -14,6 +14,7 @@ const authStore = useAuthStore();
 const loginRef = ref();
 
 const formSchema = computed((): VbenFormSchema[] => {
+  // 不预填任何账号密码：登录页是公网可访问的入口，写死默认凭据等于把管理员账号公开挂出去
   return [
     {
       component: 'VbenInput',
@@ -22,7 +23,6 @@ const formSchema = computed((): VbenFormSchema[] => {
       },
       fieldName: 'username',
       label: $t('authentication.username'),
-      defaultValue: 'admin',
       rules: z.string().min(1, { message: $t('authentication.usernameTip') }),
     },
     {
@@ -31,7 +31,6 @@ const formSchema = computed((): VbenFormSchema[] => {
         placeholder: $t('authentication.password'),
       },
       fieldName: 'password',
-      defaultValue: 'admin123',
       label: $t('authentication.password'),
       rules: z.string().min(1, { message: $t('authentication.passwordTip') }),
     },

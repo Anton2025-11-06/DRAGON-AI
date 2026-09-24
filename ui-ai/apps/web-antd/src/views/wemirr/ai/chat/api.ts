@@ -100,13 +100,13 @@ export interface AskReq {
   imageUrl?: string;
 }
 
-/** 模型配置 */
+/** 模型配置（/api/workflow/models/list 的下拉项，不含上游地址等凭据） */
 export interface ModelConfig {
   id: number;
   provider: string;
   type: string;
   name: string;
-  baseUrl: string;
+  modelName?: string;
 }
 
 /** 智能体 */

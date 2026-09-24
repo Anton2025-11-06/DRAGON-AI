@@ -51,8 +51,6 @@ exec gunicorn "${MODULE}:app" \
   --keep-alive 30 \
   --max-requests 50000 \
   --max-requests-jitter 5000 \
-  --worker-tmp-dir /dev/shm \
-  --proxy-headers \
   --forwarded-allow-ips '*' \
   --access-logfile - \
   --error-logfile - \

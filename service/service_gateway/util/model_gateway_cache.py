@@ -8,8 +8,6 @@
 
 一致性模型：MySQL 为唯一数据源，Redis 是可重建缓存。
 本模块只负责 Redis 读写，写入失败不抛异常（重试 + 日志），
-由 service_system 启动/手动全量对账（ModelService.rebuild_cache）保证最终一致。
-安全约定：管理端密钥（api_key）不进入 Redis，网关转发时回查 MySQL。
 """
 import json
 from datetime import datetime

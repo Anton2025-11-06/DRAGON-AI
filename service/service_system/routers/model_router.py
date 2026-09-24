@@ -5,7 +5,9 @@ from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
 
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import get_login_user, has_permission, is_admin
+from common.common_middleware.exception_handler import UnauthorizedException
+from common.common_permission.permission import (
+    get_login_user, has_permission, is_admin, require_permission)
 from service.service_system.schemas.model_schema import (
     ApplyPageRequest, ModelApplyRequest, ModelAuditRequest, ModelPageRequest, ModelSaveRequest,
     ModelTestRequest,
@@ -19,6 +21,18 @@ PERM_ADD = "system:model:add"
 PERM_EDIT = "system:model:edit"
 PERM_DELETE = "system:model:delete"
 PERM_AUDIT = "system:model:audit"
+
+
+async def can_manage_models(request: Request) -> bool:
+    """是否属于“模型管理”场景（ADMIN 或有新增/编辑权限）。
+
+    不走装饰器：装饰器带 X-Workflow-Token 旁路，这里需要的是不受请求头影响的硬判定
+    （凭据回读与直连外网的试跑接口都依赖它）。未登录时 get_login_user 直接抛 401。
+    """
+    login_user = await get_login_user(request)
+    if is_admin(login_user):
+        return True
+    return bool({PERM_ADD, PERM_EDIT} & set(login_user.get("permissions") or []))
 
 
 # ==================== 模型 CRUD ====================
@@ -65,16 +79,27 @@ async def my_keys(request: Request):
     return ApiResponse.success(data=data)
 
 
-@router.post("/test", summary="连通性测试（SSE 流式）")
+@router.post("/test", summary="连通性测试（SSE 流式，仅限模型新增/编辑场景）")
+@require_permission(PERM_ADD, PERM_EDIT)
 async def test_model(request: Request, body: ModelTestRequest):
+    # 本接口按请求体里的 base_url/api_key 直连外部地址，且允许是尚未保存的任意值：
+    # 不加权限门等于给任意登录用户一个服务端代理（SSRF），还把管理端密钥在浏览器和
+    # 服务端之间来回搬运。已登记模型的试跑请走网关 /api/model + 用户自己的授权 key。
+    # 装饰器里的 X-Workflow-Token 旁路是按“存在即放行”判的，而网关只对 service_workflow
+    # 校这个头，对 service_system 是原样透传 —— 登录用户自己加个同名头就能绕过装饰器。
+    # 本接口不属于工作流回调场景，故函数内再按同一口径硬校一次。
+    if not await can_manage_models(request):
+        raise UnauthorizedException("权限不足，禁止操作！")
     # ModelService.test 为异步生成器，直接交给 StreamingResponse 逐帧下发（勿 await）
     return StreamingResponse(ModelService.test(body), media_type="text/event-stream")
 
 
-@router.get("/{model_id}/detail", summary="模型详情（登录即可，密钥仅管理员可见）")
+@router.get("/{model_id}/detail", summary="模型详情（登录即可，凭据仅模型管理场景可见）")
 async def detail_model(request: Request, model_id: int):
-    login_user = await get_login_user(request)
-    with_secret = is_admin(login_user)
+    # 能改模型的账号才允许读回凭据（base_url/gateway_url/api_key）：
+    # 编辑弹窗提交时未传的字段保持原值、传空串则清空，所以若只给 ADMIN 回读，
+    # 有 add/edit 权限的非 ADMIN 账号一保存就会把已存的厂商密钥抹掉。
+    with_secret = await can_manage_models(request)
     try:
         data = await ModelService.detail(model_id, with_secret=with_secret)
     except ValueError as e:

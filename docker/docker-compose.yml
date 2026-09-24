@@ -16,6 +16,8 @@ x-backend: &backend
     context: ..
     dockerfile: docker/Dockerfile
   image: dragon-ai-backend:${TAG:-latest}
+  networks:
+    - dragon-ai
   # init=true：信号由 tini 代收再转给脚本，否则 docker stop 时 worker 会被直接打死
   init: true
   restart: unless-stopped
@@ -32,6 +34,10 @@ x-backend-env: &backend-env
   NACOS_PASSWD: ${NACOS_PASSWD:-}
   NACOS_NS_ID: ${NACOS_NS_ID:-}
   WORKERS: ${WORKERS:-4}
+
+networks:
+  dragon-ai:
+    external: true
 
 services:
   gateway:
@@ -81,6 +87,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.ui
     image: dragon-ai-ui:${TAG:-latest}
+    networks:
+      - dragon-ai
     init: true
     restart: unless-stopped
     logging:
