@@ -33,13 +33,12 @@ export function assignMenus(roleId: number, menu_ids: number[]) {
 }
 
 // ==================== 数据权限范围 ====================
-/** 数据权限范围枚举：1-全部 2-本部门及以下 3-本部门 4-仅本人 5-自定义部门 */
+/** 数据权限范围枚举：1-全部 2-本部门及以下 3-本部门 4-仅本人 */
 export const DataScopeEnum = {
   ALL: 1,
   DEPT_CHILDREN: 2,
   DEPT: 3,
   SELF: 4,
-  CUSTOM: 5,
 } as const;
 
 /** 数据权限范围选项 */
@@ -52,5 +51,4 @@ export const dataScopeOptions = [
   },
   { value: DataScopeEnum.DEPT, label: '本部门', color: 'warning' },
   { value: DataScopeEnum.SELF, label: '仅本人', color: 'default' },
-  { value: DataScopeEnum.CUSTOM, label: '自定义部门', color: 'error' },
 ];

@@ -12,6 +12,8 @@ import type {
 import { nextTick, onErrorCaptured, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
+import { useAccess } from '@vben/access';
+
 import { ApartmentOutlined, PlusOutlined } from '@ant-design/icons-vue';
 import { useFs } from '@fast-crud/fast-crud';
 import { Input, message, Modal } from 'ant-design-vue';
@@ -32,6 +34,8 @@ import WorkflowCard from './components/WorkflowCard.vue';
 import createCrudOptions from './crud';
 
 const router = useRouter();
+// 新建入口按后端权限点显隐
+const { hasPermission } = useAccess();
 
 const { crudBinding, crudRef, crudExpose } = useFs({
   createCrudOptions,
@@ -226,7 +230,7 @@ function handleTemplateSaved() {
     <fs-crud ref="crudRef" v-bind="crudBinding">
       <!-- 自定义新增按钮 -->
       <template #actionbar-left>
-        <a-button type="primary" @click="handleCreate">
+        <a-button v-if="hasPermission('workflow:workflow:add')" type="primary" @click="handleCreate">
           <template #icon><PlusOutlined /></template>
           新建工作流
         </a-button>
@@ -257,7 +261,7 @@ function handleTemplateSaved() {
           </div>
           <h3 class="empty-title">还没有工作流</h3>
           <p class="empty-desc">创建你的第一个 AI 工作流，开启自动化之旅</p>
-          <a-button type="primary" size="large" @click="handleCreate">
+          <a-button v-if="hasPermission('workflow:workflow:add')" type="primary" size="large" @click="handleCreate">
             <template #icon><PlusOutlined /></template>
             新建工作流
           </a-button>

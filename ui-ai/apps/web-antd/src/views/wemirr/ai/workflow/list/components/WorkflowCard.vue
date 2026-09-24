@@ -16,11 +16,16 @@ import {
 } from '@ant-design/icons-vue';
 import { Tag, Tooltip } from 'ant-design-vue';
 
+import { useAccess } from '@vben/access';
+
 interface Props {
   item: WorkflowPageResp;
 }
 
 defineProps<Props>();
+
+// 卡片操作按钮按后端权限点显隐（与各 workflow:* 接口一一对应）
+const { hasPermission } = useAccess();
 
 const emit = defineEmits<{
   (e: 'edit', item: WorkflowPageResp): void;
@@ -88,7 +93,7 @@ function formatTime(time: string) {
         <span class="update-time">{{ formatTime(item.updateTime) }}</span>
       </div>
       <div class="footer-line card-actions">
-        <Tooltip title="编辑">
+        <Tooltip v-if="hasPermission('workflow:workflow:edit')" title="编辑">
           <a-button
             data-testid="workflow-card-edit"
             type="text"
@@ -99,7 +104,7 @@ function formatTime(time: string) {
           </a-button>
         </Tooltip>
         <!-- 去对话：原「执行」入口已下线，改由列表页校验 api-key 后打开对话窗口 -->
-        <Tooltip title="去对话">
+        <Tooltip v-if="hasPermission('workflow:execution:run')" title="去对话">
           <a-button
             data-testid="workflow-card-chat"
             type="text"
@@ -111,7 +116,7 @@ function formatTime(time: string) {
           </a-button>
         </Tooltip>
         <!-- 发布已迁移至工作流编辑页（保存按钮右侧），需求：列表页不再提供发布入口 -->
-        <Tooltip title="复制">
+        <Tooltip v-if="hasPermission('workflow:workflow:add')" title="复制">
           <a-button
             data-testid="workflow-card-copy"
             type="text"
@@ -121,7 +126,7 @@ function formatTime(time: string) {
             <template #icon><CopyOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip title="API 访问">
+        <Tooltip v-if="hasPermission('workflow:apikey:list')" title="API 访问">
           <a-button
             data-testid="workflow-card-api"
             type="text"
@@ -131,7 +136,7 @@ function formatTime(time: string) {
             <template #icon><ApiOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip title="保存为模块">
+        <Tooltip v-if="hasPermission('workflow:template:add')" title="保存为模块">
           <a-button
             data-testid="workflow-card-template"
             type="text"
@@ -141,7 +146,7 @@ function formatTime(time: string) {
             <template #icon><AppstoreOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip title="执行历史">
+        <Tooltip v-if="hasPermission('workflow:execution:list')" title="执行历史">
           <a-button
             data-testid="workflow-card-history"
             type="text"
@@ -151,7 +156,7 @@ function formatTime(time: string) {
             <template #icon><HistoryOutlined /></template>
           </a-button>
         </Tooltip>
-        <Tooltip title="删除">
+        <Tooltip v-if="hasPermission('workflow:workflow:delete')" title="删除">
           <a-button
             data-testid="workflow-card-remove"
             type="text"

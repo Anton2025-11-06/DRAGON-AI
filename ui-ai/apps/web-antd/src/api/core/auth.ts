@@ -16,7 +16,6 @@ export namespace AuthApi {
     roles: string[];
     permissions: string[];
     data_scopes: number[];
-    data_scope_dept_ids?: number[];
   }
 
   /** 登录接口返回值 */

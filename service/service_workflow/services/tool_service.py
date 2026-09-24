@@ -20,6 +20,7 @@ from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import build_data_scope_filter
 from service.service_workflow.models.agent_entity import Tool
 from service.service_workflow.workflow_engine import py_sandbox
 
@@ -34,13 +35,17 @@ class ToolService:
     # ==================== 查询 ====================
     @staticmethod
     async def page(page: int = 1, page_size: int = 10,
-                   name: str = None, status: int = None) -> dict:
+                   name: str = None, status: int = None, login_user: dict = None) -> dict:
         async with mysql_client.get_session() as session:
             conds = []
             if name:
                 conds.append(Tool.name.like(f"%{name}%"))
             if status is not None:
                 conds.append(Tool.status == status)
+            # 数据权限：非管理员仅可见本人创建或可见部门内创建的工具
+            scope_cond = build_data_scope_filter(login_user, Tool.created_by) if login_user else None
+            if scope_cond is not None:
+                conds.append(scope_cond)
             total = (await session.execute(
                 select(func.count()).select_from(Tool).where(*conds))).scalar()
             rows = (await session.execute(

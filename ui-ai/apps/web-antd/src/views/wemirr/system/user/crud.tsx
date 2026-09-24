@@ -43,7 +43,8 @@ export default function crud(
         // 固定右侧
         fixed: 'right',
         buttons: {
-          remove: { order: 3 },
+          // 内置 remove 按钮走 prefix:remove，与后端 system:user:delete 不一致，此处显式控制
+          remove: { order: 3, show: hasPermission('system:user:delete') },
           resetPassword: {
             type: 'link',
             order: 1,

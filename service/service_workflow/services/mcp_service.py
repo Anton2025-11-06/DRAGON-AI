@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import build_data_scope_filter
 from service.service_workflow.models.agent_entity import McpServer
 
 # MCP 连接测试超时（秒）：SDK initialize + 工具清单握手必须在此时限内完成
@@ -30,7 +31,8 @@ class McpServerService:
     @staticmethod
     async def page(page: int = 1, page_size: int = 10,
                    name: str = None, status: int = None,
-                   viewer_id: int = 0, viewer_admin: bool = False) -> dict:
+                   viewer_id: int = 0, viewer_admin: bool = False,
+                   login_user: dict = None) -> dict:
         """分页查询 MCP 连接配置（非创建人且非管理员时隐藏 SSE url 值）"""
         async with mysql_client.get_session() as session:
             conds = []
@@ -38,6 +40,10 @@ class McpServerService:
                 conds.append(McpServer.name.like(f"%{name}%"))
             if status is not None:
                 conds.append(McpServer.status == status)
+            # 数据权限：非管理员仅可见本人创建或可见部门内创建的连接
+            scope_cond = build_data_scope_filter(login_user, McpServer.created_by) if login_user else None
+            if scope_cond is not None:
+                conds.append(scope_cond)
             total = (await session.execute(
                 select(func.count()).select_from(McpServer).where(*conds))).scalar()
             rows = (await session.execute(

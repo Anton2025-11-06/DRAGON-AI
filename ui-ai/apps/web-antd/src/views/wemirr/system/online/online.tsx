@@ -8,6 +8,8 @@ import type {
 
 import dayjs from 'dayjs';
 
+import { useAccess } from '@vben/access';
+
 import { defHttp } from '#/api/request';
 
 export default function crud(
@@ -15,6 +17,7 @@ export default function crud(
 ): CreateCrudOptionsRet {
   // 注意：crudExpose 是 props 顶层属性，props.context 是用户自定义上下文（不含 crudExpose）
   const { crudExpose } = props;
+  const { hasPermission } = useAccess();
   return {
     crudOptions: {
       request: {
@@ -35,6 +38,8 @@ export default function crud(
           edit: { show: false },
           remove: {
             size: 'small',
+            // 强制下线按后端权限点显隐
+            show: hasPermission('system:online:kick'),
             // 覆盖全局默认的“删除”按钮文案，改为“强制下线”
             render(scope: any) {
               function confirm() {

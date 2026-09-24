@@ -30,7 +30,8 @@ async def test_definition(request: Request, body: ToolDefinitionTestRequest):
 @has_permission("workflow:tool:list")
 async def page_tools(request: Request, page: int = 1, page_size: int = 10,
                      name: str = None, status: bool = None):
-    data = await ToolService.page(page, page_size, name, status)
+    login_user = await get_login_user(request)
+    data = await ToolService.page(page, page_size, name, status, login_user=login_user)
     return ApiResponse.success(data=data)
 
 

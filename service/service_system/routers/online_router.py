@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query, Request
 
 from common.common_constants.constant import TOKEN_EXPIRE
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import has_permission
+from common.common_permission.permission import get_login_user, has_permission
 from service.service_system.services.online_service import OnlineService
 
 router = APIRouter(prefix="/online", tags=["在线用户"])
@@ -16,7 +16,8 @@ async def list_online(request: Request,
                       page: int = Query(1, ge=1, description="页码"),
                       page_size: int = Query(10, ge=1, le=100, description="每页数量"),
                       keyword: str = Query(None, description="账号/真实姓名/部门名称/角色关键词")):
-    return ApiResponse.success(data=await OnlineService.list_online(page, page_size, keyword))
+    login_user = await get_login_user(request)
+    return ApiResponse.success(data=await OnlineService.list_online(page, page_size, keyword, login_user=login_user))
 
 
 @router.delete("/{jti}", summary="踢出在线用户")

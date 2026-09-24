@@ -1,27 +1,27 @@
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, func, Text
+from sqlalchemy import String, DateTime, Integer, func, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.common_entity.base_entity import Base
 
 
 class Role(Base):
-    """角色表：data_scope 与 dept_ids 支撑企业级数据权限"""
+    """角色表：data_scope 支撑企业级数据权限"""
     __tablename__ = "tb_role"
 
     role_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     role_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     role_name: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str] = mapped_column(String(255), nullable=True)
-    # 数据权限范围：1-全部数据 2-本部门及以下 3-本部门数据 4-仅本人数据 5-自定义部门数据
-    data_scope: Mapped[int] = mapped_column(nullable=False, default=4, comment="数据权限范围 1全部 2本部门及以下 3本部门 4仅本人 5自定义")
-    # data_scope=5 时的自定义部门范围，逗号分隔的 dept_id 列表
-    dept_ids: Mapped[str] = mapped_column(String(1024), nullable=True, comment="自定义数据权限部门ID列表，逗号分隔")
+    # 数据权限范围：1-全部 2-本部门及以下 3-本部门 4-仅本人
+    data_scope: Mapped[int] = mapped_column(nullable=False, default=4, comment="数据权限范围 1全部 2本部门及以下 3本部门 4仅本人")
     # 内置角色（ADMIN/USER）受保护，不允许删除
     is_builtin: Mapped[int] = mapped_column(nullable=False, default=0)
     status: Mapped[int] = mapped_column(nullable=False, default=1)
     is_deleted: Mapped[int] = mapped_column(nullable=False, default=0)
+    # 创建人 user_id：数据权限“仅看本人创建的角色”归属依据，存量回填为 0
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True, comment="创建人用户ID")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     update_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 

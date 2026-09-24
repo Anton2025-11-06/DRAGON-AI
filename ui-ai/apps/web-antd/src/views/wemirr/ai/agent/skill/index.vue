@@ -12,6 +12,8 @@ import { computed, nextTick, onMounted, reactive, ref } from 'vue';
 
 import { Page } from '@vben/common-ui';
 
+import { useAccess } from '@vben/access';
+
 import {
   CodeOutlined,
   DatabaseOutlined,
@@ -129,6 +131,15 @@ const selectedPreviewContent = computed({
 const isMarkdownPreview = computed(() =>
   ['markdown', 'md'].includes(getPreviewExtension(selectedPreviewPath.value)),
 );
+
+// 技能卡片操作按钮按后端权限点显隐（与 workflow:skill:* 一一对应）
+const { hasPermission } = useAccess();
+const canAdd = computed(() => hasPermission('workflow:skill:add'));
+const canView = computed(() => hasPermission('workflow:skill:view'));
+const canDownload = computed(() => hasPermission('workflow:skill:download'));
+const canRename = computed(() => hasPermission('workflow:skill:rename'));
+const canReplace = computed(() => hasPermission('workflow:skill:replace'));
+const canDelete = computed(() => hasPermission('workflow:skill:delete'));
 
 const { crudBinding, crudExpose, crudRef } = useFs({
   createCrudOptions,
@@ -510,7 +521,7 @@ onMounted(() => {
     <Card class="skill-list-card" title="AI技能管理">
       <fs-crud ref="crudRef" v-bind="crudBinding">
         <template #actionbar-left>
-          <a-button type="primary" @click="openCreateDrawer">
+          <a-button v-if="canAdd" type="primary" @click="openCreateDrawer">
             <template #icon><UploadOutlined /></template>
             上传技能压缩包
           </a-button>
@@ -565,22 +576,23 @@ onMounted(() => {
                 />
                 <div class="skill-card-actions">
                   <a-tooltip title="预览">
-                    <a-button type="text" size="small" @click="openPreview(item)">
+                    <a-button v-if="canView" type="text" size="small" @click="openPreview(item)">
                       <template #icon><EyeOutlined /></template>
                     </a-button>
                   </a-tooltip>
                   <a-tooltip title="下载">
-                    <a-button type="text" size="small" @click="downloadSkill(item)">
+                    <a-button v-if="canDownload" type="text" size="small" @click="downloadSkill(item)">
                       <template #icon><DownloadOutlined /></template>
                     </a-button>
                   </a-tooltip>
                   <a-tooltip title="重命名">
-                    <a-button type="text" size="small" @click="openRename(item)">
+                    <a-button v-if="canRename" type="text" size="small" @click="openRename(item)">
                       <template #icon><FormOutlined /></template>
                     </a-button>
                   </a-tooltip>
                   <a-tooltip title="替换目录">
                     <a-button
+                      v-if="canReplace"
                       type="text"
                       size="small"
                       @click="openReplaceDrawer(item)"
@@ -590,6 +602,7 @@ onMounted(() => {
                   </a-tooltip>
                   <a-tooltip title="删除">
                     <a-button
+                      v-if="canDelete"
                       danger
                       type="text"
                       size="small"

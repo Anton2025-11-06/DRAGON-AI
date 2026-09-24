@@ -3,6 +3,7 @@ from sqlalchemy import delete, func, select, update
 from common.common_entity.rbac_entity import Dept, Menu, Role, RoleMenu, UserRole
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import build_data_scope_filter
 from service.service_system.schemas.rbac_schema import (
     DeptCreateRequest, DeptUpdateRequest, MenuCreateRequest, MenuUpdateRequest,
     RoleCreateRequest, RoleMenusRequest, RoleUpdateRequest)
@@ -13,9 +14,14 @@ class RbacService:
     # ==================== 角色 ====================
     @staticmethod
     async def list_roles(page: int = 1, page_size: int = 10, role_name: str = None,
-                         status: int = None):
+                         status: int = None, login_user: dict = None):
         async with mysql_client.get_session() as session:
             query = select(Role).where(Role.is_deleted == 0)
+            # 数据权限：非管理员仅可见本人创建或可见部门内的角色
+            if login_user is not None:
+                cond = build_data_scope_filter(login_user, Role.created_by)
+                if cond is not None:
+                    query = query.where(cond)
             if role_name:
                 query = query.where(Role.role_name.like(f"%{role_name}%"))
             if status is not None:
@@ -28,7 +34,8 @@ class RbacService:
             items = [{
                 "role_id": r.role_id, "role_code": r.role_code, "role_name": r.role_name,
                 "description": r.description, "data_scope": r.data_scope,
-                "dept_ids": r.dept_ids, "is_builtin": r.is_builtin, "status": r.status,
+                "is_builtin": r.is_builtin, "status": r.status,
+                "created_by": r.created_by,
                 "create_time": r.create_time, "update_time": r.update_time,
             } for r in rows]
             return {"total": total, "items": items}
@@ -44,13 +51,13 @@ class RbacService:
                      "data_scope": r.data_scope} for r in rows]
 
     @staticmethod
-    async def create_role(request: RoleCreateRequest):
+    async def create_role(request: RoleCreateRequest, creator_id: int = 0):
         async with mysql_client.get_session() as session:
             exists = await session.execute(
                 select(Role).where(Role.role_code == request.role_code, Role.is_deleted == 0))
             if exists.scalar_one_or_none():
                 raise ValueError("角色编码已存在")
-            session.add(Role(**request.model_dump()))
+            session.add(Role(**request.model_dump(), created_by=creator_id or 0))
             await session.commit()
             log.info(f"Role created: {request.role_code}")
             return True
@@ -66,7 +73,6 @@ class RbacService:
             data = {k: v for k, v in request.model_dump().items() if v is not None}
             if role.is_builtin:
                 data.pop("data_scope", None)
-                data.pop("dept_ids", None)
             if data:
                 await session.execute(update(Role).where(Role.role_id == role_id).values(**data))
                 await session.commit()

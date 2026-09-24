@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from common.common_mysql.mysql import mysql_client
 from common.common_log.log_init import log
 from common.common_permission.permission import (
-    get_login_user, build_data_scope_filter, is_admin, DATA_SCOPE_ALL, DATA_SCOPE_SELF)
+    get_login_user, build_data_scope_filter)
 from common.common_utils.base32hex import b32hexdecode, b32hexencode
 
 from service.service_system.models.user import User
@@ -44,19 +44,17 @@ class UserService:
         """
         用户分页列表（企业级数据权限）：
         - ADMIN：查看全部
-        - 其他角色：按数据权限范围过滤（全部/本部门及以下/本部门/仅本人/自定义部门）
+        - 其他角色：按数据权限范围过滤（全部/本部门及以下/本部门/仅本人）
         返回项附带部门名称与角色集合
         """
         async with mysql_client.get_session() as session:
             query = select(User).where(User.is_deleted == 0)
-            # 应用数据权限过滤（非 ADMIN 时生成过滤条件）
+            # 数据权限：非管理员仅可见“本人创建”或“可见部门成员创建”的用户（admin/全部数据自动放行）
             if request is not None:
                 login_user = await get_login_user(request)
-                if not is_admin(login_user):
-                    scope_filter = await build_data_scope_filter(
-                        login_user, User.user_id, dept_field=User.dept_id, session=session)
-                    if scope_filter is not None:
-                        query = query.where(scope_filter)
+                scope_filter = build_data_scope_filter(login_user, User.created_by)
+                if scope_filter is not None:
+                    query = query.where(scope_filter)
 
             if username:
                 query = query.where(User.username.like(f"%{username}%"))
@@ -107,7 +105,7 @@ class UserService:
 
     # ==================== 新增 ====================
     @staticmethod
-    async def create_user(request: UserCreateRequest):
+    async def create_user(request: UserCreateRequest, creator_id: int = 0):
         """创建用户：支持指定部门与初始角色；真实姓名/部门/角色/手机号/邮箱为必填项"""
         missing = [name for name, val in (("真实姓名", request.real_name), ("部门", request.dept_id),
                                            ("角色", request.role_ids), ("手机号", request.phone),
@@ -123,6 +121,7 @@ class UserService:
                     phone=request.phone,
                     real_name=request.real_name,
                     dept_id=request.dept_id or 0,
+                    created_by=creator_id or 0,
                 )
                 session.add(user)
                 await session.flush()

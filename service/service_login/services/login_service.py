@@ -9,6 +9,9 @@ from common.common_entity.rbac_entity import Dept, Menu, Role, RoleMenu, UserRol
 from common.common_log.log_init import log
 from common.common_middleware.exception_handler import UnauthorizedException
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import (
+    get_child_dept_ids, DATA_SCOPE_ALL, DATA_SCOPE_DEPT_AND_CHILD, DATA_SCOPE_DEPT,
+    DATA_SCOPE_SELF)
 from common.common_redis.redis import client
 from common.common_utils.base32hex import b32hexencode
 from common.common_utils.jwt_util import create_access_token, decode_token
@@ -55,10 +58,9 @@ class LoginService:
         组装登录载荷：用户基础信息 + 角色集合 + 权限标识集合 + 数据权限范围
         - permissions：所有角色菜单授权中的按钮权限标识（perm 非空）
         - data_scopes：各角色的数据权限范围（数据权限过滤按最大范围放行）
-        - data_scope_dept_ids：自定义范围（data_scope=5）时各角色的部门集合
         """
         rows = await session.execute(
-            select(Menu.perm, Role.role_code, Role.data_scope, Role.dept_ids)
+            select(Menu.perm, Role.role_code, Role.data_scope)
             .join(RoleMenu, RoleMenu.menu_id == Menu.menu_id)
             .join(Role, Role.role_id == RoleMenu.role_id)
             .join(UserRole, UserRole.role_id == Role.role_id)
@@ -67,30 +69,56 @@ class LoginService:
                    Menu.status == 1, Menu.is_deleted == 0,
                    Menu.perm.isnot(None), Menu.perm != "")
         )
-        perms, roles, data_scopes, data_scope_dept_ids = set(), set(), set(), set()
-        for perm, role_code, data_scope, dept_ids in rows.all():
+        perms, roles, data_scopes = set(), set(), set()
+        for perm, role_code, data_scope in rows.all():
             if perm:
                 perms.add(perm)
             if role_code:
                 roles.add(role_code)
             if data_scope:
                 data_scopes.add(data_scope)
-            if dept_ids:
-                data_scope_dept_ids.add(dept_ids)
         # 部门名称写入登录态，供“在线用户”列表展示与关键词检索（旧登录态由查询端按部门表回填）
         dept_name = ""
         if user.dept_id:
             dept_row = await session.execute(
                 select(Dept.dept_name).where(Dept.dept_id == user.dept_id, Dept.is_deleted == 0))
             dept_name = dept_row.scalar_one_or_none() or ""
+        # 登录时一次算好数据权限部门集合 scope_dept_ids，缓存进载荷供各列表过滤（查询端不再递归）
+        scope_dept_ids = await LoginService._resolve_scope_dept_ids(session, user, "ADMIN" in roles)
         return {
             "user_id": user.user_id, "username": user.username,
             "real_name": user.real_name, "dept_id": user.dept_id or 0,
             "dept_name": dept_name,
             "roles": sorted(roles), "permissions": sorted(perms),
             "data_scopes": sorted(data_scopes),
-            "data_scope_dept_ids": sorted(data_scope_dept_ids),
+            "scope_dept_ids": scope_dept_ids,
         }
+
+    @staticmethod
+    async def _resolve_scope_dept_ids(session: AsyncSession, user: User, is_admin_role: bool):
+        """按用户各角色 data_scope 解析可见部门集合（含子部门），多角色取并集：
+        - 管理员或任一角色为“全部”(1) → None（不限）
+        - 本部门及以下(2)/本部门(3) → 本人部门（及以下子部门）
+        - 仅本人(4) → 不贡献部门（集合为空时即“仅本人”）
+        """
+        if is_admin_role:
+            return None
+        rows = await session.execute(
+            select(Role.data_scope)
+            .join(UserRole, UserRole.role_id == Role.role_id)
+            .where(UserRole.user_id == user.user_id, Role.is_deleted == 0, Role.status == 1))
+        own_dept = user.dept_id or 0
+        dept_ids = set()
+        for data_scope in rows.scalars().all():
+            scope = data_scope or DATA_SCOPE_SELF
+            if scope == DATA_SCOPE_ALL:
+                return None
+            if scope == DATA_SCOPE_DEPT_AND_CHILD and own_dept:
+                dept_ids.add(own_dept)
+                dept_ids.update(await get_child_dept_ids(session, own_dept))
+            elif scope == DATA_SCOPE_DEPT and own_dept:
+                dept_ids.add(own_dept)
+        return sorted(dept_ids)
 
     @staticmethod
     async def register(request: UserCreateRequest):

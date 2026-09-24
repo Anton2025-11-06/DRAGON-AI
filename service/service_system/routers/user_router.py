@@ -14,7 +14,8 @@ router = APIRouter(prefix="/users", tags=["用户管理"])
 @router.post("", summary="创建用户")
 @has_permission("system:user:add")
 async def create_user(request: Request, body: UserCreateRequest):
-    result = await UserService.create_user(body)
+    login_user = await get_login_user(request)
+    result = await UserService.create_user(body, creator_id=int(login_user.get("user_id") or 0))
     if result:
         return ApiResponse.success("创建成功")
     else:

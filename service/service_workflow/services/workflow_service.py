@@ -19,6 +19,7 @@ from common.common_constants.constant import PREFIX_WORKFLOW_API_KEY
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import build_data_scope_filter
 from common.common_redis.redis import client
 from service.service_workflow.models.workflow_entity import (
     Workflow, WorkflowApiKey, WorkflowTemplate, WorkflowVersion,
@@ -39,7 +40,7 @@ class WorkflowService:
 
     @staticmethod
     async def page(current: int = 1, size: int = 10, name: str = None,
-                   status: str = None, created_by: int = None):
+                   status: str = None, created_by: int = None, login_user: dict = None):
         async with mysql_client.get_session() as session:
             stmt = select(Workflow)
             if name:
@@ -48,6 +49,10 @@ class WorkflowService:
                 stmt = stmt.where(Workflow.status == status)
             if created_by is not None:
                 stmt = stmt.where(Workflow.created_by == created_by)
+            # 数据权限：仅看本人创建 + 数据范围内部门成员创建的
+            scope_cond = build_data_scope_filter(login_user, Workflow.created_by) if login_user else None
+            if scope_cond is not None:
+                stmt = stmt.where(scope_cond)
             total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
             rows = (await session.execute(
                 stmt.order_by(Workflow.id.desc())

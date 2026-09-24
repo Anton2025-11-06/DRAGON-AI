@@ -40,7 +40,8 @@ def _parse_tags_form(raw: str) -> List[str]:
 @has_permission("workflow:skill:list")
 async def page_skills(request: Request, current: int = 1, size: int = 10,
                       keyword: str = None, category: str = None, status: bool = None):
-    data = await svc.SkillService.page(current, size, keyword, category,status)
+    login_user = await get_login_user(request)
+    data = await svc.SkillService.page(current, size, keyword, category, status, login_user=login_user)
     return ApiResponse.success(data=data)
 
 

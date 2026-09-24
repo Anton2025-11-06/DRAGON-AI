@@ -13,7 +13,7 @@ from fastapi import APIRouter, Query, Request
 
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import get_user_id, has_permission
+from common.common_permission.permission import get_user_id, get_login_user, has_permission
 from service.service_workflow.schemas.workflow_schema import (
      WorkflowSaveReq,
 )
@@ -29,7 +29,9 @@ router = APIRouter(prefix="/workflows", tags=["工作流编排"])
 @has_permission("workflow:workflow:list")
 async def page_workflows(request: Request, page: int = 1, page_size: int = 10,
                          name: str = None, status: str = None):
-    data = await WorkflowService.page(current=page, size=page_size, name=name, status=status)
+    login_user = await get_login_user(request)
+    data = await WorkflowService.page(current=page, size=page_size, name=name, status=status,
+                                      login_user=login_user)
     return ApiResponse.success(data=data)
 
 

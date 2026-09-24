@@ -6,6 +6,8 @@ import type {
 
 import { h } from 'vue';
 
+import { useAccess } from '@vben/access';
+
 import { PlayCircleOutlined } from '@ant-design/icons-vue';
 import { dict } from '@fast-crud/fast-crud';
 import { message } from 'ant-design-vue';
@@ -23,6 +25,8 @@ export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
   const { openFormModal, openTestModal, toggleStatus } = props.context || {};
+  // 操作按钮按后端权限点显隐（与 workflow:tool:* 一一对应）
+  const { hasPermission } = useAccess();
 
   return {
     crudOptions: {
@@ -35,6 +39,7 @@ export default function createCrudOptions(
       actionbar: {
         buttons: {
           add: {
+            show: hasPermission('workflow:tool:add'),
             click() {
               openFormModal?.(null);
             },
@@ -101,7 +106,7 @@ export default function createCrudOptions(
             size: 'small',
             icon: () => h(PlayCircleOutlined),
             title: '在受限沙箱中运行函数',
-            show: true,
+            show: hasPermission('workflow:tool:test'),
             order: 0,
             click({ row }: any) {
               if (openTestModal) {
@@ -114,6 +119,7 @@ export default function createCrudOptions(
           edit: {
             text: '编辑',
             order: 1,
+            show: hasPermission('workflow:tool:edit'),
             click({ row }: any) {
               openFormModal?.(row.id);
             },
@@ -121,6 +127,7 @@ export default function createCrudOptions(
           remove: {
             text: '删除',
             order: 2,
+            show: hasPermission('workflow:tool:delete'),
           },
         },
       },

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, Request
 
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import has_permission
+from common.common_permission.permission import get_login_user, has_permission
 from service.service_system.schemas.rbac_schema import (
     DeptCreateRequest, DeptUpdateRequest, MenuCreateRequest, MenuUpdateRequest,
     RoleCreateRequest, RoleMenusRequest, RoleUpdateRequest)
@@ -23,13 +23,16 @@ async def list_roles(request: Request,
                      page_size: int = Query(10, ge=1, le=100, description="每页数量"),
                      role_name: str = Query(None, description="角色名称模糊查询"),
                      status: int = Query(None, ge=0, le=1, description="状态：0-停用，1-启用")):
-    return ApiResponse.success(data=await RbacService.list_roles(page, page_size, role_name, status))
+    login_user = await get_login_user(request)
+    return ApiResponse.success(data=await RbacService.list_roles(
+        page, page_size, role_name, status, login_user=login_user))
 
 
 @router.post("/roles", summary="创建角色")
 @has_permission("system:role:add")
 async def create_role(request: Request, body: RoleCreateRequest):
-    await RbacService.create_role(body)
+    login_user = await get_login_user(request)
+    await RbacService.create_role(body, creator_id=int(login_user.get("user_id") or 0))
     return ApiResponse.success("创建成功")
 
 

@@ -5,6 +5,8 @@ import type {
 
 import { computed } from 'vue';
 
+import { useAccess } from '@vben/access';
+
 import { dict } from '@fast-crud/fast-crud';
 
 import * as api from './api';
@@ -13,6 +15,8 @@ export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
   const { onPreview, onReplace, onRename, toggleStatus } = props.context;
+  // 操作按钮按后端权限点显隐（与 workflow:skill:* 一一对应）
+  const { hasPermission } = useAccess();
   return {
     crudOptions: {
       request: {
@@ -51,6 +55,7 @@ export default function createCrudOptions(
             size: 'small',
             title: '替换技能压缩包',
             order: 1,
+            show: hasPermission('workflow:skill:replace'),
             click(context: any) {
               onReplace?.(context.row);
             },
@@ -61,6 +66,7 @@ export default function createCrudOptions(
             size: 'small',
             title: '重命名技能',
             order: 1.5,
+            show: hasPermission('workflow:skill:rename'),
             click(context: any) {
               onRename?.(context.row);
             },
@@ -71,11 +77,12 @@ export default function createCrudOptions(
             size: 'small',
             title: '技能预览',
             order: 0,
+            show: hasPermission('workflow:skill:view'),
             click(context: any) {
               onPreview?.(context.row);
             },
           },
-          remove: { order: 2 },
+          remove: { order: 2, show: hasPermission('workflow:skill:delete') },
         },
       },
       columns: {

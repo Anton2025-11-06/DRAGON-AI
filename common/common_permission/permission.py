@@ -2,7 +2,7 @@ from functools import wraps
 from typing import Optional
 
 from fastapi import Request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.common_constants.constant import PREFIX_LOGIN
@@ -115,28 +115,10 @@ DATA_SCOPE_ALL = 1  # 全部数据
 DATA_SCOPE_DEPT_AND_CHILD = 2  # 本部门及以下
 DATA_SCOPE_DEPT = 3  # 本部门数据
 DATA_SCOPE_SELF = 4  # 仅本人数据
-DATA_SCOPE_CUSTOM = 5  # 自定义部门数据
-
-
-def get_data_scope(login_user: dict) -> int:
-    """解析当前用户的有效数据权限范围：返回所有角色中范围最大（数值最小）的，ADMIN 固定为全部"""
-    if is_admin(login_user):
-        return DATA_SCOPE_ALL
-    scopes = login_user.get("data_scopes", [])
-    return min(scopes) if scopes else DATA_SCOPE_SELF
-
-
-def get_custom_dept_ids(login_user: dict) -> list:
-    """解析自定义数据权限（data_scope=5）的部门集合，跨角色取并集"""
-    dept_ids = set()
-    for scope in login_user.get("data_scope_dept_ids", []) or []:
-        if scope:
-            dept_ids.update(int(d) for d in scope.split(",") if d.strip().isdigit())
-    return sorted(dept_ids)
 
 
 async def get_child_dept_ids(session: AsyncSession, dept_id: int) -> list:
-    """递归查询部门及其全部子孙部门 id，用于"本部门及以下"数据权限"""
+    """递归查询部门的全部子孙部门 id（不含自身），供登录时展开数据权限部门集合"""
     result = set()
 
     async def _collect(pid: int):
@@ -151,50 +133,35 @@ async def get_child_dept_ids(session: AsyncSession, dept_id: int) -> list:
     return sorted(result)
 
 
-async def build_data_scope_filter(login_user: dict, owner_field, user_field=None,
-                                  dept_field=None, session: AsyncSession = None):
+def get_login_scope(login_user: dict):
+    """取登录载荷里预算好的数据权限部门集合 scope_dept_ids：
+    - None：不限（管理员或 data_scope=1 全部数据）
+    - []：仅本人（data_scope=4）
+    - 非空列表：这些部门（已含子部门）内用户创建的数据可见
+    该字段由 LoginService 登录时按各角色 data_scope 解析并缓存进载荷，查询端不再递归。
     """
-    构建数据权限 SQLAlchemy 过滤条件（与外部查询用 .where() 组合）：
-    :param login_user: 登录用户载荷（需含 dept_id）
-    :param owner_field: 数据归属人 user_id 字段（列对象，如 User.user_id）
-    :param user_field: 可选，若数据有独立 user_id 字段且与 owner_field 不同则传
-    :param dept_field: 数据所属部门 dept_id 字段（列对象，如 User.dept_id）
-    :param session: 数据库会话，计算子孙部门时需要
-    :return: SQLAlchemy 条件（无条件时返回 None）
-    """
-    from common.common_entity.rbac_entity import Dept  # 延迟导入避免循环依赖
-
-    scope = get_data_scope(login_user)
-    user_id = login_user.get("user_id")
-    dept_id = login_user.get("dept_id") or 0
-    target_user_field = user_field or owner_field
-
-    # 1. 全部数据：ADMIN 或角色含"全部数据"权限直接放行
-    if scope == DATA_SCOPE_ALL:
+    if is_admin(login_user):
         return None
+    if "scope_dept_ids" not in login_user:
+        # 旧登录态未预算该字段：保守回退为仅本人，待重新登录后按部门放开
+        return []
+    return login_user.get("scope_dept_ids")
 
-    # 5. 自定义部门数据
-    if scope == DATA_SCOPE_CUSTOM:
-        custom_ids = get_custom_dept_ids(login_user)
-        if not dept_field or not custom_ids:
-            return None
-        return dept_field.in_(custom_ids)
 
-    # 2. 本部门及以下
-    if scope == DATA_SCOPE_DEPT_AND_CHILD:
-        if not dept_field:
-            return None
-        child_ids = [dept_id] + (await get_child_dept_ids(session, dept_id) if session else [])
-        return dept_field.in_(child_ids)
-
-    # 3. 本部门数据
-    if scope == DATA_SCOPE_DEPT:
-        if not dept_field:
-            return None
-        return dept_field == dept_id
-
-    # 4. 仅本人数据（默认）
-    return target_user_field == user_id
+def build_data_scope_filter(login_user: dict, owner_col):
+    """构建数据权限过滤条件（与外部查询用 .where() 组合），返回 None 表示不限制。
+    可见口径：我创建的 OR 创建人落在 scope_dept_ids 部门内的（两个集合的并集，与当前用户所属部门无关）。
+    :param owner_col: 数据归属人列（如 X.created_by）
+    """
+    scope_dept_ids = get_login_scope(login_user)
+    if scope_dept_ids is None:
+        return None
+    conds = [owner_col == login_user.get("user_id")]
+    if scope_dept_ids:
+        from common.common_entity.user_entity import User  # 延迟导入避免循环依赖
+        conds.append(owner_col.in_(
+            select(User.user_id).where(User.dept_id.in_(scope_dept_ids))))
+    return or_(*conds)
 
 
 # 延迟导入 Dept 到模块尾部，避免与 rbac_entity 形成循环导入

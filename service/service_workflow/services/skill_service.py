@@ -20,6 +20,7 @@ from sqlalchemy import delete, func, or_, select, update
 from common import common_storage
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.permission import build_data_scope_filter
 from common.common_storage.base import new_file_name
 from service.service_workflow.models.agent_entity import Skill
 from common.common_threadpool.pool import thread_pool
@@ -52,7 +53,7 @@ class SkillService:
     # ==================== 查询 ====================
     @staticmethod
     async def page(page: int = 1, page_size: int = 10, keyword: str = None,
-                   category: str = None, status: int = None) -> dict:
+                   category: str = None, status: int = None, login_user: dict = None) -> dict:
         async with mysql_client.get_session() as session:
             conds = []
             if keyword:
@@ -62,6 +63,10 @@ class SkillService:
                 conds.append(Skill.category == category)
             if status is not None:
                 conds.append(Skill.status == status)
+            # 数据权限：非管理员仅可见本人创建或可见部门内创建的技能
+            scope_cond = build_data_scope_filter(login_user, Skill.created_by) if login_user else None
+            if scope_cond is not None:
+                conds.append(scope_cond)
             total = (await session.execute(
                 select(func.count()).select_from(Skill).where(*conds))).scalar()
             rows = (await session.execute(

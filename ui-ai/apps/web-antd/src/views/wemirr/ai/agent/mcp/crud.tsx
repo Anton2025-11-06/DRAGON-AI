@@ -8,6 +8,8 @@ import type {
 
 import { h } from 'vue';
 
+import { useAccess } from '@vben/access';
+
 import {
   ApiOutlined,
   ToolOutlined,
@@ -23,6 +25,8 @@ export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
   const { openToolsModal } = props.context || {};
+  // 操作按钮按后端权限点显隐（与 workflow:mcp:* 一一对应）
+  const { hasPermission } = useAccess();
 
   return {
     crudOptions: {
@@ -37,6 +41,11 @@ export default function createCrudOptions(
       },
       toolbar: {
         buttons: {},
+      },
+      actionbar: {
+        buttons: {
+          add: { show: hasPermission('workflow:mcp:add') },
+        },
       },
       form: {
         wrapper: {
@@ -210,11 +219,11 @@ export default function createCrudOptions(
         width: 280,
         buttons: {
           edit: {
-            show: true,
+            show: hasPermission('workflow:mcp:edit'),
             text: '编辑',
           },
           remove: {
-            show: true,
+            show: hasPermission('workflow:mcp:delete'),
             text: '删除',
             type: 'link',
             async click(context: any) {
@@ -235,7 +244,7 @@ export default function createCrudOptions(
             size: 'small',
             icon: () => h(ApiOutlined),
             title: '测试MCP连接',
-            show: true,
+            show: hasPermission('workflow:mcp:test-external'),
             click: async ({ row }: any) => {
               const hide = message.loading('正在测试连接...', 0);
               try {
@@ -276,7 +285,7 @@ export default function createCrudOptions(
             size: 'small',
             icon: () => h(ToolOutlined),
             title: '查看MCP工具',
-            show: true,
+            show: hasPermission('workflow:mcp:toolList'),
             click: ({ row }: any) => {
               if (openToolsModal) {
                 openToolsModal(row);

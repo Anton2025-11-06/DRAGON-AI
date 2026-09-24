@@ -18,7 +18,8 @@ async def page_mcp_post(request: Request, body: McpServerPageRequest):
     login_user = await get_login_user(request)
     data = await McpServerService.page(
         body.current, body.size, body.name, body.status,
-        viewer_id=int(login_user.get("user_id") or 0), viewer_admin=is_admin(login_user))
+        viewer_id=int(login_user.get("user_id") or 0), viewer_admin=is_admin(login_user),
+        login_user=login_user)
     return ApiResponse.success(data=data)
 
 
