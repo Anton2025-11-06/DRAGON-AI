@@ -3,6 +3,10 @@
 > **如果觉得项目不错，请帮忙点个 Star，谢谢。** ⭐
 > [![Star this repo](https://img.shields.io/github/stars/Anton2025-11-06/DRAGON-AI?style=social)](https://github.com/Anton2025-11-06/DRAGON-AI)
 
+> 作者微信：![img.png](img.png)
+
+> 在线体验：http://47.111.117.95:12345   viewer/viewer
+
 > 本 README 与代码同步维护：**标「已开发」的都能跑，标「开发中」「规划中」的请当作不可用**。
 > 中文 / [English](README.en.md)。
 
@@ -21,8 +25,7 @@
 | 在线用户 / ARQ 监控 | 在线会话踢出；worker 节点存活、队列积压、切片数在线调整 |
 | 限流配置中心 | 模块桶级 QPS/日限额，Redis 原子计数，网关热加载 |
 
-![角色管理](docs/role-manager.png)
-![审计日志](docs/audit-log-traceid.png)
+
 
 ### 2. AI 模型网关与模型广场
 
@@ -32,8 +35,7 @@
 - **模型广场全流程**：接入（直连/非直连、后缀拼接）→ 申请 → 审批 → API Key 发放/回收 → 一键连通性测试 → 动态上下线（Redis 缓存即时刷新）
 - **模型体验**：网页端多模型对话，流式输出、思考链、工具调用结果展示
 
-![模型中心](docs/model-center.png)
-![模型对话](docs/model-chat.png)
+
 
 ### 3. 工作流 / 智能体编排
 
@@ -48,7 +50,7 @@
 - **资源中心**：技能（SKILL.zip 上传/预览/在线编辑/启停）、工具（动态 Python 函数 + 沙箱）、MCP 连接（`tools/list` 动态发现）、工作流模板（服务首启自种）
 - **对外提供服务**：API Key 元数据（限流/过期/启停）+ 四条开放端点（submit / 查状态 / SSE / cancel）
 
-![工作流画布](docs/workflow.png)
+
 
 ### 4. 执行引擎与基础设施
 
