@@ -120,6 +120,25 @@ export default function crud(
           column: { show: false },
           search: { show: false },
           addForm: { value: [] },
+          // valueBuilder/valueResolve 必须挂在列根级：crud 只遍历根列做
+          // 分页数据转换（doValueBuilder）与提交前转换（doValueResolve），
+          // 写在 form 内则读取时不转换、提交时却仍会转换，字符串上调 join 直接抛错
+          valueBuilder({ value, row, key }: ValueBuilderContext): void {
+            // 后端逗号分隔字符串 → 多选数组
+            row[key] = value
+              ? String(value)
+                  .split(',')
+                  .filter(Boolean)
+                  .map((it) => Number(it))
+              : [];
+          },
+          valueResolve({ form, key }: ValueResolveContext): void {
+            // 提交时多选数组 → 逗号分隔字符串；已是字符串说明本次未编辑过该字段
+            const value = form[key];
+            if (Array.isArray(value)) {
+              form[key] = value.join(',');
+            }
+          },
           form: {
             // fast-crud 类型仅支持 boolean，函数式动态显隐需断言（保持原有交互）
             show: (({ form }: any) => {
@@ -139,20 +158,6 @@ export default function crud(
                   .toLowerCase()
                   .includes(val.toLowerCase());
               },
-            },
-            valueBuilder({ value, row, key }: ValueBuilderContext): void {
-              // 后端逗号分隔字符串 → 多选数组
-              row[key] = value
-                ? String(value)
-                    .split(',')
-                    .filter(Boolean)
-                    .map((it) => Number(it))
-                : [];
-            },
-            valueResolve({ form, key }: ValueResolveContext): void {
-              // 提交时数组 → 逗号分隔字符串
-              const list = form[key] ?? [];
-              form[key] = list.join(',');
             },
           },
           dict: dict({

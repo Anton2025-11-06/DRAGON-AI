@@ -5,7 +5,7 @@
  */
 import type { ApiKeyListResp } from '#/api/ai-workflow';
 
-import { onMounted, reactive, ref } from 'vue';
+import { onMounted, reactive, ref, watch } from 'vue';
 
 import {
   CopyOutlined,
@@ -111,13 +111,23 @@ const columns = [
 ];
 
 async function loadApiKeys() {
+  // 记录发起时的 workflowId：抽屉会被复用，慢回来的旧响应不能覆盖新工作流的列表
+  const workflowId = props.workflowId;
   loading.value = true;
   try {
-    apiKeys.value = await listApiKeys(props.workflowId);
+    const list = await listApiKeys(workflowId);
+    if (workflowId !== props.workflowId) {
+      return;
+    }
+    apiKeys.value = list || [];
   } catch {
-    message.error('加载 API 访问凭证失败');
+    if (workflowId === props.workflowId) {
+      message.error('加载 API 访问凭证失败');
+    }
   } finally {
-    loading.value = false;
+    if (workflowId === props.workflowId) {
+      loading.value = false;
+    }
   }
 }
 
@@ -215,6 +225,20 @@ async function handleEdit() {
 onMounted(() => {
   loadApiKeys();
 });
+
+// 父级抽屉不销毁组件，切换工作流时只有 props 在变：必须重新拉取，
+// 否则所有工作流里显示的都是最后一次加载的那一份 key 列表
+watch(
+  () => props.workflowId,
+  () => {
+    apiKeys.value = [];
+    showCreateModal.value = false;
+    showEditModal.value = false;
+    showUsageModal.value = false;
+    usageApiKey.value = '';
+    loadApiKeys();
+  },
+);
 </script>
 
 <template>

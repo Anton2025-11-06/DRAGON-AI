@@ -195,8 +195,31 @@ class ModelService:
             raise ValueError(f"不支持的提供商: {provider}，可选: {', '.join(PROVIDERS_ALL)}")
 
     @staticmethod
+    async def name_exists(name: str, exclude_id: int = None) -> bool:
+        """模型名称是否已被占用，全表唯一；exclude_id 排除自身（编辑场景）
+
+        名称是广场列表、工作流节点下拉、调用方指代模型的唯一键，重名即无法区分。
+        """
+        async with mysql_client.get_session() as session:
+            stmt = select(Model.id).where(Model.name == name)
+            if exclude_id is not None:
+                stmt = stmt.where(Model.id != exclude_id)
+            return (await session.execute(stmt.limit(1))).scalar_one_or_none() is not None
+
+    @staticmethod
+    async def ensure_name_unique(name: str, exclude_id: int = None):
+        """名称查重失败即拒绝保存（新增与修改共用同一口径）；全空格名视同未填"""
+        if not (name or '').strip():
+            raise ValueError("模型名称不能为空")
+        if await ModelService.name_exists(name.strip(), exclude_id):
+            raise ValueError(f"模型名称已存在：{name}")
+
+    @staticmethod
     async def create(req: ModelSaveRequest, created_by: int = 0) -> int:
-        """新增模型：分类/提供商校验 + 限流参数归一 + 常用参数派生注入"""
+        """新增模型：名称唯一 + 分类/提供商校验 + 限流参数归一 + 常用参数派生注入"""
+        # 查重与入库用同一个值，避免前后空格绕开唯一判定
+        req.name = (req.name or '').strip()
+        await ModelService.ensure_name_unique(req.name)
         ModelService._validate_meta(req.category, req.provider)
         common_params = [p.model_dump() for p in (req.common_params or [])]
         async with mysql_client.get_session() as session:
@@ -226,7 +249,9 @@ class ModelService:
 
     @staticmethod
     async def update(model_id: int, req: ModelSaveRequest) -> bool:
-        """修改模型：None 字段（base_url/api_key/tutorial_md）保持原值，空串表示清空"""
+        """修改模型：名称唯一（排除自身）；None 字段（base_url/api_key/tutorial_md）保持原值，空串表示清空"""
+        req.name = (req.name or '').strip()
+        await ModelService.ensure_name_unique(req.name, exclude_id=model_id)
         ModelService._validate_meta(req.category, req.provider)
         common_params = [p.model_dump() for p in (req.common_params or [])]
         async with mysql_client.get_session() as session:

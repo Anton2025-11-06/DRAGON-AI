@@ -202,6 +202,12 @@ export const GetDetail = (id: number) =>
 export const AddObj = (data: ModelSaveReq) =>
   defHttp.post(`${BASE_URL}/create`, data);
 
+/** 模型名称查重（保存前后端同样会校，这里只是提前拿准确提示）；excludeId 为编辑时的自身 id */
+export const CheckName = (name: string, excludeId?: number) =>
+  defHttp.get<{ exists: boolean }>(`${BASE_URL}/check-name`, {
+    params: { name, exclude_id: excludeId },
+  });
+
 export const UpdateObj = (id: number, data: ModelSaveReq) =>
   defHttp.put(`${BASE_URL}/${id}/modify`, data);
 

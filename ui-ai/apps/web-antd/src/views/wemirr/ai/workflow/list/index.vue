@@ -294,7 +294,12 @@ function handleTemplateSaved() {
       placement="right"
       :width="720"
     >
-      <ApiKeyManager v-if="apiDrawerItem" :workflow-id="apiDrawerItem.id" />
+      <!-- key 绑定工作流 id：抽屉内容不随关闭销毁，换工作流时必须重建实例，避免沿用上一个工作流的列表 -->
+      <ApiKeyManager
+        v-if="apiDrawerItem"
+        :key="apiDrawerItem.id"
+        :workflow-id="apiDrawerItem.id"
+      />
     </a-drawer>
 
     <!-- 保存为模块弹窗（需求 4.2） -->

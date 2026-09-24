@@ -281,7 +281,7 @@ const buildSavePayload = (): api.ModelSaveReq => {
       type: p.type,
     }));
   return {
-    name: base_form_data.name,
+    name: base_form_data.name.trim(),
     category: base_form_data.model_type as api.ModelSaveReq['category'],
     provider: base_form_data.provider as api.ModelSaveReq['provider'],
     model_name: base_form_data.model_name,
@@ -305,7 +305,7 @@ const buildSavePayload = (): api.ModelSaveReq => {
 
 /** 基础必填校验（名称/类型/标识/提供商/真实地址/密钥）：返回首个缺失提示 */
 const validateRequired = (): null | string => {
-  if (!base_form_data.name) return '请输入模型名称';
+  if (!base_form_data.name.trim()) return '请输入模型名称';
   if (!base_form_data.model_type) return '请选择模型类型';
   if (!base_form_data.model_name) return '请输入模型标识';
   if (!base_form_data.provider) return '请选择提供商';
@@ -323,6 +323,16 @@ const submit = async () => {
   const payload = buildSavePayload();
   saving.value = true;
   try {
+    // 名称全表唯一（后端 create/modify 同样会拒）：先查一次，重名时把用户带回基础信息页签改名；
+    // 查重接口本身出错不阻断保存，权威判定仍在后端
+    const dup = await api
+      .CheckName(payload.name, props.model?.id)
+      .catch(() => ({ exists: false }));
+    if (dup?.exists) {
+      message.warning(`模型名称已存在：${payload.name}，请更换名称`);
+      activeTab.value = 'base-info';
+      return;
+    }
     if (props.model) {
       await api.UpdateObj(props.model.id, payload);
       message.success('保存成功');

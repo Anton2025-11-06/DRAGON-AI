@@ -72,6 +72,14 @@ async def registry(request: Request, provider: str = None, category: str = None)
     return ApiResponse.success(data=await ModelService.registry(provider, category))
 
 
+@router.get("/check-name", summary="模型名称查重（新增/编辑弹窗提交前校验）")
+@require_permission(PERM_ADD, PERM_EDIT)
+async def check_name(request: Request, name: str, exclude_id: int = None):
+    """重名在保存时也会被拒，这里只是把准确提示提前到提交前"""
+    exists = await ModelService.name_exists(name, exclude_id)
+    return ApiResponse.success(data={"exists": exists})
+
+
 @router.get("/my-keys", summary="我的 API Key（申请通过后可见）")
 async def my_keys(request: Request):
     login_user = await get_login_user(request)
