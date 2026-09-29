@@ -5,12 +5,13 @@ import time
 import uuid
 
 from common.common_constants.constant import PREFIX_LOGIN, TOKEN_EXPIRE
-from common.common_entity.rbac_entity import Dept, Menu, Role, RoleMenu, UserRole
+from common.common_entity.rbac_entity import (
+    Dept, Menu, Role, RoleMenu, UserGroup, UserGroupMember, UserRole)
 from common.common_log.log_init import log
 from common.common_middleware.exception_handler import UnauthorizedException
 from common.common_mysql.mysql import mysql_client
 from common.common_permission.permission import (
-    get_child_dept_ids, DATA_SCOPE_ALL, DATA_SCOPE_DEPT_AND_CHILD, DATA_SCOPE_DEPT,
+    get_child_dept_ids, get_dept_ancestor_ids, DATA_SCOPE_DEPT_AND_CHILD, DATA_SCOPE_DEPT,
     DATA_SCOPE_SELF)
 from common.common_redis.redis import client
 from common.common_utils.base32hex import b32hexencode
@@ -55,9 +56,12 @@ class LoginService:
     @staticmethod
     async def _build_payload(session: AsyncSession, user: User) -> dict:
         """
-        组装登录载荷：用户基础信息 + 角色集合 + 权限标识集合 + 数据权限范围
+        组装登录载荷：用户基础信息 + 角色集合 + 权限标识集合 + 数据权限范围 + ACL 主体集合
         - permissions：所有角色菜单授权中的按钮权限标识（perm 非空）
         - data_scopes：各角色的数据权限范围（数据权限过滤按最大范围放行）
+        - role_ids/dept_ancestor_ids/group_ids：资源 ACL 的四类授权主体（用户/角色/部门/用户组）
+          中需要联表才能得到的三个，登录时一次算完，求值侧零查询（与 scope_dept_ids 同口径：
+          角色/部门/组成员变化下次重新登录即生效）
         """
         rows = await session.execute(
             select(Menu.perm, Role.role_code, Role.data_scope)
@@ -85,6 +89,17 @@ class LoginService:
             dept_name = dept_row.scalar_one_or_none() or ""
         # 登录时一次算好数据权限部门集合 scope_dept_ids，缓存进载荷供各列表过滤（查询端不再递归）
         scope_dept_ids = await LoginService._resolve_scope_dept_ids(session, user, "ADMIN" in roles)
+        # 角色 id 集合不能从上面的菜单查询里搭：那个 join 只带出「有菜单授权的角色」
+        role_ids = sorted({r[0] for r in (await session.execute(
+            select(Role.role_id)
+            .join(UserRole, UserRole.role_id == Role.role_id)
+            .where(UserRole.user_id == user.user_id,
+                   Role.is_deleted == 0, Role.status == 1))).all()})
+        group_ids = sorted({r[0] for r in (await session.execute(
+            select(UserGroupMember.group_id)
+            .join(UserGroup, UserGroup.group_id == UserGroupMember.group_id)
+            .where(UserGroupMember.user_id == user.user_id,
+                   UserGroup.is_deleted == 0, UserGroup.status == 1))).all()})
         return {
             "user_id": user.user_id, "username": user.username,
             "real_name": user.real_name, "dept_id": user.dept_id or 0,
@@ -92,12 +107,15 @@ class LoginService:
             "roles": sorted(roles), "permissions": sorted(perms),
             "data_scopes": sorted(data_scopes),
             "scope_dept_ids": scope_dept_ids,
+            "role_ids": role_ids,
+            "group_ids": group_ids,
+            "dept_ancestor_ids": await get_dept_ancestor_ids(session, user.dept_id or 0),
         }
 
     @staticmethod
     async def _resolve_scope_dept_ids(session: AsyncSession, user: User, is_admin_role: bool):
         """按用户各角色 data_scope 解析可见部门集合（含子部门），多角色取并集：
-        - 管理员或任一角色为“全部”(1) → None（不限）
+        - 管理员 → None（不限；「全部数据」档已废弃，非 ADMIN 不可能不限范围）
         - 本部门及以下(2)/本部门(3) → 本人部门（及以下子部门）
         - 仅本人(4) → 不贡献部门（集合为空时即“仅本人”）
         """
@@ -111,8 +129,6 @@ class LoginService:
         dept_ids = set()
         for data_scope in rows.scalars().all():
             scope = data_scope or DATA_SCOPE_SELF
-            if scope == DATA_SCOPE_ALL:
-                return None
             if scope == DATA_SCOPE_DEPT_AND_CHILD and own_dept:
                 dept_ids.add(own_dept)
                 dept_ids.update(await get_child_dept_ids(session, own_dept))

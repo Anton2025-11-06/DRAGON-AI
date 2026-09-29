@@ -23,6 +23,7 @@ import {
   updateApiKey,
   updateApiKeyStatus,
 } from '#/api/ai-workflow';
+import { copyToClipboard } from '#/utils/clipboard';
 
 import ApiKeyUsageModal from './ApiKeyUsageModal.vue';
 
@@ -80,15 +81,12 @@ function statusColor(record: ApiKeyListResp): string {
 }
 
 /** 复制某行 API Key */
-function copyKey(key: string) {
-  navigator.clipboard
-    .writeText(key)
-    .then(() => {
-      message.success('已复制到剪贴板');
-    })
-    .catch(() => {
-      message.error('复制失败，请手动复制');
-    });
+async function copyKey(key: string) {
+  if (await copyToClipboard(key)) {
+    message.success('已复制到剪贴板');
+  } else {
+    message.error('复制失败，请手动复制');
+  }
 }
 
 /**

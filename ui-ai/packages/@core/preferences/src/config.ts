@@ -129,13 +129,11 @@ const defaultPreferences: Preferences = {
   widget: {
     fullscreen: true,
     globalSearch: true,
-    languageToggle: true,
     lockScreen: true,
     notification: true,
     refresh: true,
     sidebarToggle: true,
     themeToggle: true,
-    timezone: true,
   },
 };
 

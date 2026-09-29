@@ -4,6 +4,7 @@ import { defineAsyncComponent, defineComponent, onMounted, ref } from 'vue';
 import { useFs } from '@fast-crud/fast-crud';
 import { message } from 'ant-design-vue';
 
+import AclGrantModal from '../../shared/components/AclGrantModal.vue';
 import * as api from './api';
 import createCrudOptions from './crud';
 
@@ -13,6 +14,7 @@ const ToolFormModal = defineAsyncComponent(() => import('./ToolFormModal.vue'));
 export default defineComponent({
   name: 'DynamicToolPageList',
   components: {
+    AclGrantModal,
     TestModal,
     ToolFormModal,
   },
@@ -49,6 +51,20 @@ export default defineComponent({
       }
     };
 
+    // 资源授权弹窗（ACL）：整表提交，当前授权行由弹窗自己拉
+    const grantModalVisible = ref(false);
+    const grantItem = ref<any>(null);
+
+    const openGrantModal = (row: any) => {
+      grantItem.value = row;
+      grantModalVisible.value = true;
+    };
+
+    // 确认气泡由 aclRowButton 的 confirm 弹，这里只把删除交给 delRequest
+    const removeRow = (row: any) => {
+      crudExposeRef.value?.doRemove({ row }, { noConfirm: true });
+    };
+
     onMounted(() => {
       const { crudExpose } = useFs({
         crudBinding,
@@ -56,7 +72,9 @@ export default defineComponent({
         createCrudOptions,
         context: {
           openFormModal,
+          openGrantModal,
           openTestModal,
+          removeRow,
           toggleStatus,
         },
       });
@@ -71,6 +89,8 @@ export default defineComponent({
       selectedTool,
       formModalVisible,
       editingToolId,
+      grantModalVisible,
+      grantItem,
       // 自定义弹窗保存后刷新列表（新增行不在当前列表里，不刷看不出区别）
       onFormSaved: () => crudExposeRef.value?.doRefresh(),
     };
@@ -93,6 +113,15 @@ export default defineComponent({
       :tool-id="editingToolId"
       @update:open="formModalVisible = $event"
       @saved="onFormSaved"
+    />
+
+    <AclGrantModal
+      v-if="grantItem"
+      v-model:open="grantModalVisible"
+      :key="grantItem.id"
+      resource-code="tool"
+      :resource-id="grantItem.id"
+      :resource-name="grantItem.name"
     />
   </fs-page>
 </template>

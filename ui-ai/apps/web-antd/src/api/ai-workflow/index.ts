@@ -73,19 +73,14 @@ export function listKnowledgeBases() {
 }
 
 /**
- * 工作流 MCP 节点的连接下拉：只取「启用」状态的连接
- * 后端 POST /mcp-server/page 返回 data = { total, items: [...] }（经 requestClient 剥壳后
- * 直接是 items 分页体），故解析时以 items 为准，兼容 records/裸数组等历史形态。
+ * 工作流 MCP 节点的连接下拉：启用中 + 当前用户持有「使用MCP」的连接
+ *
+ * 不复用管理页的 POST /mcp-server/page：那一页按 view 口径过滤（能不能看见这条连接的
+ * 配置），而「使用MCP」是单独一档授权——只被授到 use 的人在管理页看不到是对的，
+ * 但在节点里必须选得到，否则授权等于没授。后端 /options 已按 use 筛过且不带 url/env。
  */
 export function listMcpServers() {
-  return requestClient
-    .post<
-      | McpServerOption[]
-      | { items?: McpServerOption[]; records?: McpServerOption[] }
-    >(`${BASE_URL}/mcp-server/page`, { current: 1, size: 100, status: true })
-    .then((resp) =>
-      Array.isArray(resp) ? resp : resp.items || resp.records || [],
-    );
+  return requestClient.get<McpServerOption[]>(`${BASE_URL}/mcp-server/options`);
 }
 
 export function listMcpServerTools(serverId: number | string) {
@@ -545,13 +540,27 @@ export function createApiKey(req: ApiKeyCreateReq): Promise<ApiKeyCreateResp> {
 }
 
 /**
- * 查询工作流的 API Key 列表
+ * 查询工作流的 API Key 列表（管理口径：含停用/过期与调用统计，卡 apikey 动作）
  */
 export function listApiKeys(
   workflowId: number | string,
 ): Promise<ApiKeyListResp[]> {
   return requestClient.get<ApiKeyListResp[]>(
     `${BASE_URL}/workflow-api-keys/workflows/${workflowId}`,
+  );
+}
+
+/**
+ * 查询工作流「可用」的 API Key（只有 ACTIVE 且未过期），卡片页去对话选 key 用。
+ *
+ * 后端把这个口径单独拆出来卡 use 而不是 apikey：只被授到使用权限的人本来就跑得动
+ * 这条工作流，不该因为他没有管理 key 的权限就打不开对话。
+ */
+export function listUsableApiKeys(
+  workflowId: number | string,
+): Promise<ApiKeyListResp[]> {
+  return requestClient.get<ApiKeyListResp[]>(
+    `${BASE_URL}/workflow-api-keys/workflows/${workflowId}/usable`,
   );
 }
 

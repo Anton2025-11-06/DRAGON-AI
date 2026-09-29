@@ -1,6 +1,6 @@
 -- =====================================================================================
 -- DRAGON-AI 数据库初始化（全新部署的唯一入口）
--- 版本：v2 ｜ 覆盖 24 张业务表 + 角色/管理员/部门/菜单/按钮权限种子
+-- 版本：v2 ｜ 覆盖 27 张业务表 + 角色/管理员/部门/菜单/按钮权限种子
 --
 -- 怎么执行：
 --   mysql -h <host> -P 3306 -u <user> -p --default-character-set=utf8mb4 < sql/v2_init.sql
@@ -57,8 +57,9 @@ CREATE TABLE IF NOT EXISTS `tb_user` (
     `dept_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '所属部门ID（数据权限组织单元，0表示未分配）',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态：0-禁用，1-启用',
     `is_deleted` TINYINT NOT NULL DEFAULT 0 COMMENT '是否删除：0-未删除，1-已删除',
-    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（数据权限归属，存量回填为0）',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (`user_id`),
     UNIQUE KEY `uk_username` (`username`),
@@ -71,12 +72,13 @@ CREATE TABLE IF NOT EXISTS `tb_role` (
     `role_code` VARCHAR(64) NOT NULL COMMENT '角色编码',
     `role_name` VARCHAR(64) NOT NULL COMMENT '角色名称',
     `description` VARCHAR(255) DEFAULT NULL COMMENT '描述',
-    `data_scope` TINYINT NOT NULL DEFAULT 4 COMMENT '数据权限：1-全部 2-本部门及以下 3-本部门 4-仅本人',
+    `data_scope` TINYINT NOT NULL DEFAULT 4 COMMENT '数据权限：2-本部门及以下 3-本部门 4-仅本人（1-全部 已废弃，全系统范围只由 ADMIN 角色决定）',
     `is_builtin` TINYINT NOT NULL DEFAULT 0 COMMENT '内置角色保护：1-不可删除',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-禁用 1-启用',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
-    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（数据权限归属，存量回填为0）',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`role_id`),
     UNIQUE KEY `uk_role_code` (`role_code`)
@@ -96,7 +98,9 @@ CREATE TABLE IF NOT EXISTS `tb_menu` (
     `visible` TINYINT NOT NULL DEFAULT 1 COMMENT '是否显示：0-隐藏 1-显示',
     `status` TINYINT NOT NULL DEFAULT 1,
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`menu_id`),
     KEY `idx_parent` (`parent_id`),
@@ -127,21 +131,75 @@ CREATE TABLE IF NOT EXISTS `tb_role_menu` (
     KEY `idx_menu` (`menu_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='角色菜单关联表';
 
--- 1.6 部门表（数据权限的基础组织单元）
+-- 1.6 部门表（数据权限的基础组织单元；一棵树承载集团/子公司/部门三层，不再另立组织表）
 CREATE TABLE IF NOT EXISTS `tb_dept` (
     `dept_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `parent_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '父部门ID，0为根',
     `dept_name` VARCHAR(64) NOT NULL COMMENT '部门名称',
+    `node_type` TINYINT NOT NULL DEFAULT 1 COMMENT '节点性质：1-普通部门 2-法人组织（集团总部/子公司/板块）',
+    `org_root_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '所属组织根dept_id（自己或最近的 node_type=2 祖先），建改部门时就地重算整棵子孙',
     `sort` INT NOT NULL DEFAULT 0,
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-禁用 1-启用',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`dept_id`),
-    KEY `idx_parent` (`parent_id`)
+    KEY `idx_parent` (`parent_id`),
+    KEY `idx_org_root` (`org_root_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='部门表';
 
--- 1.7 系统操作日志表（审计，trace_id 串起一次全链路请求）
+-- 1.7 用户组表（ACL 授权主体之一：跨部门/跨临时协作分组，与部门树正交）
+CREATE TABLE IF NOT EXISTS `tb_user_group` (
+    `group_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `group_name` VARCHAR(64) NOT NULL COMMENT '用户组名称',
+    `description` VARCHAR(255) DEFAULT NULL COMMENT '描述',
+    `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`group_id`),
+    UNIQUE KEY `uk_group_name` (`group_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户组表（ACL 授权主体）';
+
+-- 1.8 用户组成员表（一行一个成员，一人可属多个组）
+CREATE TABLE IF NOT EXISTS `tb_user_group_member` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `group_id` BIGINT UNSIGNED NOT NULL,
+    `user_id` BIGINT UNSIGNED NOT NULL,
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_group_user` (`group_id`, `user_id`),
+    KEY `idx_user` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户组成员表';
+
+-- 1.9 资源实例 ACL 表（一行 = 一个授权主体对一个资源实例的一个动作）
+--   只登记显式授权事实：「我创建的」「部门内的」是隐式规则，由归属列现算，不落库，
+--   否则部门一变动就要刷全量授权行。只做加法（无 deny 行），收紧靠「不授权」。
+--   不穿透：工作流被授权不等于它引用的知识库被授权，各资源只到各自的页面授权。
+CREATE TABLE IF NOT EXISTS `tb_resource_acl` (
+    `acl_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `resource_code` VARCHAR(32) NOT NULL COMMENT '资源类型编码 knowledge_base/document/workflow/workflow_template/tool/skill/mcp',
+    `resource_id` BIGINT UNSIGNED NOT NULL COMMENT '资源实例主键',
+    `grantee_type` TINYINT NOT NULL COMMENT '授权主体：1-用户 2-角色 3-部门 4-用户组 5-全员',
+    `grantee_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '主体ID，全员时为0',
+    `dept_include_sub` TINYINT NOT NULL DEFAULT 0 COMMENT '仅部门授权：0-仅本部门 1-含下级部门',
+    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/toggle/export/delete/share，mcp=view/use/test/tools/edit/delete/share',
+    `expire_time` DATETIME DEFAULT NULL COMMENT '过期时间，NULL=永久（过期不定时清理，判定即失效）',
+    `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `create_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '授权人（需持有该资源的 share）',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`acl_id`),
+    UNIQUE KEY `uk_acl_row` (`resource_code`, `resource_id`, `grantee_type`, `grantee_id`, `action`, `dept_include_sub`),
+    KEY `idx_acl_target` (`resource_code`, `resource_id`),
+    KEY `idx_acl_grantee` (`grantee_type`, `grantee_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='资源实例ACL表';
+
+-- 1.10 系统操作日志表（审计，trace_id 串起一次全链路请求）
 CREATE TABLE IF NOT EXISTS `tb_operate_log` (
     `log_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `trace_id` VARCHAR(64) NOT NULL COMMENT '链路追踪ID（一次请求全链路唯一）',
@@ -173,14 +231,15 @@ CREATE TABLE IF NOT EXISTS `tb_knowledge_base` (
     `kb_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `kb_name` VARCHAR(128) NOT NULL COMMENT '知识库名称',
     `description` VARCHAR(500) DEFAULT NULL,
-    `owner_id` BIGINT UNSIGNED NOT NULL COMMENT '所有者用户ID',
-    `is_public` TINYINT NOT NULL DEFAULT 0 COMMENT '0-私有 1-公开',
-    `status` TINYINT NOT NULL DEFAULT 1,
+    `owner_dept_id` BIGINT UNSIGNED NOT NULL COMMENT '归属部门ID',
+    `parse_methods` JSON DEFAULT NULL COMMENT '不同文件的解析方法',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`kb_id`),
-    KEY `idx_owner` (`owner_id`)
+    KEY `idx_owner` (`owner_dept_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库表';
 
 -- 2.2 知识库文档表
@@ -188,47 +247,33 @@ CREATE TABLE IF NOT EXISTS `tb_document` (
     `doc_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `kb_id` BIGINT UNSIGNED NOT NULL,
     `doc_name` VARCHAR(255) NOT NULL,
+    `description` VARCHAR(255) DEFAULT NULL,
     `file_path` VARCHAR(500) NOT NULL COMMENT '文件存储路径',
     `file_size` BIGINT NOT NULL DEFAULT 0,
     `file_type` VARCHAR(16) DEFAULT NULL,
     `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '分块数',
-    `status` TINYINT NOT NULL DEFAULT 0 COMMENT '0-待处理 1-解析中 2-向量化中 3-完成 -1-失败',
+    `status` TINYINT NOT NULL DEFAULT 0 COMMENT '0-PENDING 1-RUNNING 2-FINISHED 3-FAILED',
     `error_msg` VARCHAR(500) DEFAULT NULL,
-    `uploader_id` BIGINT UNSIGNED NOT NULL,
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`doc_id`),
     KEY `idx_kb` (`kb_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档表';
 
--- 2.3 文档分块表（分块正文，向量在 Milvus 的 kb_{kb_id} collection）
+-- 2.3 文档分块表
 CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     `chunk_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `doc_id` BIGINT UNSIGNED NOT NULL,
-    `kb_id` BIGINT UNSIGNED NOT NULL,
     `chunk_index` INT NOT NULL DEFAULT 0,
-    `content` TEXT NOT NULL COMMENT '分块正文（向量存Milvus）',
-    `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`chunk_id`),
-    KEY `idx_doc` (`doc_id`),
-    KEY `idx_kb` (`kb_id`)
+    KEY `idx_doc` (`doc_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档分块表';
 
--- 2.4 知识库授权共享表
-CREATE TABLE IF NOT EXISTS `tb_kb_share` (
-    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    `kb_id` BIGINT UNSIGNED NOT NULL,
-    `share_type` TINYINT NOT NULL DEFAULT 1 COMMENT '1-用户 2-角色',
-    `target_id` BIGINT UNSIGNED NOT NULL COMMENT '目标用户ID或角色ID',
-    `expire_time` DATETIME DEFAULT NULL COMMENT '过期时间，空为永久',
-    `create_by` BIGINT UNSIGNED NOT NULL,
-    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (`id`),
-    KEY `idx_kb` (`kb_id`),
-    KEY `idx_target` (`target_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库授权共享表';
+
 
 -- =====================================================================================
 -- PART 3  模型广场（service_system）
@@ -237,7 +282,7 @@ CREATE TABLE IF NOT EXISTS `tb_kb_share` (
 -- 3.1 模型表（登记只需 base_url + provider + category，端点由 common_model 各类型子类自拼；
 --     supports_* 是能力位，决定测试 UI 开关、广场展示以及工作流节点能不能给该模型挂工具）
 CREATE TABLE IF NOT EXISTS `tb_model` (
-    `id` INT NOT NULL AUTO_INCREMENT,
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
     `name` VARCHAR(128) NOT NULL COMMENT '模型名称',
     `category` VARCHAR(32) NOT NULL COMMENT '能力类型 code，取值见 common/common_constants/model_constant.py 的 MT_*（text_to_text/text_embedding/...）',
     `provider` VARCHAR(32) NOT NULL COMMENT '提供商: openai/dashscope/zhipu',
@@ -255,9 +300,11 @@ CREATE TABLE IF NOT EXISTS `tb_model` (
     `common_params` JSON COMMENT '常用参数列表 [{name,default,desc,type}]',
     `tutorial_md` MEDIUMTEXT COMMENT '使用教程 Markdown',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '启用状态 1启用 0停用',
-    `created_by` INT NOT NULL DEFAULT 0 COMMENT '创建人 user_id',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted` TINYINT NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
     PRIMARY KEY (`id`),
     KEY `idx_category` (`category`),
     KEY `idx_provider` (`provider`),
@@ -266,55 +313,26 @@ CREATE TABLE IF NOT EXISTS `tb_model` (
 
 -- 3.2 模型申请审批表（通过后签发 mk_ 前缀 API Key，授权存 Redis 供网关鉴权）
 CREATE TABLE IF NOT EXISTS `tb_model_apply` (
-    `id` INT NOT NULL AUTO_INCREMENT,
-    `model_id` INT NOT NULL COMMENT '模型 id',
-    `user_id` INT NOT NULL COMMENT '申请人 user_id',
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `model_id` BIGINT NOT NULL COMMENT '模型 id',
+    `user_id` BIGINT NOT NULL COMMENT '申请人 user_id',
     `username` VARCHAR(64) DEFAULT NULL COMMENT '申请人用户名',
-    `dept_id` INT NOT NULL DEFAULT 0 COMMENT '申请人部门 id',
+    `dept_id` BIGINT NOT NULL DEFAULT 0 COMMENT '申请人部门 id',
     `reason` VARCHAR(500) DEFAULT NULL COMMENT '申请理由',
     `status` TINYINT NOT NULL DEFAULT 0 COMMENT '0待审批 1通过 2拒绝',
     `api_key` VARCHAR(500) DEFAULT NULL COMMENT '审批通过后生成的 API Key',
     `reject_reason` VARCHAR(500) DEFAULT NULL COMMENT '拒绝原因',
     `audit_by` VARCHAR(64) DEFAULT NULL COMMENT '审批人',
     `audit_time` DATETIME DEFAULT NULL COMMENT '审批时间',
-    `apply_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '申请时间',
+    `apply_time` DATETIME DEFAULT NULL COMMENT '申请时间',
     PRIMARY KEY (`id`),
     KEY `idx_model` (`model_id`),
     KEY `idx_user` (`user_id`),
     KEY `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型广场-申请审批';
 
--- =====================================================================================
--- PART 4  模型体验（service_workflow；菜单叫「模型体验」，表名沿用 model_chat）
--- =====================================================================================
 
--- 4.1 会话表
-CREATE TABLE IF NOT EXISTS `tb_model_chat_session` (
-    `id` INT NOT NULL AUTO_INCREMENT,
-    `user_id` INT NOT NULL COMMENT '所属用户',
-    `title` VARCHAR(128) NOT NULL DEFAULT '新会话' COMMENT '会话标题',
-    `model_apply_id` INT NOT NULL DEFAULT 0 COMMENT '授权记录 apply_id',
-    `model_name` VARCHAR(128) DEFAULT NULL COMMENT '模型标识',
-    `reasoning` TINYINT NOT NULL DEFAULT 0 COMMENT '深度思考偏好 0关 1开',
-    `stream` TINYINT NOT NULL DEFAULT 1 COMMENT '流式偏好 0关 1开',
-    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (`id`),
-    KEY `idx_user` (`user_id`, `update_time`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型对话-会话';
 
--- 4.2 消息表
-CREATE TABLE IF NOT EXISTS `tb_model_chat_message` (
-    `id` INT NOT NULL AUTO_INCREMENT,
-    `session_id` INT NOT NULL COMMENT '会话 id',
-    `role` VARCHAR(16) NOT NULL COMMENT '角色 USER/ASSISTANT',
-    `content` MEDIUMTEXT COMMENT '消息内容',
-    `reasoning_content` MEDIUMTEXT COMMENT '深度思考内容',
-    `model_name` VARCHAR(128) DEFAULT NULL COMMENT '模型标识',
-    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (`id`),
-    KEY `idx_session` (`session_id`, `id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型对话-消息';
 
 -- =====================================================================================
 -- PART 5  智能体资源：MCP 连接 / 工具 / 技能（service_workflow）
@@ -333,7 +351,9 @@ CREATE TABLE IF NOT EXISTS `tb_mcp_server` (
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted` TINYINT NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
     PRIMARY KEY (`id`),
     KEY `idx_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP 服务器连接配置表';
@@ -347,8 +367,10 @@ CREATE TABLE IF NOT EXISTS `tb_tool` (
     `parameters_schema` TEXT COMMENT '参数定义 JSON（{parameters:[{name,type,required,description,default}]}）',
     `timeout` INT NOT NULL DEFAULT 10000 COMMENT '执行超时（毫秒），工具节点未配置时取此值',
     `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `is_deleted` TINYINT NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     KEY `idx_name` (`name`)
@@ -368,8 +390,10 @@ CREATE TABLE IF NOT EXISTS `tb_skill` (
     `resource_count` INT NOT NULL DEFAULT 0 COMMENT '资源文件数',
     `zip_file_name` VARCHAR(255) DEFAULT NULL COMMENT '上传的 zip 包原始文件名',
     `zip_storage_name` VARCHAR(255) DEFAULT NULL COMMENT 'zip 原件在公共存储中的文件名（下载/删除句柄）',
+    `is_deleted` TINYINT NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_code` (`code`),
@@ -384,7 +408,7 @@ CREATE TABLE IF NOT EXISTS `tb_skill` (
 
 -- 6.1 工作流主表（草稿区：编辑态写 graph，发布时快照进 tb_workflow_version）
 CREATE TABLE IF NOT EXISTS `tb_workflow` (
-  `id`              INT          NOT NULL AUTO_INCREMENT COMMENT '工作流ID',
+  `id`              BIGINT          NOT NULL AUTO_INCREMENT COMMENT '工作流ID',
   `name`            VARCHAR(128) NOT NULL COMMENT '工作流名称',
   `description`     VARCHAR(500)          DEFAULT NULL COMMENT '描述',
   `status`          VARCHAR(16)  NOT NULL DEFAULT 'DRAFT' COMMENT '状态 DRAFT 草稿 / PUBLISHED 已发布 / ARCHIVED 已归档',
@@ -392,9 +416,11 @@ CREATE TABLE IF NOT EXISTS `tb_workflow` (
   `input_variables` JSON                  COMMENT '工作流级输入变量定义（表单渲染用，与 START 节点 fields 双写保持一致）',
   `output_variables` JSON                 COMMENT '输出变量定义',
   `current_version` INT          NOT NULL DEFAULT 0 COMMENT '当前已发布版本号',
-  `created_by`      INT          NOT NULL DEFAULT 0 COMMENT '创建人 user_id',
+  `created_by`      BIGINT          NOT NULL DEFAULT 0 COMMENT '创建人 user_id',
   `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_by`      BIGINT          NOT NULL DEFAULT 0 COMMENT '更新人 user_id',
   `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `is_deleted`      TINYINT         NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
   PRIMARY KEY (`id`),
   KEY `idx_wf_status` (`status`),
   KEY `idx_wf_created_by` (`created_by`)
@@ -402,15 +428,15 @@ CREATE TABLE IF NOT EXISTS `tb_workflow` (
 
 -- 6.2 工作流版本快照表（发布时快照，运行时只读它）
 CREATE TABLE IF NOT EXISTS `tb_workflow_version` (
-  `id`              INT          NOT NULL AUTO_INCREMENT COMMENT '版本ID',
-  `workflow_id`     INT          NOT NULL COMMENT '工作流ID',
+  `id`              BIGINT          NOT NULL AUTO_INCREMENT COMMENT '版本ID',
+  `workflow_id`     BIGINT          NOT NULL COMMENT '工作流ID',
   `version`         INT          NOT NULL COMMENT '版本号（单调递增）',
   `graph_snapshot`  JSON         NOT NULL COMMENT '发布时刻的图快照',
   `input_variables`  JSON        COMMENT '输入变量定义快照',
   `output_variables` JSON        COMMENT '输出变量定义快照',
   `change_log`      VARCHAR(500)          DEFAULT NULL COMMENT '变更说明',
   `published`       TINYINT      NOT NULL DEFAULT 1 COMMENT '是否已发布 1是 0是历史草稿版本',
-  `created_by`      INT          NOT NULL DEFAULT 0 COMMENT '发布人',
+  `created_by`      BIGINT          NOT NULL DEFAULT 0 COMMENT '发布人',
   `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发布时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_wf_ver` (`workflow_id`, `version`)
@@ -418,8 +444,8 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_version` (
 
 -- 6.3 执行实例表（一次工作流运行 = 一条记录；id 即对外唯一的 executionId）
 CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
-  `id`               VARCHAR(36)  NOT NULL COMMENT '执行ID（UUID，对外即 executionId）',
-  `workflow_id`      INT          NOT NULL COMMENT '工作流ID',
+  `id`               VARCHAR(64)  NOT NULL COMMENT '执行ID（UUID，对外即 executionId）',
+  `workflow_id`      BIGINT          NOT NULL COMMENT '工作流ID',
   `workflow_version` INT          NOT NULL DEFAULT 0 COMMENT '执行时的工作流版本（0=草稿调试）',
   `status`           VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT '执行状态 PENDING/RUNNING/COMPLETED/FAILED/PAUSED/CANCELLED',
   `trigger_type`     VARCHAR(16)  NOT NULL DEFAULT 'DEBUG' COMMENT '触发来源 DEBUG 画布调试 / API 外部调用 / AGENT 智能体触发',
@@ -439,9 +465,9 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
   `awaiting_node_id` VARCHAR(64)           DEFAULT NULL COMMENT '停在审批等待的节点ID（多份待办时记第一个），欠谁审批以 variables 的 pauseState 为准',
   `pause_generation` INT          NOT NULL DEFAULT 1 COMMENT '挂起代次：第几次开跑（含唤醒），事件过期判定用',
   `graph_hash`       VARCHAR(16)           DEFAULT NULL COMMENT '图拓扑指纹（节点id+边集合），再提交前漂移校验',
-  `parent_exec_id`   VARCHAR(36)           DEFAULT NULL COMMENT '父执行ID（【工作流】节点发起的子执行）',
+  `parent_exec_id`   VARCHAR(64)           DEFAULT NULL COMMENT '父执行ID（【工作流】节点发起的子执行）',
   `parent_node_id`   VARCHAR(64)           DEFAULT NULL COMMENT '父执行中发起本子执行的节点ID',
-  `user_id`          INT          NOT NULL DEFAULT 0 COMMENT '执行人',
+  `user_id`          BIGINT          NOT NULL DEFAULT 0 COMMENT '执行人',
   `ip`           VARCHAR(64)            COMMENT '客户端IP',
   `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
@@ -454,7 +480,7 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_execution` (
 --     审批改写的值也落在 node_states，明细行保留该节点当轮跑出来的历史）
 CREATE TABLE IF NOT EXISTS `tb_workflow_node_execution` (
   `id`            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '明细ID',
-  `execution_id`  VARCHAR(36)  NOT NULL COMMENT '执行ID',
+  `execution_id`  VARCHAR(64)  NOT NULL COMMENT '执行ID',
   `node_id`       VARCHAR(64)  NOT NULL COMMENT '节点ID',
   `node_type`     VARCHAR(32)  NOT NULL COMMENT '节点类型',
   `status`        VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '节点状态 RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT/AWAITING（AWAITING=等待人工审批，非终态）',
@@ -471,7 +497,7 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_node_execution` (
 
 -- 6.5 工作流模板表（内置模板由服务首启写入，也承载用户自建/导入的模板）
 CREATE TABLE IF NOT EXISTS `tb_workflow_template` (
-  `id`          INT          NOT NULL AUTO_INCREMENT COMMENT '模板ID',
+  `id`          BIGINT          NOT NULL AUTO_INCREMENT COMMENT '模板ID',
   `name`        VARCHAR(128) NOT NULL COMMENT '模板名称',
   `description` VARCHAR(500)          DEFAULT NULL COMMENT '模板描述',
   `category`    VARCHAR(32)  NOT NULL DEFAULT 'CUSTOM' COMMENT '模板分类 CONVERSATION/GENERATION/RAG/EXTRACTION/SUMMARY/CUSTOM',
@@ -480,17 +506,19 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_template` (
   `input_variables`  JSON             COMMENT '输入变量定义',
   `output_variables` JSON             COMMENT '输出变量定义',
   `is_built_in` TINYINT      NOT NULL DEFAULT 0 COMMENT '是否内置模板（内置不可改删）',
-  `created_by`  INT          NOT NULL DEFAULT 0 COMMENT '创建人',
+  `created_by`  BIGINT          NOT NULL DEFAULT 0 COMMENT '创建人',
   `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_by`   BIGINT          NOT NULL DEFAULT 0 COMMENT '更新人',
   `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `is_deleted`      TINYINT         NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
   PRIMARY KEY (`id`),
   KEY `idx_tpl_category` (`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='工作流模板表';
 
 -- 6.6 工作流 API Key 表（对外暴露工作流，wf_ 前缀，仿 tb_model_apply 的 mk_ 机制）
 CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
-  `id`             INT          NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `workflow_id`    INT          NOT NULL COMMENT '工作流ID',
+  `id`             BIGINT          NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `workflow_id`    BIGINT          NOT NULL COMMENT '工作流ID',
   `name`           VARCHAR(128) NOT NULL COMMENT 'Key 名称',
   `api_key`        VARCHAR(64)  NOT NULL COMMENT 'API Key',
   `rate_limit`     INT          NOT NULL DEFAULT 0 COMMENT '每分钟调用上限 0=不限',
@@ -498,7 +526,11 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
   `expire_time`    DATETIME              DEFAULT NULL COMMENT '过期时间',
   `last_used_time` DATETIME              DEFAULT NULL COMMENT '最近使用时间',
   `total_calls`    INT          NOT NULL DEFAULT 0 COMMENT '累计调用次数',
-  `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `created_by`  BIGINT          NOT NULL DEFAULT 0 COMMENT '创建人',
+  `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_by`   BIGINT          NOT NULL DEFAULT 0 COMMENT '更新人',
+  `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `is_deleted`      TINYINT         NOT NULL DEFAULT 0 COMMENT '0-正常 1-删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_wf_api_key` (`api_key`),
   KEY `idx_wfak_wf` (`workflow_id`)
@@ -511,7 +543,8 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
 -- 内置角色：靠 uk_role_code 幂等。已存在就什么都不改，因为 role_name/data_scope
 -- 都可能在「角色管理」里被调过，初始化文件不该每次把它们拨回默认值
 -- （不用 ON DUPLICATE KEY UPDATE + VALUES()：那个写法在 MySQL 8 已弃用，会报 warning）
-INSERT IGNORE INTO `tb_role` (`role_code`, `role_name`, `description`, `data_scope`, `is_builtin`) VALUES ('ADMIN', '超级管理员', '系统内置超管', 1, 1);
+-- ADMIN 的全系统范围来自角色本身（is_admin），不占 data_scope 档位，故给它 2 与其它角色同构
+INSERT IGNORE INTO `tb_role` (`role_code`, `role_name`, `description`, `data_scope`, `is_builtin`) VALUES ('ADMIN', '超级管理员', '系统内置超管', 2, 1);
 INSERT IGNORE INTO `tb_role` (`role_code`, `role_name`, `description`, `data_scope`, `is_builtin`) VALUES ('USER', '普通用户', '注册默认角色', 4, 1);
 
 -- 管理员账号：admin / Admin@123（库里存 b32hexencode(明文)；登录后请改密）
@@ -522,7 +555,8 @@ SELECT u.`user_id`, r.`role_id` FROM `tb_user` u, `tb_role` r
 WHERE u.`username` = 'admin' AND r.`role_code` = 'ADMIN';
 
 -- 根部门（数据权限的组织单元）：显式指定 dept_id=1，重复执行按主键跳过
-INSERT IGNORE INTO `tb_dept` (`dept_id`, `parent_id`, `dept_name`, `sort`) VALUES (1, 0, '总公司', 1);
+-- 组织树顶层只有一个（唯一集团总部），其余节点都是它的子组织/部门
+INSERT IGNORE INTO `tb_dept` (`dept_id`, `parent_id`, `dept_name`, `node_type`, `org_root_id`, `sort`) VALUES (1, 0, '总公司', 2, 1, 1);
 
 -- =====================================================================================
 -- PART 8  种子：菜单与按钮权限（前端 vben 路由规范：目录 component='BasicLayout'，
@@ -556,7 +590,8 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 (@d_system, '在线用户',   2, 'online',     'views/wemirr/system/online/index.vue',        'lucide:radio',       5),
 (@d_system, '限流配置',   2, 'rate-limit', 'views/wemirr/system/rate-limit/index.vue',    'lucide:gauge',       6),
 (@d_system, '操作日志',   2, 'opt-log',    'views/wemirr/system/log/opt-log.vue',         'lucide:file-text',   7),
-(@d_system, '队列监控',   2, 'arq-monitor', 'views/wemirr/system/arq-monitor/index.vue',  'lucide:server',      8);
+(@d_system, '队列监控',   2, 'arq-monitor', 'views/wemirr/system/arq-monitor/index.vue',  'lucide:server',      8),
+(@d_system, '用户组管理', 2, 'user-group',  'views/wemirr/system/user-group/index.vue',   'lucide:users-round',   9);
 SET @m_user = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '用户管理');
 SET @m_role = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '角色管理');
 SET @m_menu = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '菜单管理');
@@ -565,6 +600,7 @@ SET @m_online = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system A
 SET @m_rate = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '限流配置');
 SET @m_log = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '操作日志');
 SET @m_arq = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '队列监控');
+SET @m_usergroup = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '用户组管理');
 
 -- 8.3 首页 / 知识库 / 模型工厂 / 数据集工厂 下的页面菜单
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -577,6 +613,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 (@d_model_factory, 'NoteBook开发', 2, 'notebook', 'views/wemirr/model/notebook/index.vue', NULL, 4),
 (@d_model_factory, '模型归档',     2, 'archive',  'views/wemirr/model/archive/index.vue',  NULL, 5),
 (@d_dataset, '数据集管理', 2, 'list', 'views/wemirr/dataset/index.vue', NULL, 1);
+SET @m_kb_doc = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识库文档');
 
 -- 8.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -624,7 +661,13 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_rate, '限流策略配置', 3, 'system:rate-limit:edit',    2),
 (@m_rate, '限流策略发布', 3, 'system:rate-limit:publish', 3),
 (@m_log, '日志查询', 3, 'system:log:list', 1),
-(@m_arq, '队列监控查询', 3, 'system:arq:list', 1);
+(@m_arq, '队列监控查询', 3, 'system:arq:list', 1),
+-- 用户组：ACL 的一类授权主体，组本身走功能权限（组不属于任何资源实例）
+(@m_usergroup, '用户组查询', 3, 'system:usergroup:list',   1),
+(@m_usergroup, '用户组新增', 3, 'system:usergroup:add',    2),
+(@m_usergroup, '用户组编辑', 3, 'system:usergroup:edit',   3),
+(@m_usergroup, '用户组删除', 3, 'system:usergroup:delete', 4),
+(@m_usergroup, '成员维护',   3, 'system:usergroup:member', 5);
 
 -- 8.7 按钮权限点：模型广场与智能体（与 service_workflow 各路由的 @has_permission 一一对应；
 --     模型列表查询 system:model:list 后端暂未挂装饰器，留作页面按钮显隐与后续启用）
@@ -672,6 +715,17 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_tool, '工具删除',    3, 'workflow:tool:delete', 4),
 (@m_tool, '工具测试运行', 3, 'workflow:tool:test',  5);
 
+-- 8.8 按钮权限点：资源授权（ACL）入口。它只决定「能不能打开授权弹窗/调用授权接口」，
+--     具体到某条资源能不能授，另由该资源上的 share 动作决定（两层 AND）
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_workflow, '工作流授权', 3, 'workflow:workflow:grant', 16),
+(@m_workflow, '模板授权',   3, 'workflow:template:grant', 17),
+(@m_skill,    '技能授权',   3, 'workflow:skill:grant',    10),
+(@m_mcp,      'MCP授权',    3, 'workflow:mcp:grant',      9),
+(@m_tool,     '工具授权',   3, 'workflow:tool:grant',     6),
+(@m_kb_doc,   '知识库授权', 3, 'ai:kb:grant',             1),
+(@m_kb_doc,   '文档授权',   3, 'ai:doc:grant',            2);
+
 -- =====================================================================================
 -- PART 9  种子：角色授权
 -- =====================================================================================
@@ -693,10 +747,10 @@ WHERE r.`role_code` = 'USER'
 -- =====================================================================================
 -- PART 10  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 24 张；菜单 99 行 = 目录 7 + 页面 24 + 按钮权限点 68；ADMIN 授权应覆盖这 99 行
-SELECT '表数量（应为 24）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
-SELECT '菜单行数（应为 99）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
-SELECT '菜单分层（应为 1:7 / 2:24 / 3:68）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
+-- 表 27 张；菜单 112 行 = 目录 7 + 页面 25 + 按钮权限点 80；ADMIN 授权应覆盖这 112 行
+SELECT '表数量（应为 27）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+SELECT '菜单行数（应为 112）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
+SELECT '菜单分层（应为 1:7 / 2:25 / 3:80）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;
-SELECT 'ADMIN 授权行数（应为 99）' AS `自查项`, COUNT(*) AS `实际`
+SELECT 'ADMIN 授权行数（应为 112）' AS `自查项`, COUNT(*) AS `实际`
 FROM `tb_role_menu` rm JOIN `tb_role` r ON r.`role_id` = rm.`role_id` WHERE r.`role_code` = 'ADMIN';

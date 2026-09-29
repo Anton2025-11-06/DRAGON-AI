@@ -13,7 +13,7 @@ from fastapi import APIRouter, Query, Request
 
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
 from common.common_entity.response_schema import ApiResponse
-from common.common_permission.permission import get_user_id, get_login_user, has_permission
+from common.common_permission.permission import get_login_user, has_permission
 from service.service_workflow.schemas.workflow_schema import (
      WorkflowSaveReq,
 )
@@ -30,8 +30,8 @@ router = APIRouter(prefix="/workflows", tags=["工作流编排"])
 async def page_workflows(request: Request, page: int = 1, page_size: int = 10,
                          name: str = None, status: str = None):
     login_user = await get_login_user(request)
-    data = await WorkflowService.page(current=page, size=page_size, name=name, status=status,
-                                      login_user=login_user)
+    data = await WorkflowService.page(login_user, current=page, size=page_size,
+                                      name=name, status=status)
     return ApiResponse.success(data=data)
 
 
@@ -47,7 +47,8 @@ async def executable_workflows(request: Request):
 
     版本下拉不单独开口：复用 GET /workflows/{id}/versions。
     """
-    return ApiResponse.success(data=await WorkflowService.list_executable())
+    return ApiResponse.success(data=await WorkflowService.list_executable(
+        await get_login_user(request)))
 
 
 @router.post("", summary="创建工作流")
@@ -67,7 +68,7 @@ async def create_from_template(request: Request, template_id: int,
                                description: str = Query(None, max_length=500)):
     try:
         new_id = await WorkflowService.create_from_template(
-            template_id, name, description, user_id=await get_user_id(request))
+            await get_login_user(request), template_id, name, description)
         return ApiResponse.success(data=new_id, message="创建成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -78,7 +79,7 @@ async def create_from_template(request: Request, template_id: int,
 @router.get("/{workflow_id}", summary="获取工作流详情")
 @has_permission("workflow:workflow:list")
 async def workflow_detail(request: Request, workflow_id: int):
-    data = await WorkflowService.detail(workflow_id)
+    data = await WorkflowService.detail(await get_login_user(request), workflow_id)
     if data is None:
         return ApiResponse.error(400, "工作流不存在")
     return ApiResponse.success(data=data)
@@ -87,7 +88,7 @@ async def workflow_detail(request: Request, workflow_id: int):
 @router.put("/{workflow_id}", summary="更新工作流（草稿保存）")
 @has_permission("workflow:workflow:edit")
 async def update_workflow(request: Request, workflow_id: int, body: WorkflowSaveReq):
-    ok = await WorkflowService.update(workflow_id, body, user_id=await get_user_id(request))
+    ok = await WorkflowService.update(await get_login_user(request), workflow_id, body)
     if not ok:
         return ApiResponse.error(400, "工作流不存在")
     return ApiResponse.success(message="保存成功")
@@ -96,7 +97,7 @@ async def update_workflow(request: Request, workflow_id: int, body: WorkflowSave
 @router.delete("/{workflow_id}", summary="删除工作流（级联版本与API Key）")
 @has_permission("workflow:workflow:delete")
 async def delete_workflow(request: Request, workflow_id: int):
-    ok = await WorkflowService.delete(workflow_id)
+    ok = await WorkflowService.delete(await get_login_user(request), workflow_id)
     if not ok:
         return ApiResponse.error(400, "工作流不存在")
     return ApiResponse.success(message="删除成功")
@@ -108,7 +109,7 @@ async def publish_workflow(request: Request, workflow_id: int, body: dict = None
     try:
         change_log = (body or {}).get("changeLog") if isinstance(body, dict) else None
         result = await WorkflowService.publish(
-            workflow_id, change_log=change_log, user_id=await get_user_id(request))
+            await get_login_user(request), workflow_id, change_log=change_log)
         return ApiResponse.success(data=result, message=f"发布成功，当前版本 v{result['version']}")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -121,7 +122,7 @@ async def publish_workflow(request: Request, workflow_id: int, body: dict = None
 async def copy_workflow(request: Request, workflow_id: int,
                         name: str = Query(None, max_length=128)):
     try:
-        new_id = await WorkflowService.copy(workflow_id, name, user_id=await get_user_id(request))
+        new_id = await WorkflowService.copy(await get_login_user(request), workflow_id, name)
         return ApiResponse.success(data=new_id, message="复制成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -131,7 +132,8 @@ async def copy_workflow(request: Request, workflow_id: int,
 @has_permission("workflow:workflow:list")
 async def validate_workflow(request: Request, workflow_id: int):
     try:
-        return ApiResponse.success(data=await WorkflowService.validate_graph(workflow_id))
+        return ApiResponse.success(data=await WorkflowService.validate_graph(
+            await get_login_user(request), workflow_id))
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 
@@ -141,13 +143,18 @@ async def validate_workflow(request: Request, workflow_id: int):
 @router.get("/{workflow_id}/versions", summary="获取版本历史")
 @has_permission("workflow:workflow:list")
 async def workflow_versions(request: Request, workflow_id: int):
-    return ApiResponse.success(data=await WorkflowService.versions(workflow_id))
+    try:
+        return ApiResponse.success(data=await WorkflowService.versions(
+            await get_login_user(request), workflow_id))
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
 
 
 @router.get("/{workflow_id}/versions/{version}", summary="获取指定版本快照")
 @has_permission("workflow:workflow:list")
 async def workflow_version_detail(request: Request, workflow_id: int, version: int):
-    data = await WorkflowService.version_detail(workflow_id, version)
+    data = await WorkflowService.version_detail(
+        await get_login_user(request), workflow_id, version)
     if data is None:
         return ApiResponse.error(400, "版本不存在")
     return ApiResponse.success(data=data)
@@ -157,8 +164,7 @@ async def workflow_version_detail(request: Request, workflow_id: int, version: i
 @has_permission("workflow:workflow:publish")
 async def rollback_workflow(request: Request, workflow_id: int, version: int):
     try:
-        await WorkflowService.rollback(
-            workflow_id, version, user_id=await get_user_id(request))
+        await WorkflowService.rollback(await get_login_user(request), workflow_id, version)
         return ApiResponse.success(message=f"已恢复 v{version}，发布请手动触发")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -174,7 +180,8 @@ async def list_models(request: Request, type: str = MODEL_TYPE_TEXT):
     try:
         # 只返回当前用户审批通过(status=1)的模型；未登录时 user_id=0 → 空列表
         return ApiResponse.success(
-            data=await WorkflowService.list_models(type, await get_user_id(request)))
+            data=await WorkflowService.list_models(
+                type, (await get_login_user(request)).get("user_id") or 0))
     except Exception as e:  # noqa: BLE001
         return ApiResponse.success(data=[])  # 下拉失败不阻断画布加载
 
@@ -182,15 +189,14 @@ async def list_models(request: Request, type: str = MODEL_TYPE_TEXT):
 @support_router.get("/knowledge-bases/list", summary="知识库下拉")
 async def list_knowledge_bases(request: Request):
     try:
-        return ApiResponse.success(data=await WorkflowService.list_knowledge_bases())
+        return ApiResponse.success(data=await WorkflowService.list_knowledge_bases(
+            await get_login_user(request)))
     except Exception as e:  # noqa: BLE001
         return ApiResponse.success(data=[])
 
 
 @support_router.get("/chat-agents/mine", summary="我的智能体下拉")
 async def list_chat_agents(request: Request):
-    user_id = await get_user_id(request)
-    if not user_id:
-        return ApiResponse.success(data=[])
+    user_id = int((await get_login_user(request)).get("user_id") or 0)
     return ApiResponse.success(data=await WorkflowService.list_chat_agents(user_id))
 

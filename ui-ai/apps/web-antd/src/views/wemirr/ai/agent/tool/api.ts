@@ -32,6 +32,10 @@ export interface ToolItem {
   created_by?: number;
   create_time?: string;
   update_time?: string;
+  /** 当前用户对这一条工具可执行的动作（列表接口按 ACL 求值下发） */
+  actions?: string[];
+  /** 创建人展示名（后端按 created_by 批量翻好，别人据此找谁要授权） */
+  creatorName?: string;
 }
 
 export interface ToolSaveReq {

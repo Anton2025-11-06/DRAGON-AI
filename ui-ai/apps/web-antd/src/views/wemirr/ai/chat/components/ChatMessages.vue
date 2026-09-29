@@ -19,6 +19,8 @@ import {
   setCustomComponents,
 } from 'markstream-vue';
 
+import { copyToClipboard } from '#/utils/clipboard';
+
 import { referenceDisplayIndex } from '../../shared';
 import { useFollowBottom } from '../../shared/composables/useFollowBottom';
 
@@ -61,9 +63,12 @@ const containerRef = ref<HTMLElement | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 
 // ==================== 操作处理 ====================
-function handleCopy(content: string) {
-  navigator.clipboard.writeText(content);
-  message.success('已复制到剪贴板');
+async function handleCopy(content: string) {
+  if (await copyToClipboard(content)) {
+    message.success('已复制到剪贴板');
+  } else {
+    message.error('复制失败，请手动选择复制');
+  }
 }
 
 function handleRetry() {

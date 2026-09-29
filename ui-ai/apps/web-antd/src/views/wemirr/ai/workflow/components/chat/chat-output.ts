@@ -197,27 +197,3 @@ export function toCopyText(value: unknown): string {
     return String(value);
   }
 }
-
-/** 写剪贴板（非安全上下文下 clipboard 不可用，退回 execCommand） */
-export async function copyToClipboard(text: string): Promise<boolean> {
-  if (!text) return false;
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    // 页面不是 https / 用户拒绝了权限时走兜底
-  }
-  try {
-    const area = document.createElement('textarea');
-    area.value = text;
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.append(area);
-    area.select();
-    const ok = document.execCommand('copy');
-    area.remove();
-    return ok;
-  } catch {
-    return false;
-  }
-}

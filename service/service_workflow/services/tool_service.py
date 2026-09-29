@@ -20,7 +20,11 @@ from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
-from common.common_permission.permission import build_data_scope_filter
+from common.common_permission.resource_guard import (
+    ACTION_DELETE, ACTION_EDIT, ACTION_TEST, ACTION_USE, ACTION_VIEW, build_visible_cond,
+    decorate_actions, ensure_action,
+)
+from common.common_utils.creator_util import attach_creator
 from service.service_workflow.models.agent_entity import Tool
 from service.service_workflow.workflow_engine import py_sandbox
 
@@ -34,18 +38,18 @@ class ToolService:
 
     # ==================== 查询 ====================
     @staticmethod
-    async def page(page: int = 1, page_size: int = 10,
-                   name: str = None, status: int = None, login_user: dict = None) -> dict:
+    async def page(login_user: dict, page: int = 1, page_size: int = 10,
+                   name: str = None, status: int = None) -> dict:
         async with mysql_client.get_session() as session:
             conds = []
             if name:
                 conds.append(Tool.name.like(f"%{name}%"))
             if status is not None:
                 conds.append(Tool.status == status)
-            # 数据权限：非管理员仅可见本人创建或可见部门内创建的工具
-            scope_cond = build_data_scope_filter(login_user, Tool.created_by) if login_user else None
-            if scope_cond is not None:
-                conds.append(scope_cond)
+            # 可见 = 我创建的 ∪ 数据权限命中 ∪ 持有 view 授权（ADMIN 不限），与单点判定同源
+            visible = build_visible_cond(login_user, "tool", Tool.id, Tool.created_by)
+            if visible is not None:
+                conds.append(visible)
             total = (await session.execute(
                 select(func.count()).select_from(Tool).where(*conds))).scalar()
             rows = (await session.execute(
@@ -61,6 +65,8 @@ class ToolService:
                 "create_time": ToolService._fmt_time(r.create_time),
                 "update_time": ToolService._fmt_time(r.update_time),
             } for r in rows]
+            await decorate_actions(login_user, "tool", items, session=session)
+            await attach_creator(items, session=session)
             return {"total": total, "items": items}
 
     @staticmethod
@@ -84,21 +90,39 @@ class ToolService:
         }
 
     @staticmethod
-    async def detail(id_: int) -> dict | None:
+    async def _ensure(login_user: dict, id_: int, action: str) -> Tool:
+        """取工具 + 卡动作：行已在手上，owner 不再查一次库。不存在统一定义为「工具不存在」。"""
         row = await ToolService.get_by_id(id_)
-        return ToolService._to_dict(row) if row else None
+        if not row:
+            raise ValueError("工具不存在")
+        await ensure_action(login_user, "tool", id_, action, owner_id=row.created_by)
+        return row
 
     @staticmethod
-    async def options() -> list[dict]:
+    async def detail(login_user: dict, id_: int) -> dict | None:
+        row = await ToolService.get_by_id(id_)
+        if not row:
+            return None
+        await ensure_action(login_user, "tool", id_, ACTION_VIEW, owner_id=row.created_by)
+        return ToolService._to_dict(row)
+
+    @staticmethod
+    async def options(login_user: dict) -> list[dict]:
         """启用中工具的下拉清单（含参数定义），供工作流工具节点选工具并渲染参数绑定行。
 
         一次性把参数定义带回去：节点表单若只给工具名，用户还得逐个手填参数名，
         「选择工具后自动列出入参」这个基本体验就断了。
+
+        下拉按 use 过滤：选不中就等于用不了，比「选得到但运行报无权」友好。
         """
         async with mysql_client.get_session() as session:
+            stmt = select(Tool).where(Tool.status == 1)
+            visible = build_visible_cond(login_user, "tool", Tool.id, Tool.created_by,
+                                         action=ACTION_USE)
+            if visible is not None:
+                stmt = stmt.where(visible)
             rows = (await session.execute(
-                select(Tool).where(Tool.status == 1)
-                .order_by(Tool.id.desc()))).scalars().all()
+                stmt.order_by(Tool.id.desc()))).scalars().all()
         return [{
             "id": r.id, "name": r.name, "description": r.description,
             "timeout": r.timeout or DEFAULT_TIMEOUT_MS,
@@ -124,9 +148,10 @@ class ToolService:
             return new_id
 
     @staticmethod
-    async def update(id_: int, name: str = None, function_code: str = None,
+    async def update(login_user: dict, id_: int, name: str = None, function_code: str = None,
                      description: str = None, parameters_schema: str = None,
                      status: bool = None, timeout: int = None) -> bool:
+        await ToolService._ensure(login_user, id_, ACTION_EDIT)
         if function_code:
             py_sandbox.compile_check(function_code)
         async with mysql_client.get_session() as session:
@@ -161,14 +186,16 @@ class ToolService:
         return max(value, MIN_TIMEOUT_MS)
 
     @staticmethod
-    async def delete(id_: int) -> bool:
+    async def delete(login_user: dict, id_: int) -> bool:
+        await ToolService._ensure(login_user, id_, ACTION_DELETE)
         async with mysql_client.get_session() as session:
             result = await session.execute(delete(Tool).where(Tool.id == id_))
             await session.commit()
             return result.rowcount > 0
 
     @staticmethod
-    async def toggle_status(id_: int, status: bool) -> bool:
+    async def toggle_status(login_user: dict, id_: int, status: bool) -> bool:
+        await ToolService._ensure(login_user, id_, ACTION_EDIT)
         async with mysql_client.get_session() as session:
             result = await session.execute(
                 update(Tool).where(Tool.id == id_).values(status=1 if status else 0))
@@ -257,11 +284,9 @@ class ToolService:
             return str(value)
 
     @staticmethod
-    async def test(id_: int, parameters: dict = None) -> dict:
-        """按已保存的工具测试（工具页「运行测试」）。"""
-        row = await ToolService.get_by_id(id_)
-        if not row:
-            raise ValueError("工具不存在")
+    async def test(login_user: dict, id_: int, parameters: dict = None) -> dict:
+        """按已保存的工具测试（工具页「运行测试」）：跑的是真代码，卡「运行测试」。"""
+        row = await ToolService._ensure(login_user, id_, ACTION_TEST)
         if not row.status:
             raise ValueError("工具已停用，请先启用后再测试")
         return await ToolService._run_guarded(row.function_code, parameters or {}, row.timeout)

@@ -3,7 +3,7 @@
 > **如果觉得项目不错，请帮忙点个 Star，谢谢。** ⭐
 > [![Star this repo](https://img.shields.io/github/stars/Anton2025-11-06/DRAGON-AI?style=social)](https://github.com/Anton2025-11-06/DRAGON-AI)
 
-> 作者微信：![img.png](img.png)
+> 作者微信：![img.png](docs/img.png)
 
 > 在线体验：http://47.111.117.95:12345   viewer/viewer
 

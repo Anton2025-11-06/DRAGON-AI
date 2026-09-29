@@ -25,6 +25,7 @@ import {
   importTemplate,
 } from '#/api/ai-workflow';
 
+import AclGrantModal from '../../shared/components/AclGrantModal.vue';
 import TemplateCard from './components/TemplateCard.vue';
 
 const router = useRouter();
@@ -33,6 +34,10 @@ const router = useRouter();
 const loading = ref(false);
 const templates = ref<WorkflowTemplateResp[]>([]);
 const activeCategory = ref('all');
+
+// 资源授权弹窗（ACL）
+const grantVisible = ref(false);
+const grantItem = ref<null | WorkflowTemplateResp>(null);
 
 // 分类配置
 const categories = [
@@ -156,6 +161,12 @@ async function handleImport(file: File) {
   return false; // 阻止默认上传行为
 }
 
+/** 打开授权弹窗 */
+function handleGrant(template: WorkflowTemplateResp) {
+  grantItem.value = template;
+  grantVisible.value = true;
+}
+
 // 创建新模板
 function handleCreateTemplate() {
   router.push('/agent/workflow/editor?saveAsTemplate=true');
@@ -215,6 +226,7 @@ onMounted(() => {
           @remove="handleRemoveTemplate"
           @export="handleExportTemplate"
           @copy="handleCopyTemplate"
+          @grant="handleGrant"
         />
       </div>
 
@@ -246,6 +258,15 @@ onMounted(() => {
         </a-space>
       </div>
     </Spin>
+
+    <AclGrantModal
+      v-if="grantItem"
+      v-model:open="grantVisible"
+      :key="grantItem.id"
+      resource-code="workflow_template"
+      :resource-id="grantItem.id"
+      :resource-name="grantItem.name"
+    />
   </div>
 </template>
 

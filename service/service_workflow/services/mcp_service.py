@@ -11,7 +11,12 @@ from sqlalchemy import delete, func, select, update
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
-from common.common_permission.permission import build_data_scope_filter
+from common.common_permission.permission import is_admin
+from common.common_permission.resource_guard import (
+    ACTION_DELETE, ACTION_EDIT, ACTION_TEST, ACTION_USE, build_visible_cond, decorate_actions,
+    ensure_action, ensure_any,
+)
+from common.common_utils.creator_util import attach_creator
 from service.service_workflow.models.agent_entity import McpServer
 
 # MCP 连接测试超时（秒）：SDK initialize + 工具清单握手必须在此时限内完成
@@ -29,21 +34,21 @@ class McpServerService:
 
     # ==================== 查询 ====================
     @staticmethod
-    async def page(page: int = 1, page_size: int = 10,
-                   name: str = None, status: int = None,
-                   viewer_id: int = 0, viewer_admin: bool = False,
-                   login_user: dict = None) -> dict:
+    async def page(login_user: dict, page: int = 1, page_size: int = 10,
+                   name: str = None, status: int = None) -> dict:
         """分页查询 MCP 连接配置（非创建人且非管理员时隐藏 SSE url 值）"""
+        viewer_id = int(login_user.get("user_id") or 0)
+        viewer_admin = is_admin(login_user)
         async with mysql_client.get_session() as session:
             conds = []
             if name:
                 conds.append(McpServer.name.like(f"%{name}%"))
             if status is not None:
                 conds.append(McpServer.status == status)
-            # 数据权限：非管理员仅可见本人创建或可见部门内创建的连接
-            scope_cond = build_data_scope_filter(login_user, McpServer.created_by) if login_user else None
-            if scope_cond is not None:
-                conds.append(scope_cond)
+            # 可见 = 我创建的 ∪ 数据权限命中 ∪ 持有 view 授权（ADMIN 不限），与单点判定同源
+            visible = build_visible_cond(login_user, "mcp", McpServer.id, McpServer.created_by)
+            if visible is not None:
+                conds.append(visible)
             total = (await session.execute(
                 select(func.count()).select_from(McpServer).where(*conds))).scalar()
             rows = (await session.execute(
@@ -51,6 +56,9 @@ class McpServerService:
                 .order_by(McpServer.id.desc())
                 .limit(page_size).offset((page - 1) * page_size))).scalars().all()
             items = [McpServerService._to_dict(r, viewer_id, viewer_admin) for r in rows]
+            await decorate_actions(login_user, "mcp", items, session=session)
+            # 创建人名字：MCP 页要能看出该找谁要授权（一次批量查，不按行数打查询）
+            await attach_creator(items, session=session)
             return {"total": total, "items": items}
 
     @staticmethod
@@ -72,6 +80,28 @@ class McpServerService:
         }
 
     @staticmethod
+    async def options(login_user: dict) -> list:
+        """启用中 MCP 连接的下拉清单，供工作流 MCP_TOOL 节点选连接。
+
+        按 use 过滤，而不是直接复用管理页的 page：page 的口径是 view（能看见这条连接的
+        配置），而「使用MCP」是一档单独的授权——只被授到 use 的人本来就不该在管理页看到
+        它的地址/参数，但在节点里**必须**选得到，否则授权等于没授。
+
+        只回 id/name/type/description：url、env 这些连接参数一个都不带，工具清单另走
+        /mcp-server/{id}/tools（那里按 tools∪use 放行）。
+        """
+        async with mysql_client.get_session() as session:
+            stmt = select(McpServer).where(McpServer.status == 1)
+            visible = build_visible_cond(login_user, "mcp", McpServer.id,
+                                         McpServer.created_by, action=ACTION_USE)
+            if visible is not None:                stmt = stmt.where(visible)
+            rows = (await session.execute(
+                stmt.order_by(McpServer.id.desc()))).scalars().all()
+        return [{
+            "id": r.id, "name": r.name, "type": r.type, "description": r.description,
+        } for r in rows]
+
+    @staticmethod
     async def get_by_id(id_: int) -> Optional[McpServer]:
         async with mysql_client.get_session() as session:
             return (await session.execute(
@@ -90,6 +120,32 @@ class McpServerService:
             raise ValueError("MCP 连接不存在（已被删除？）")
         if not row.status:
             raise ValueError(f"MCP 连接已停用: {row.name}")
+
+    @staticmethod
+    async def load_for_action(login_user: dict, id_: int, action: str) -> McpServer:
+        """取连接 + 卡动作（管理页入口专用）：行已在手上，owner 不再查一次库。
+
+        只卡调用类动作，不卡 view：测试连接/拉工具清单/调工具都会真的外连第三方系统，
+        没被授到对应档的人只能看到这条连接叫什么名字。
+        """
+        row = await McpServerService.get_by_id(id_)
+        if row is None:
+            raise ValueError("MCP 连接不存在（已被删除？）")
+        await ensure_action(login_user, "mcp", id_, action, owner_id=row.created_by)
+        return row
+
+    @staticmethod
+    async def load_for_any(login_user: dict, id_: int, actions: list) -> McpServer:
+        """取连接 + 卡「任一动作」：一件事被两档动作支撑时的入口（见 resource_guard.ensure_any）。
+
+        工作流 MCP 节点拉工具清单走这里：只被授到「使用MCP」的人也要能拿到工具，
+        否则他在节点里选得到连接却配不了参数。
+        """
+        row = await McpServerService.get_by_id(id_)
+        if row is None:
+            raise ValueError("MCP 连接不存在（已被删除？）")
+        await ensure_any(login_user, "mcp", id_, actions, owner_id=row.created_by)
+        return row
 
     # ==================== SDK 连接与会话管理 ====================
 
@@ -253,9 +309,10 @@ class McpServerService:
             return new_id
 
     @staticmethod
-    async def update(id_: int, name: str = None, type_: str = None, url: str = None,
-                     command: str = None, args: str = None, env: str = None,
+    async def update(login_user: dict, id_: int, name: str = None, type_: str = None,
+                     url: str = None, command: str = None, args: str = None, env: str = None,
                      status: bool = None, description: str = None) -> bool:
+        await McpServerService.load_for_action(login_user, id_, ACTION_EDIT)
         async with mysql_client.get_session() as session:
             values: dict = {}
             if name is not None:
@@ -284,7 +341,8 @@ class McpServerService:
             return True
 
     @staticmethod
-    async def delete(id_: int) -> bool:
+    async def delete(login_user: dict, id_: int) -> bool:
+        await McpServerService.load_for_action(login_user, id_, ACTION_DELETE)
         async with mysql_client.get_session() as session:
             result = await session.execute(
                 delete(McpServer).where(McpServer.id == id_))
@@ -292,8 +350,9 @@ class McpServerService:
             return result.rowcount > 0
 
     @staticmethod
-    async def toggle_status(id_: int, status: bool) -> bool:
+    async def toggle_status(login_user: dict, id_: int, status: bool) -> bool:
         """切换启用/停用"""
+        await McpServerService.load_for_action(login_user, id_, ACTION_EDIT)
         async with mysql_client.get_session() as session:
             result = await session.execute(
                 update(McpServer).where(McpServer.id == id_)
@@ -303,11 +362,9 @@ class McpServerService:
 
     # ==================== 连通性测试 ====================
     @staticmethod
-    async def test_by_id(id_: int) -> dict:
-        """按配置 ID 测试连接"""
-        row = await McpServerService.get_by_id(id_)
-        if not row:
-            raise ValueError("MCP 连接不存在")
+    async def test_by_id(login_user: dict, id_: int) -> dict:
+        """按配置 ID 测试连接（会真外连，卡 test）；停用状态下也得让人能排查，所以不走 ensure_usable。"""
+        row = await McpServerService.load_for_action(login_user, id_, ACTION_TEST)
         return await McpServerService.test_params(
             name=row.name, type_=row.type, url=row.url, command=row.command,
             args=row.args, env=row.env)

@@ -36,7 +36,10 @@ from common.common_entity.response_schema import ApiResponse
 from common.common_log.log_init import log
 from common.common_middleware.operate_log_middleware import _mask_sensitive, _persist_log
 from common.common_permission.permission import (
-    get_login_user, get_user_id, has_permission, is_admin,
+    get_login_user, get_user_id, has_permission,
+)
+from common.common_permission.resource_guard import (
+    ACTION_APIKEY, ACTION_CHAT, ACTION_USE, ensure_action, load_resource_brief,
 )
 from common.common_utils.ip_util import get_client_ip
 from common.common_middleware.exception_handler import UnauthorizedException
@@ -70,6 +73,9 @@ async def submit_execution(request: Request, body: WorkflowSubmitReq,
             await WorkflowExecutionService.check_api_key_scope(exec_id=body.executionId,
                                                                workflow_id=body.workflowId,
                                                                api_key=request.headers.get("X-Workflow-Token"))
+        else:
+            # 登录用户走资源 ACL：跑起来 = 这条工作流的 use（机器通道不进 ACL，边界是 key 绑定）
+            await WorkflowExecutionService.ensure_submit_action(await get_login_user(request), body)
 
         result = await WorkflowExecutionService.submit(
             body,
@@ -136,6 +142,7 @@ async def submit_execution_ws(websocket: WebSocket):
         # get_login_user/get_user_id 读取 scope["login_user"]，写回即可复用原口径
         websocket.scope["login_user"] = login_user
         body = WorkflowSubmitReq(**data)
+        await WorkflowExecutionService.ensure_submit_action(login_user, body)
         result = await WorkflowExecutionService.submit(
             body, websocket=websocket, user_id=await get_user_id(websocket), ip=get_client_ip(websocket),
             trigger_type="DEBUG")
@@ -147,6 +154,10 @@ async def submit_execution_ws(websocket: WebSocket):
         # 校验没过、执行现状不允许、抢占输给并发：业务码与文案直接回给对端
         status, error_msg = e.code, str(e)
         await _send_reject(websocket, e.code, str(e))
+    except UnauthorizedException as e:
+        # ACL 判定没过（没这条工作流的 use）：是「不被允许」，不是「跑失败了」
+        status, error_msg = 403, str(e)
+        await _send_reject(websocket, 403, str(e))
     except ValueError as e:
         # 行已抢成待跑但驱动不起来（投递被队列拒绝且重试用尽）：现场已回滚
         status, error_msg = 400, str(e)
@@ -215,7 +226,8 @@ async def submit_execution_ws(websocket: WebSocket):
 async def page_executions(request: Request, page: int = 1, page_size: int = 10,
                           executionId: str = None, status: str = None):
     data = await WorkflowExecutionService.page_executions(
-        current=page, size=page_size, execution_id=executionId, status=status)
+        await get_login_user(request), current=page, size=page_size,
+        execution_id=executionId, status=status)
     return ApiResponse.success(data=data)
 
 
@@ -258,12 +270,22 @@ async def cancel_execution(request: Request, execution_id: str):
     """取消执行：RUNNING 下引擎在下一个节点检查点收尾，PAUSED 下直接写终态。
 
     也是「上次任务未结束」时的解套手段（提交接口的提示文案就让用户走这里）。
+
+    谁能取消：API Key 通道看 key 与工作流的绑定关系，登录用户看这条工作流的 use
+    动作（归属人 / ADMIN / 被授到使用或任何更高档的人）——取消只是把自己发起的
+    一次执行收尾，不再单列一档（能跑就能停）。
     """
     try:
         if request.headers.__contains__("X-Workflow-Token"):
             await WorkflowExecutionService.check_api_key_scope(exec_id=execution_id,
                                                                workflow_id=None,
                                                                api_key=request.headers.get("X-Workflow-Token"))
+        else:
+            brief = await WorkflowExecutionService.workflow_of_execution(execution_id)
+            if brief is None:
+                return ApiResponse.error(400, "执行记录不存在")
+            await ensure_action(await get_login_user(request), "workflow", brief[0],
+                                ACTION_USE, owner_id=brief[1])
         ok = await WorkflowExecutionService.cancel(execution_id)
         if not ok:
             return ApiResponse.error(400, "执行不存在或已结束")
@@ -287,22 +309,34 @@ async def get_execution_snapshot(request: Request, execution_id: str):
 
 @router.get("/workflows/{workflow_id}/executions", summary="工作流执行历史")
 @has_permission("workflow:execution:list")
-async def get_workflow_executions(request: Request, executionId: str = None,
+async def get_workflow_executions(request: Request, workflow_id: int, executionId: str = None,
                                   page: int = 1, page_size: int = 10, status: str = None):
     data = await WorkflowExecutionService.page_executions(
-        current=page, size=page_size, execution_id=executionId, status=status)
+        await get_login_user(request), current=page, size=page_size,
+        execution_id=executionId, status=status, workflow_id=workflow_id)
     return ApiResponse.success(data=data)
 
 
 # ==================== API Key ====================
+# key 本身是机器通道（不受 RBAC/ACL 约束），但「给哪条工作流发通道」是管理动作：
+# 整页按所属工作流的 apikey 收（列表带 key 明文，拿到就等于能跑，不能只按 view）。
+# 只被授到「去对话」的人走下面的 /usable：只给能用的 key，不给管理页。
 
 api_key_router = APIRouter(prefix="/workflow-api-keys", tags=["工作流API Key"])
+
+
+async def _ensure_key_action(request: Request, workflow_id: int) -> None:
+    """按 key 所属工作流判定 apikey：工作流已被删时 load_resource_brief 直接抛错，不默认放行。"""
+    _, owner = await load_resource_brief("workflow", workflow_id)
+    await ensure_action(await get_login_user(request), "workflow", workflow_id,
+                        ACTION_APIKEY, owner_id=owner)
 
 
 @api_key_router.post("", summary="创建 API Key（明文仅返回一次）")
 @has_permission("workflow:apikey:add")
 async def create_api_key(request: Request, body: ApiKeyCreateReq):
     try:
+        await _ensure_key_action(request, body.workflowId)
         resp = await WorkflowApiKeyService.create(
             body.workflowId, body.name, body.rateLimit or 0, body.expireDays,
             user_id=await get_user_id(request))
@@ -314,7 +348,29 @@ async def create_api_key(request: Request, body: ApiKeyCreateReq):
 @api_key_router.get("/workflows/{workflow_id}", summary="工作流的 API Key 列表")
 @has_permission("workflow:apikey:list")
 async def list_api_keys(request: Request, workflow_id: int):
-    return ApiResponse.success(data=await WorkflowApiKeyService.list_by_workflow(workflow_id))
+    try:
+        await _ensure_key_action(request, workflow_id)
+        return ApiResponse.success(data=await WorkflowApiKeyService.list_by_workflow(workflow_id))
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
+
+
+@api_key_router.get("/workflows/{workflow_id}/usable", summary="工作流可用的 API Key（去对话选 key）")
+@has_permission("workflow:execution:run")
+async def list_usable_api_keys(request: Request, workflow_id: int):
+    """只回 ACTIVE 且未过期的 key：卡片页「去对话」的口径，卡 chat 而不是 apikey。
+
+    chat 蕴含 use，所以被授到去对话的人本来就跑得动这条工作流，不因为他没有
+    管理 key 的权限就卡住对话；只被授到 use（比如只允许被子流程引用）的人拿不到 key。
+    """
+    try:
+        _, owner = await load_resource_brief("workflow", workflow_id)
+        await ensure_action(await get_login_user(request), "workflow", workflow_id,
+                            ACTION_CHAT, owner_id=owner)
+        return ApiResponse.success(
+            data=await WorkflowApiKeyService.list_usable_for_chat(workflow_id))
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
 
 
 @api_key_router.put("/{api_key_id}", summary="编辑 API Key（名称/QPS/过期时间）")
@@ -326,6 +382,13 @@ async def update_api_key(request: Request, api_key_id: int, body: ApiKeyUpdateRe
         for key, value in body.model_dump().items()
         if key in body.model_fields_set
     }
+    try:
+        wf_id = await WorkflowApiKeyService.owner_workflow(api_key_id)
+        if wf_id is None:
+            return ApiResponse.error(400, "API Key 不存在")
+        await _ensure_key_action(request, wf_id)
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
     ok = await WorkflowApiKeyService.update(api_key_id, changes)
     if not ok:
         return ApiResponse.error(400, "API Key 不存在")
@@ -336,6 +399,10 @@ async def update_api_key(request: Request, api_key_id: int, body: ApiKeyUpdateRe
 @has_permission("workflow:apikey:edit")
 async def update_api_key_status(request: Request, api_key_id: int, status: str = Query(...)):
     try:
+        wf_id = await WorkflowApiKeyService.owner_workflow(api_key_id)
+        if wf_id is None:
+            return ApiResponse.error(400, "API Key 不存在")
+        await _ensure_key_action(request, wf_id)
         ok = await WorkflowApiKeyService.update_status(api_key_id, status)
         if not ok:
             return ApiResponse.error(400, "API Key 不存在")
@@ -347,6 +414,13 @@ async def update_api_key_status(request: Request, api_key_id: int, status: str =
 @api_key_router.delete("/{api_key_id}", summary="删除 API Key")
 @has_permission("workflow:apikey:delete")
 async def delete_api_key(request: Request, api_key_id: int):
+    try:
+        wf_id = await WorkflowApiKeyService.owner_workflow(api_key_id)
+        if wf_id is None:
+            return ApiResponse.error(400, "API Key 不存在")
+        await _ensure_key_action(request, wf_id)
+    except ValueError as e:
+        return ApiResponse.error(400, str(e))
     ok = await WorkflowApiKeyService.delete(api_key_id)
     if not ok:
         return ApiResponse.error(400, "API Key 不存在")

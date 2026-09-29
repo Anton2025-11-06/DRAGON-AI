@@ -21,13 +21,16 @@ from datetime import datetime
 from functools import partial
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from fastapi import WebSocket
 
 from common.common_arq.queue import enqueue_job, next_split_number
 from common.common_exception.custom_exception import WorkflowGraphError
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
+from common.common_permission.resource_guard import (
+    ACTION_HISTORY, ACTION_USE, build_visible_cond, ensure_action,
+)
 from service.service_workflow.execution import (
     approval_projection, event_frames, execution_tree,
 )
@@ -680,16 +683,33 @@ class WorkflowExecutionService:
             return await WorkflowExecutionService._row_to_resp(session, row)
 
     @staticmethod
-    async def page_executions(current: int = 1, size: int = 10, execution_id: str = None,
-                              status: str = None, user_id: int = None):
+    async def page_executions(login_user: dict, current: int = 1, size: int = 10, execution_id: str = None,
+                              status: str = None, workflow_id: int = None):
+        """执行历史分页：可见范围 = 我发起的 ∪ 所属工作流我能看的。
+
+        执行行不是可独立授权的资源（ACL 不穿透），它跟着工作流走：能看到这条工作流配置
+        的人，才看得到它跑出来的记录（API Key 发起的执行 user_id=0，只能靠这一路露出来）。
+        口径直接用 build_visible_cond 下推，与列表页同一套规则，不另算一套。
+        """
         async with mysql_client.get_session() as session:
             stmt = select(WorkflowExecution)
+            if workflow_id:
+                # 按工作流看历史 = 卡片页「执行历史」按钮，卡 history；不限定工作流的
+                # 全局执行列表没有单一归属资源，只按下面的可见范围下推
+                owner = int(await session.scalar(
+                    select(Workflow.created_by).where(Workflow.id == int(workflow_id))) or 0)
+                await ensure_action(login_user, "workflow", int(workflow_id),
+                                    ACTION_HISTORY, owner_id=owner, session=session)
+                stmt = stmt.where(WorkflowExecution.workflow_id == int(workflow_id))
             if execution_id:
                 stmt = stmt.where(WorkflowExecution.id == execution_id)
             if status:
                 stmt = stmt.where(WorkflowExecution.status == status)
-            if user_id is not None:
-                stmt = stmt.where(WorkflowExecution.user_id == user_id)
+            visible = build_visible_cond(login_user, "workflow", Workflow.id, Workflow.created_by)
+            if visible is not None:
+                stmt = stmt.where(or_(
+                    WorkflowExecution.user_id == int(login_user.get("user_id") or 0),
+                    WorkflowExecution.workflow_id.in_(select(Workflow.id).where(visible))))
             total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
             rows = (await session.execute(
                 stmt.order_by(WorkflowExecution.create_time.desc())
@@ -753,6 +773,45 @@ class WorkflowExecutionService:
         async with mysql_client.get_session() as session:
             row = await session.get(WorkflowExecution, execution_id)
             return row.status if row else None
+
+    @staticmethod
+    async def workflow_of_execution(execution_id: str) -> Optional[tuple[int, int]]:
+        """执行所属工作流的 (workflow_id, 归属人)；执行不存在返回 None。
+
+        归属人取工作流的创建人而不是执行行的 user_id（那是「谁点的运行」）：用后者判定
+        等于点过一次运行就永久握着这条流程的控制权。
+        """
+        async with mysql_client.get_session() as session:
+            row = await session.get(WorkflowExecution, execution_id)
+            if row is None:
+                return None
+            owner = await session.scalar(
+                select(Workflow.created_by).where(Workflow.id == row.workflow_id))
+            return int(row.workflow_id), int(owner or 0)
+
+    @staticmethod
+    async def ensure_submit_action(login_user: dict, req: WorkflowSubmitReq) -> None:
+        """submit 的资源侧门禁：让流程跑起来要这条工作流的 use。
+
+        新建、重跑、追问都是一次真实运行，统一要 use；答复审批不要——审批人的资格来自
+        审批节点配置与 approvalToken，在这里再卡一道 use 会把审批链掐断。
+        参数不全的提交不在这里裁决，交给 resolve_submit 报它自己那套可读文案。
+        """
+        if req.decisions:
+            return
+        if req.executionId:
+            brief = await WorkflowExecutionService.workflow_of_execution(req.executionId)
+        elif req.workflowId:
+            owner = 0
+            async with mysql_client.get_session() as session:
+                owner = int(await session.scalar(
+                    select(Workflow.created_by).where(Workflow.id == int(req.workflowId))) or 0)
+            brief = (int(req.workflowId), owner)
+        else:
+            return
+        if brief is None:
+            return
+        await ensure_action(login_user, "workflow", brief[0], ACTION_USE, owner_id=brief[1])
 
     @staticmethod
     async def cancel(execution_id: str) -> bool:

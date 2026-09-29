@@ -8,14 +8,14 @@ class RoleCreateRequest(BaseModel):
     role_code: str = Field(..., min_length=2, max_length=64, description="角色编码，如 DEPT_MANAGER")
     role_name: str = Field(..., min_length=2, max_length=64, description="角色名称")
     description: Optional[str] = Field(None, max_length=255, description="描述")
-    # 数据权限范围：1-全部 2-本部门及以下 3-本部门 4-仅本人
-    data_scope: int = Field(4, ge=1, le=4, description="数据权限范围")
+    # 数据权限范围：2-本部门及以下 3-本部门 4-仅本人（1-全部已废弃，全系统范围只由 ADMIN 角色决定）
+    data_scope: int = Field(4, ge=2, le=4, description="数据权限范围")
 
 
 class RoleUpdateRequest(BaseModel):
     role_name: Optional[str] = Field(None, min_length=2, max_length=64, description="角色名称")
     description: Optional[str] = Field(None, max_length=255, description="描述")
-    data_scope: Optional[int] = Field(None, ge=1, le=4, description="数据权限范围")
+    data_scope: Optional[int] = Field(None, ge=2, le=4, description="数据权限范围")
     status: Optional[int] = Field(None, ge=0, le=1, description="状态：0-禁用 1-启用")
 
 

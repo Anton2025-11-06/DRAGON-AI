@@ -41,7 +41,7 @@ def _parse_tags_form(raw: str) -> List[str]:
 async def page_skills(request: Request, current: int = 1, size: int = 10,
                       keyword: str = None, category: str = None, status: bool = None):
     login_user = await get_login_user(request)
-    data = await svc.SkillService.page(current, size, keyword, category, status, login_user=login_user)
+    data = await svc.SkillService.page(login_user, current, size, keyword, category, status)
     return ApiResponse.success(data=data)
 
 
@@ -49,7 +49,7 @@ async def page_skills(request: Request, current: int = 1, size: int = 10,
 @has_permission("workflow:skill:list")
 async def skill_detail(request: Request, skill_id: int):
     try:
-        data = await svc.SkillService.detail(skill_id)
+        data = await svc.SkillService.detail(await get_login_user(request), skill_id)
         return ApiResponse.success(data=data)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -59,7 +59,7 @@ async def skill_detail(request: Request, skill_id: int):
 @has_permission("workflow:skill:view")
 async def skill_preview(request: Request, skill_id: int):
     try:
-        data = await svc.SkillService.preview(skill_id)
+        data = await svc.SkillService.preview(await get_login_user(request), skill_id)
         return ApiResponse.success(data=data)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -91,7 +91,7 @@ async def replace_skill(request: Request, skill_id: int, file: UploadFile = File
     data = await file.read()
     try:
         await svc.SkillService.replace(
-            skill_id, data,
+            await get_login_user(request), skill_id, data,
             name=name or None, description=description or None,
             category=category or None, icon=icon or None, tags=_parse_tags_form(tags),
             original_name=file.filename)
@@ -104,7 +104,7 @@ async def replace_skill(request: Request, skill_id: int, file: UploadFile = File
 @has_permission("workflow:skill:rename")
 async def rename_skill(request: Request, skill_id: int, body: SkillRenameRequest):
     try:
-        await svc.SkillService.rename(skill_id, body.name)
+        await svc.SkillService.rename(await get_login_user(request), skill_id, body.name)
         return ApiResponse.success(message="重命名成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -114,7 +114,7 @@ async def rename_skill(request: Request, skill_id: int, body: SkillRenameRequest
 @has_permission("workflow:skill:edit")
 async def toggle_status(request: Request, skill_id: int, status: bool = True):
     try:
-        await svc.SkillService.toggle_status(skill_id, status)
+        await svc.SkillService.toggle_status(await get_login_user(request), skill_id, status)
         return ApiResponse.success(message="状态已更新")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -124,7 +124,7 @@ async def toggle_status(request: Request, skill_id: int, status: bool = True):
 @has_permission("workflow:skill:delete")
 async def delete_skill(request: Request, skill_id: int):
     try:
-        await svc.SkillService.delete(skill_id)
+        await svc.SkillService.delete(await get_login_user(request), skill_id)
         return ApiResponse.success(message="删除成功")
     except ValueError as e:
         return ApiResponse.error(400, str(e))
@@ -134,7 +134,8 @@ async def delete_skill(request: Request, skill_id: int):
 @has_permission("workflow:skill:download")
 async def download_skill(request: Request, skill_id: int):
     try:
-        zip_bytes, filename = await svc.SkillService.download_zip(skill_id)
+        zip_bytes, filename = await svc.SkillService.download_zip(
+            await get_login_user(request), skill_id)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
     quoted = urllib.parse.quote(filename)
@@ -149,7 +150,8 @@ async def download_skill(request: Request, skill_id: int):
 @has_permission("workflow:skill:editSkill")
 async def update_skill_file(request: Request, skill_id: int, body: SkillFileUpdateRequest):
     try:
-        await svc.SkillService.update_file(skill_id, body.path, body.content)
+        await svc.SkillService.update_file(
+            await get_login_user(request), skill_id, body.path, body.content)
         return ApiResponse.success(message="技能文件已保存")
     except ValueError as e:
         return ApiResponse.error(400, str(e))

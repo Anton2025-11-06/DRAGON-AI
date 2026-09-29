@@ -20,8 +20,12 @@ from sqlalchemy import delete, func, or_, select, update
 from common import common_storage
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
-from common.common_permission.permission import build_data_scope_filter
+from common.common_permission.resource_guard import (
+    ACTION_DELETE, ACTION_EDIT, ACTION_EXPORT, ACTION_RENAME, ACTION_REPLACE,
+    ACTION_TOGGLE, ACTION_VIEW, build_visible_cond, decorate_actions, ensure_action,
+)
 from common.common_storage.base import new_file_name
+from common.common_utils.creator_util import attach_creator
 from service.service_workflow.models.agent_entity import Skill
 from common.common_threadpool.pool import thread_pool
 
@@ -52,8 +56,8 @@ class SkillService:
 
     # ==================== 查询 ====================
     @staticmethod
-    async def page(page: int = 1, page_size: int = 10, keyword: str = None,
-                   category: str = None, status: int = None, login_user: dict = None) -> dict:
+    async def page(login_user: dict, page: int = 1, page_size: int = 10, keyword: str = None,
+                   category: str = None, status: int = None) -> dict:
         async with mysql_client.get_session() as session:
             conds = []
             if keyword:
@@ -63,17 +67,30 @@ class SkillService:
                 conds.append(Skill.category == category)
             if status is not None:
                 conds.append(Skill.status == status)
-            # 数据权限：非管理员仅可见本人创建或可见部门内创建的技能
-            scope_cond = build_data_scope_filter(login_user, Skill.created_by) if login_user else None
-            if scope_cond is not None:
-                conds.append(scope_cond)
+            # 可见 = 我创建的 ∪ 数据权限命中 ∪ 持有 view 授权（ADMIN 不限），与单点判定同源
+            visible = build_visible_cond(login_user, "skill", Skill.id, Skill.created_by)
+            if visible is not None:
+                conds.append(visible)
             total = (await session.execute(
                 select(func.count()).select_from(Skill).where(*conds))).scalar()
             rows = (await session.execute(
                 select(Skill).where(*conds)
                 .order_by(Skill.id.desc())
                 .limit(page_size).offset((page - 1) * page_size))).scalars().all()
-            return {"total": total, "items": [SkillService._row_to_dict(r) for r in rows]}
+            items = [SkillService._row_to_dict(r) for r in rows]
+            await decorate_actions(login_user, "skill", items, session=session)
+            # 创建人名字：技能页要能看出该找谁要授权（一次批量查，不按行数打查询）
+            await attach_creator(items, session=session)
+            return {"total": total, "items": items}
+
+    @staticmethod
+    async def _ensure(login_user: dict, id_: int, action: str) -> Skill:
+        """取技能 + 卡动作；技能不存在统一报「技能不存在」（各入口文案保持一致）。"""
+        row = await SkillService.get_by_id(id_)
+        if not row:
+            raise ValueError("技能不存在")
+        await ensure_action(login_user, "skill", id_, action, owner_id=row.created_by)
+        return row
 
     @staticmethod
     async def get_by_id(id_: int) -> Optional[Skill]:
@@ -105,19 +122,15 @@ class SkillService:
 
     # ==================== 元信息 / 预览 ====================
     @staticmethod
-    async def detail(id_: int) -> dict:
+    async def detail(login_user: dict, id_: int) -> dict:
         """技能元信息"""
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+        row = await SkillService._ensure(login_user, id_, ACTION_VIEW)
         return SkillService._row_to_dict(row)
 
     @staticmethod
-    async def preview(id_: int) -> dict:
+    async def preview(login_user: dict, id_: int) -> dict:
         """SKILL.md 内容 + 资源树 + 文本文件内容（按需取回 zip 内存解压，对齐前端 SkillDetailResp）"""
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+        row = await SkillService._ensure(login_user, id_, ACTION_VIEW)
         data = SkillService._row_to_dict(row)
         zip_bytes = await SkillService._load_zip(row)
         entries = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._zip_entries, zip_bytes)
@@ -137,11 +150,9 @@ class SkillService:
         return data
 
     @staticmethod
-    async def download_zip(id_: int) -> tuple[bytes, str]:
-        """取回 zip 原件字节 + 下载文件名（{code}.zip）"""
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+    async def download_zip(login_user: dict, id_: int) -> tuple[bytes, str]:
+        """取回 zip 原件字节 + 下载文件名（{code}.zip）：取走原件，卡 export 而不是 view。"""
+        row = await SkillService._ensure(login_user, id_, ACTION_EXPORT)
         return await SkillService._load_zip(row), f"{row.code}.zip"
 
     # ==================== 上传 / 替换 ====================
@@ -181,13 +192,11 @@ class SkillService:
         return new_id
 
     @staticmethod
-    async def replace(id_: int, data: bytes, name: str = None, description: str = None,
-                      category: str = None, icon: str = None, tags: list = None,
-                      original_name: str = None) -> None:
+    async def replace(login_user: dict, id_: int, data: bytes, name: str = None,
+                      description: str = None, category: str = None, icon: str = None,
+                      tags: list = None, original_name: str = None) -> None:
         """zip 替换：规范化后存入新对象，落库成功后再删旧对象（失败保留原 zip）"""
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+        row = await SkillService._ensure(login_user, id_, ACTION_REPLACE)
         code = row.code
         old_storage = row.zip_storage_name
         zip_bytes, count = await asyncio.get_running_loop().run_in_executor(thread_pool, SkillService._normalize_zip,
@@ -221,10 +230,11 @@ class SkillService:
 
     # ==================== 重命名 / 状态 / 删除 ====================
     @staticmethod
-    async def rename(id_: int, name: str) -> None:
+    async def rename(login_user: dict, id_: int, name: str) -> None:
         name = (name or "").strip()
         if not name:
             raise ValueError("技能名称不能为空")
+        await SkillService._ensure(login_user, id_, ACTION_RENAME)
         async with mysql_client.get_session() as session:
             result = await session.execute(
                 update(Skill).where(Skill.id == id_).values(name=name))
@@ -233,7 +243,8 @@ class SkillService:
                 raise ValueError("技能不存在")
 
     @staticmethod
-    async def toggle_status(id_: int, status: bool) -> None:
+    async def toggle_status(login_user: dict, id_: int, status: bool) -> None:
+        await SkillService._ensure(login_user, id_, ACTION_TOGGLE)
         async with mysql_client.get_session() as session:
             result = await session.execute(
                 update(Skill).where(Skill.id == id_)
@@ -243,10 +254,8 @@ class SkillService:
                 raise ValueError("技能不存在")
 
     @staticmethod
-    async def delete(id_: int) -> None:
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+    async def delete(login_user: dict, id_: int) -> None:
+        row = await SkillService._ensure(login_user, id_, ACTION_DELETE)
         async with mysql_client.get_session() as session:
             await session.execute(delete(Skill).where(Skill.id == id_))
             await session.commit()
@@ -256,11 +265,9 @@ class SkillService:
 
     # ==================== 单文件编辑 ====================
     @staticmethod
-    async def update_file(id_: int, rel_path: str, content: str) -> None:
+    async def update_file(login_user: dict, id_: int, rel_path: str, content: str) -> None:
         """改 zip 内某个文本文件：取回→改成员→重新打包存新对象→落库后删旧对象"""
-        row = await SkillService.get_by_id(id_)
-        if not row:
-            raise ValueError("技能不存在")
+        row = await SkillService._ensure(login_user, id_, ACTION_EDIT)
         code = row.code
         old_storage = row.zip_storage_name
         rel = (rel_path or "").strip().replace("\\", "/").lstrip("/")

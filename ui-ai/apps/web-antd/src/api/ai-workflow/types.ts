@@ -367,6 +367,15 @@ export interface WorkflowPageResp {
   createTime: string;
   /** 更新时间 */
   updateTime: string;
+  /** 创建人（归属人）ID */
+  created_by?: number;
+  /** 创建人展示名（后端按 created_by 批量翻好：按钮置灰时得知道找谁要授权） */
+  creatorName?: string;
+  /**
+   * 当前用户对这一条工作流可执行的动作（由后端 ACL 求值下发）。
+   * 行内按钮的显隐只认它，前端不再自己猜「是不是我创建的」。
+   */
+  actions?: string[];
 }
 
 /**
@@ -549,6 +558,10 @@ export interface WorkflowTemplateResp {
   nodeCount: number;
   /** 创建时间 */
   createTime: string;
+  /** 创建人展示名（后端按 created_by 批量翻好） */
+  creatorName?: string;
+  /** 当前用户对这一个模板可执行的动作（后端 ACL 求值下发） */
+  actions?: string[];
 }
 
 export interface WorkflowNodePortDefinitionResp {

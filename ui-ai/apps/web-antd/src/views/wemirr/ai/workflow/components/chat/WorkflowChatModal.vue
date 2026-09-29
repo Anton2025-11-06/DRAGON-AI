@@ -39,12 +39,13 @@ import {
 import { message, Tooltip } from 'ant-design-vue';
 
 import { getWorkflowDetail } from '#/api/ai-workflow';
+import { copyToClipboard } from '#/utils/clipboard';
 
 import { useFollowBottom } from '../../../shared/composables/useFollowBottom';
 import ApprovalPanel from '../debug/ApprovalPanel.vue';
 import DynamicInputForm from '../debug/DynamicInputForm.vue';
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
-import { copyToClipboard, formatDuration, toCopyText } from './chat-output';
+import { formatDuration, toCopyText } from './chat-output';
 import ExecutionStepsModal from './ExecutionStepsModal.vue';
 import OutputValue from './OutputValue.vue';
 import { useChatExecution } from './useChatExecution';

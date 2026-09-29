@@ -23,6 +23,7 @@ import { CheckOutlined, CopyOutlined } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
 import { getWorkflowDetail, getWorkflowVersion } from '#/api/ai-workflow';
+import { copyToClipboard } from '#/utils/clipboard';
 
 import {
   getInputFieldTypeLabel,
@@ -443,21 +444,18 @@ const eventTypes = [
 /** 刚复制过的块（步骤用 step-{i}，其余块用各自标识），用于把图标换成对勾 */
 const copiedKey = ref<string>('');
 
-function copyText(text: string, key: string = '') {
-  navigator.clipboard
-    .writeText(text)
-    .then(() => {
-      message.success('已复制到剪贴板');
-      if (key) {
-        copiedKey.value = key;
-        setTimeout(() => {
-          copiedKey.value = '';
-        }, 1500);
-      }
-    })
-    .catch(() => {
-      message.error('复制失败，请手动复制');
-    });
+async function copyText(text: string, key: string = '') {
+  if (!(await copyToClipboard(text))) {
+    message.error('复制失败，请手动复制');
+    return;
+  }
+  message.success('已复制到剪贴板');
+  if (key) {
+    copiedKey.value = key;
+    setTimeout(() => {
+      copiedKey.value = '';
+    }, 1500);
+  }
 }
 
 function handleClose(open: boolean) {

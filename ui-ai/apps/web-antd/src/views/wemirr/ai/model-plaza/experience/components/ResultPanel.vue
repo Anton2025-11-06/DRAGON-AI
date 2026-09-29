@@ -19,6 +19,8 @@ import {
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
+import { copyToClipboard } from '#/utils/clipboard';
+
 const props = defineProps<{
   result: ModelExperienceResult | null;
   error: string | null;
@@ -66,12 +68,11 @@ const audioUrls = computed(() => (props.result?.urls || []).filter((u) => classi
 const videoUrls = computed(() => (props.result?.urls || []).filter((u) => classifyUrl(u) === 'video'));
 const linkUrls = computed(() => (props.result?.urls || []).filter((u) => classifyUrl(u) === 'link'));
 
-/** 复制 URL 到剪贴板 */
+/** 复制到剪贴板（非 HTTPS 环境 Clipboard API 不可用，工具内已做兜底） */
 async function copyText(text: string, label = '已复制') {
-  try {
-    await navigator.clipboard.writeText(text);
+  if (await copyToClipboard(text)) {
     message.success(label);
-  } catch {
+  } else {
     message.warning('复制失败，请手动选择复制');
   }
 }

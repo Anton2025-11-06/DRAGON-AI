@@ -108,23 +108,24 @@ async def resolve_version(workflow_id: int, cfg: dict, label: str) -> int:
     """
     from service.service_workflow.services.workflow_service import WorkflowService
 
-    detail = await WorkflowService.detail(workflow_id)
-    if detail is None:
+    # 引擎侧取数（get_run_info）：这条链路里没有登录用户，能不能调由上面的 api-key 判定
+    info = await WorkflowService.get_run_info(workflow_id)
+    if info is None:
         raise NodeExecutionError(f"节点「{label}」的子工作流不存在（已被删除？）")
     if str(cfg.get("versionMode") or "LATEST").upper() != "SPECIFIC":
-        version = int(detail.get("currentVersion") or 0)
+        version = int(info.get("currentVersion") or 0)
         if version <= 0:
             raise NodeExecutionError(
-                f"子工作流「{detail.get('name')}」尚未发布，请先发布后再调用")
+                f"子工作流「{info.get('name')}」尚未发布，请先发布后再调用")
         return version
     raw = cfg.get("version")
     if not raw:
         raise NodeExecutionError(f"节点「{label}」选择了指定版本但未填版本号")
     version = int(raw)
-    info = await WorkflowService.version_detail(workflow_id, version)
-    if info is None or not info.get("published"):
+    target = await WorkflowService.get_run_info(workflow_id, version)
+    if target is None or not target.get("published"):
         raise NodeExecutionError(
-            f"子工作流「{detail.get('name')}」的 v{version} 不存在或未发布")
+            f"子工作流「{info.get('name')}」的 v{version} 不存在或未发布")
     return version
 
 

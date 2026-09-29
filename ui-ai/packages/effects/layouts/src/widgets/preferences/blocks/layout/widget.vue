@@ -14,7 +14,6 @@ defineOptions({
 
 const widgetGlobalSearch = defineModel<boolean>('widgetGlobalSearch');
 const widgetFullscreen = defineModel<boolean>('widgetFullscreen');
-const widgetLanguageToggle = defineModel<boolean>('widgetLanguageToggle');
 const widgetNotification = defineModel<boolean>('widgetNotification');
 const widgetThemeToggle = defineModel<boolean>('widgetThemeToggle');
 const widgetSidebarToggle = defineModel<boolean>('widgetSidebarToggle');
@@ -46,9 +45,6 @@ const positionItems = computed((): SelectOption[] => [
   </SwitchItem>
   <SwitchItem v-model="widgetThemeToggle">
     {{ $t('preferences.widget.themeToggle') }}
-  </SwitchItem>
-  <SwitchItem v-model="widgetLanguageToggle">
-    {{ $t('preferences.widget.languageToggle') }}
   </SwitchItem>
   <SwitchItem v-model="widgetFullscreen">
     {{ $t('preferences.widget.fullscreen') }}

@@ -19,8 +19,13 @@ from common.common_constants.constant import PREFIX_WORKFLOW_API_KEY
 from common.common_constants.model_constant import MODEL_TYPE_TEXT
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
-from common.common_permission.permission import build_data_scope_filter
+from common.common_permission.resource_guard import (
+    ACTION_COPY, ACTION_DELETE, ACTION_EDIT, ACTION_EXPORT, ACTION_TEMPLATE,
+    ACTION_USE, ACTION_VIEW, build_visible_cond,
+    decorate_actions, ensure_action,
+)
 from common.common_redis.redis import client
+from common.common_utils.creator_util import attach_creator
 from service.service_workflow.models.workflow_entity import (
     Workflow, WorkflowApiKey, WorkflowTemplate, WorkflowVersion,
 )
@@ -39,8 +44,9 @@ class WorkflowService:
     # ==================== 分页 / 详情 ====================
 
     @staticmethod
-    async def page(current: int = 1, size: int = 10, name: str = None,
-                   status: str = None, created_by: int = None, login_user: dict = None):
+    async def page(login_user: dict, current: int = 1, size: int = 10, name: str = None,
+                   status: str = None, created_by: int = None):
+        """列表：可见范围下推 SQL，行内 actions 由 ACL 求值下发（前端按钮的唯一来源）。"""
         async with mysql_client.get_session() as session:
             stmt = select(Workflow)
             if name:
@@ -49,10 +55,11 @@ class WorkflowService:
                 stmt = stmt.where(Workflow.status == status)
             if created_by is not None:
                 stmt = stmt.where(Workflow.created_by == created_by)
-            # 数据权限：仅看本人创建 + 数据范围内部门成员创建的
-            scope_cond = build_data_scope_filter(login_user, Workflow.created_by) if login_user else None
-            if scope_cond is not None:
-                stmt = stmt.where(scope_cond)
+            # 可见 = 我创建的 ∪ 数据权限命中 ∪ 持有 view 授权（ADMIN 不限），与单点判定同源
+            visible = build_visible_cond(login_user, "workflow", Workflow.id,
+                                         Workflow.created_by)
+            if visible is not None:
+                stmt = stmt.where(visible)
             total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
             rows = (await session.execute(
                 stmt.order_by(Workflow.id.desc())
@@ -64,17 +71,25 @@ class WorkflowService:
                 "currentVersion": r.current_version,
                 "status": r.status,
                 "nodeCount": len((r.graph or {}).get("nodes") or []),
+                # 行上带归属人：decorate_actions 据此判 owner/scope 档，前端也能显示创建人
+                "created_by": r.created_by,
                 "createTime": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
                 "updateTime": r.update_time.strftime("%Y-%m-%d %H:%M:%S") if r.update_time else None,
             } for r in rows]
+            await decorate_actions(login_user, "workflow", records, session=session)
+            # 创建人展示名：别人看到按钮置灰时得知道找谁要授权（一次批量查，不按行查库）
+            await attach_creator(records, session=session)
             return {"records": records, "total": total, "current": current, "size": size}
 
     @staticmethod
-    async def detail(workflow_id: int) -> Optional[dict]:
+    async def detail(login_user: dict, workflow_id: int) -> Optional[dict]:
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 return None
+            # 列表里看得见不等于能打开详情：view 在这里再卡一次（防直推 id 探测）
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_VIEW,
+                                owner_id=r.created_by, session=session)
             return {
                 "id": str(r.id), "name": r.name, "description": r.description,
                 "graph": r.graph, "inputVariables": r.input_variables,
@@ -85,11 +100,14 @@ class WorkflowService:
             }
 
     @staticmethod
-    async def list_executable() -> list[dict]:
+    async def list_executable(login_user: dict) -> list[dict]:
         """可被【工作流】节点调用的工作流：已发布 + 至少有一把 ACTIVE 未过期 API Key。
 
         口径与节点执行器的运行前校验一致（没可用 key 就调不动），否则用户会在下拉里
         选到一个必然失败的子工作流。
+
+        下拉按 use 而不是 view 过滤：能引用它跑起来不等于能看它的配置（scope_actions
+        里两档恰好都在，但显式只授 view 的连接不会出现在这里）。
 
         顺手把可用 key 一起带出去：前端再拉一次 /workflow-api-keys/workflows/{id} 要多
         一个 workflow:apikey:list 权限，编辑器使用者不一定有，拿不到就只能面对一个
@@ -97,10 +115,14 @@ class WorkflowService:
         """
         now = _now()
         async with mysql_client.get_session() as session:
+            stmt = select(Workflow).where(Workflow.status == "PUBLISHED",
+                                          Workflow.current_version > 0)
+            visible = build_visible_cond(login_user, "workflow", Workflow.id,
+                                         Workflow.created_by, action=ACTION_USE)
+            if visible is not None:
+                stmt = stmt.where(visible)
             wfs = (await session.execute(
-                select(Workflow).where(Workflow.status == "PUBLISHED",
-                                       Workflow.current_version > 0)
-                .order_by(Workflow.id.desc()))).scalars().all()
+                stmt.order_by(Workflow.id.desc()))).scalars().all()
             if not wfs:
                 return []
             keys = (await session.execute(
@@ -139,7 +161,7 @@ class WorkflowService:
             return wf.id
 
     @staticmethod
-    async def update(workflow_id: int, req, user_id: int = 0) -> bool:
+    async def update(login_user: dict, workflow_id: int, req) -> bool:
         graph = req.graph
         if graph:
             await WorkflowService._validate_graph_soft(graph)
@@ -147,6 +169,8 @@ class WorkflowService:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 return False
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_EDIT,
+                                owner_id=r.created_by, session=session)
             r.name = req.name
             r.description = req.description
             if graph is not None:
@@ -159,11 +183,13 @@ class WorkflowService:
             return True
 
     @staticmethod
-    async def delete(workflow_id: int) -> bool:
+    async def delete(login_user: dict, workflow_id: int) -> bool:
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 return False
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_DELETE,
+                                owner_id=r.created_by, session=session)
             # 级联删除前先取出 API Key（供 Redis 网关配置同步清理）
             api_keys = (await session.execute(
                 select(WorkflowApiKey.api_key)
@@ -185,12 +211,16 @@ class WorkflowService:
     # ==================== 发布 / 复制 / 回滚 ====================
 
     @staticmethod
-    async def publish(workflow_id: int, change_log: str = None, user_id: int = 0) -> dict:
+    async def publish(login_user: dict, workflow_id: int, change_log: str = None) -> dict:
         """发布：严格校验 → 快照 → 版本+1。返回 {version, issues}。"""
+        user_id = int(login_user.get("user_id") or 0)
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 raise ValueError("工作流不存在")
+            # 发布不单列动作：页面上发布就在编辑器的保存区，能改配置就能发布
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_EDIT,
+                                owner_id=r.created_by, session=session)
             if not r.graph:
                 raise ValueError("工作流图为空，无法发布")
             issues = WorkflowGraph(r.graph).validate(
@@ -212,15 +242,19 @@ class WorkflowService:
                     "issues": [i.to_dict() for i in issues if i.severity != "ERROR"]}
 
     @staticmethod
-    async def copy(workflow_id: int, name: str, user_id: int = 0) -> int:
+    async def copy(login_user: dict, workflow_id: int, name: str) -> int:
+        """复制 = 读别人的配置 + 建自己的新实例，卡页面「复制」按钮；副本归属人为自己。"""
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 raise ValueError("工作流不存在")
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_COPY,
+                                owner_id=r.created_by, session=session)
             new_wf = Workflow(
                 name=name or f"{r.name} 副本", description=r.description,
                 graph=r.graph, input_variables=r.input_variables,
-                output_variables=r.output_variables, status="DRAFT", created_by=user_id)
+                output_variables=r.output_variables, status="DRAFT",
+                created_by=int(login_user.get("user_id") or 0))
             session.add(new_wf)
             await session.commit()
             return new_wf.id
@@ -228,8 +262,15 @@ class WorkflowService:
     # ==================== 版本 ====================
 
     @staticmethod
-    async def versions(workflow_id: int) -> list[dict]:
+    async def versions(login_user: dict, workflow_id: int) -> list[dict]:
+        """版本历史也是配置的一部分：没有 view 就不给看（旧版本的图能拼回原工作流）。"""
         async with mysql_client.get_session() as session:
+            owner = await session.scalar(
+                select(Workflow.created_by).where(Workflow.id == workflow_id))
+            if owner is None:
+                raise ValueError("工作流不存在")
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_VIEW,
+                                owner_id=owner, session=session)
             rows = (await session.execute(
                 select(WorkflowVersion).where(WorkflowVersion.workflow_id == workflow_id)
                 .order_by(WorkflowVersion.version.desc()))).scalars().all()
@@ -241,8 +282,14 @@ class WorkflowService:
             } for r in rows]
 
     @staticmethod
-    async def version_detail(workflow_id: int, version: int) -> Optional[dict]:
+    async def version_detail(login_user: dict, workflow_id: int, version: int) -> Optional[dict]:
         async with mysql_client.get_session() as session:
+            owner = await session.scalar(
+                select(Workflow.created_by).where(Workflow.id == workflow_id))
+            if owner is None:
+                return None
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_VIEW,
+                                owner_id=owner, session=session)
             r = (await session.execute(
                 select(WorkflowVersion).where(WorkflowVersion.workflow_id == workflow_id,
                                               WorkflowVersion.version == version))).scalar_one_or_none()
@@ -256,7 +303,7 @@ class WorkflowService:
             }
 
     @staticmethod
-    async def rollback(workflow_id: int, version: int, user_id: int = 0) -> int:
+    async def rollback(login_user: dict, workflow_id: int, version: int) -> int:
         """回滚：目标版本快照覆盖草稿，不自动发布（发布由用户手动触发）。"""
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
@@ -265,6 +312,9 @@ class WorkflowService:
                                               WorkflowVersion.version == version))).scalar_one_or_none()
             if r is None or v is None:
                 raise ValueError("工作流或版本不存在")
+            # 回滚改的是草稿，性质上等于一次 edit
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_EDIT,
+                                owner_id=r.created_by, session=session)
             r.graph = v.graph_snapshot
             r.input_variables = v.input_variables
             r.output_variables = v.output_variables
@@ -325,11 +375,13 @@ class WorkflowService:
         return [i.to_dict() for i in issues]
 
     @staticmethod
-    async def validate_graph(workflow_id: int) -> dict:
+    async def validate_graph(login_user: dict, workflow_id: int) -> dict:
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 raise ValueError("工作流不存在")
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_VIEW,
+                                owner_id=r.created_by, session=session)
             issues = (WorkflowGraph(r.graph or {}).validate(
                 await WorkflowService._model_categories(r.graph or {}, session))
                 if r.graph else [])
@@ -380,15 +432,52 @@ class WorkflowService:
             } for r in rows]
 
     @staticmethod
-    async def list_knowledge_bases() -> list[dict]:
-        """知识库下拉（service_rag.tb_knowledge_base）。"""
-        from sqlalchemy import text as sql_text
+    async def get_name(workflow_id: int) -> Optional[str]:
+        """引擎侧取工作流名（不带权限判定：执行链路里没有登录用户）。"""
+        async with mysql_client.get_session() as session:
+            return await session.scalar(
+                select(Workflow.name).where(Workflow.id == workflow_id))
+
+    @staticmethod
+    async def get_run_info(workflow_id: int, version: Optional[int] = None) -> Optional[dict]:
+        """引擎侧取「能不能跑」的那几个事实：名称 / 当前版本 / 目标版本是否已发布。
+
+        子工作流节点与 LLM 的内嵌子流工具靠 api-key 决定能不能调（机器通道不进 ACL），
+        所以这里不做判定、也只给跑起来所需的最小信息，不把别人的图定义顺带带出去。
+        """
+        async with mysql_client.get_session() as session:
+            r = await session.get(Workflow, workflow_id)
+            if r is None:
+                return None
+            ver = int(version or 0)
+            published = r.current_version > 0
+            if ver:
+                published = bool(await session.scalar(
+                    select(WorkflowVersion.published).where(
+                        WorkflowVersion.workflow_id == workflow_id,
+                        WorkflowVersion.version == ver)) or 0)
+            return {"name": r.name, "currentVersion": r.current_version, "published": published}
+
+    @staticmethod
+    async def list_knowledge_bases(login_user: dict) -> list[dict]:
+        """知识库下拉（service_rag.tb_knowledge_base）：按 use 过滤。
+
+        这张表的 ORM 在另一个服务里，用 table() 声明最小列集拼查询，
+        条件仍由 resource_guard 生成——不在这里手写一份 ACL SQL。
+        """
+        from sqlalchemy import column, table as sql_table
+        kb = sql_table("tb_knowledge_base", column("kb_id"), column("kb_name"),
+                       column("description"), column("created_by"), column("is_deleted"))
         try:
             async with mysql_client.get_session() as session:
-                rows = (await session.execute(sql_text(
-                    "SELECT kb_id, kb_name, description FROM tb_knowledge_base "
-                    "WHERE is_deleted=0 ORDER BY kb_id DESC"
-                ))).mappings().all()
+                stmt = select(kb.c.kb_id, kb.c.kb_name, kb.c.description).where(
+                    kb.c.is_deleted == 0)
+                visible = build_visible_cond(login_user, "knowledge_base", kb.c.kb_id,
+                                             kb.c.created_by, action=ACTION_USE)
+                if visible is not None:
+                    stmt = stmt.where(visible)
+                rows = (await session.execute(
+                    stmt.order_by(kb.c.kb_id.desc()))).mappings().all()
                 return [{"id": r["kb_id"], "name": r["kb_name"],
                         "description": r["description"]} for r in rows]
         except Exception as e:  # noqa: BLE001  表未初始化时降级为空
@@ -435,7 +524,7 @@ class WorkflowService:
             return len(BUILTIN_TEMPLATES)
 
     @staticmethod
-    async def template_page(current: int = 1, size: int = 10, name: str = None,
+    async def template_page(login_user: dict, current: int = 1, size: int = 10, name: str = None,
                             category: str = None, built_in_only: bool = False):
         async with mysql_client.get_session() as session:
             stmt = select(WorkflowTemplate)
@@ -445,11 +534,17 @@ class WorkflowService:
                 stmt = stmt.where(WorkflowTemplate.category == category)
             if built_in_only:
                 stmt = stmt.where(WorkflowTemplate.is_built_in == 1)
+            visible = build_visible_cond(login_user, "workflow_template", WorkflowTemplate.id,
+                                         WorkflowTemplate.created_by)
+            if visible is not None:
+                stmt = stmt.where(visible)
             total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
             rows = (await session.execute(
                 stmt.order_by(WorkflowTemplate.id.desc())
                 .offset((current - 1) * size).limit(size))).scalars().all()
             records = [WorkflowService._template_dto(r) for r in rows]
+            await decorate_actions(login_user, "workflow_template", records, session=session)
+            await attach_creator(records, session=session)
             return {"records": records, "total": total, "current": current, "size": size}
 
     @staticmethod
@@ -458,15 +553,22 @@ class WorkflowService:
             "id": str(r.id), "name": r.name, "description": r.description,
             "category": r.category, "icon": r.icon, "graph": r.graph,
             "builtIn": bool(r.is_built_in),
+            "created_by": r.created_by,
             "nodeCount": len((r.graph or {}).get("nodes") or []),
             "createTime": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
         }
 
     @staticmethod
-    async def template_detail(template_id: int) -> Optional[dict]:
+    async def template_detail(login_user: dict, template_id: int,
+                              action: str = ACTION_VIEW) -> Optional[dict]:
         async with mysql_client.get_session() as session:
             r = await session.get(WorkflowTemplate, template_id)
-            return WorkflowService._template_dto(r) if r else None
+            if r is None:
+                return None
+            # 同一取数接口服务多个按钮（看详情 / 导出 JSON），卡哪个动作由调用方给
+            await ensure_action(login_user, "workflow_template", template_id, action,
+                                owner_id=r.created_by, session=session)
+            return WorkflowService._template_dto(r)
 
     @staticmethod
     async def create_template(req, user_id: int = 0) -> int:
@@ -481,13 +583,40 @@ class WorkflowService:
             return t.id
 
     @staticmethod
-    async def update_template(template_id: int, req) -> bool:
+    async def copy_template(login_user: dict, template_id: int,
+                            name: str = None) -> int:
+        """复制为自定义模板（模板页「复制」按钮）：读源模板图 + 建自己的新实例，副本归属人为自己。
+
+        不让前端拿列表里的 graph 直接 create：那样 copy 这个动作只在按钮上生效，
+        绕过页面推接口就能白拿别人的模板。
+        """
+        async with mysql_client.get_session() as session:
+            r = await session.get(WorkflowTemplate, template_id)
+            if r is None:
+                raise ValueError("模板不存在")
+            await ensure_action(login_user, "workflow_template", template_id, ACTION_COPY,
+                                owner_id=r.created_by, session=session)
+            t = WorkflowTemplate(name=(name or f"{r.name} - 副本")[:128],
+                                 description=r.description, category=r.category,
+                                 icon=r.icon, graph=r.graph,
+                                 input_variables=r.input_variables,
+                                 output_variables=r.output_variables,
+                                 is_built_in=0,
+                                 created_by=int(login_user.get("user_id") or 0))
+            session.add(t)
+            await session.commit()
+            return t.id
+
+    @staticmethod
+    async def update_template(login_user: dict, template_id: int, req) -> bool:
         async with mysql_client.get_session() as session:
             r = await session.get(WorkflowTemplate, template_id)
             if r is None:
                 return False
             if r.is_built_in:
                 raise ValueError("内置模板不可修改")
+            await ensure_action(login_user, "workflow_template", template_id, ACTION_EDIT,
+                                owner_id=r.created_by, session=session)
             r.name = req.name
             r.description = req.description
             r.category = req.category
@@ -498,54 +627,68 @@ class WorkflowService:
             return True
 
     @staticmethod
-    async def delete_template(template_id: int) -> bool:
+    async def delete_template(login_user: dict, template_id: int) -> bool:
         async with mysql_client.get_session() as session:
             r = await session.get(WorkflowTemplate, template_id)
             if r is None:
                 return False
             if r.is_built_in:
                 raise ValueError("内置模板不可删除")
+            await ensure_action(login_user, "workflow_template", template_id, ACTION_DELETE,
+                                owner_id=r.created_by, session=session)
             await session.delete(r)
             await session.commit()
             return True
 
     @staticmethod
-    async def template_from_workflow(workflow_id: int, name: str, category: str,
-                                     description: str = None, user_id: int = 0) -> int:
+    async def template_from_workflow(login_user: dict, workflow_id: int, name: str,
+                                     category: str, description: str = None) -> int:
         async with mysql_client.get_session() as session:
             r = await session.get(Workflow, workflow_id)
             if r is None:
                 raise ValueError("工作流不存在")
+            # 把工作流抽成模板 = 页面「保存为模块」按钮；新模板归属人是自己
+            await ensure_action(login_user, "workflow", workflow_id, ACTION_TEMPLATE,
+                                owner_id=r.created_by, session=session)
             t = WorkflowTemplate(name=name, description=description,
                                  category=category or "CUSTOM", graph=r.graph or {},
                                  input_variables=r.input_variables,
                                  output_variables=r.output_variables,
-                                 is_built_in=0, created_by=user_id)
+                                 is_built_in=0,
+                                 created_by=int(login_user.get("user_id") or 0))
             session.add(t)
             await session.commit()
             return t.id
 
     @staticmethod
-    async def create_from_template(template_id: int, name: str, description: str = None,
-                                   user_id: int = 0) -> int:
+    async def create_from_template(login_user: dict, template_id: int, name: str,
+                                   description: str = None) -> int:
         async with mysql_client.get_session() as session:
             t = await session.get(WorkflowTemplate, template_id)
             if t is None:
                 raise ValueError("模板不存在")
+            # 从模板建工作流 = 使用模板（内置模板人人可用，别人的自定义模板需要 use 授权）
+            await ensure_action(login_user, "workflow_template", template_id, ACTION_USE,
+                                owner_id=t.created_by, session=session)
             wf = Workflow(name=name or t.name, description=description or t.description,
                           graph=t.graph, input_variables=t.input_variables,
                           output_variables=t.output_variables, status="DRAFT",
-                          created_by=user_id)
+                          created_by=int(login_user.get("user_id") or 0))
             session.add(wf)
             await session.commit()
             return wf.id
 
     @staticmethod
-    async def templates_by_category(category: str) -> list[dict]:
+    async def templates_by_category(login_user: dict, category: str) -> list[dict]:
+        """按分类的模板列表（与 template_page 同口径，只是不分页）。"""
         async with mysql_client.get_session() as session:
+            stmt = select(WorkflowTemplate).where(WorkflowTemplate.category == category)
+            visible = build_visible_cond(login_user, "workflow_template", WorkflowTemplate.id,
+                                         WorkflowTemplate.created_by)
+            if visible is not None:
+                stmt = stmt.where(visible)
             rows = (await session.execute(
-                select(WorkflowTemplate).where(WorkflowTemplate.category == category)
-                .order_by(WorkflowTemplate.id.desc()))).scalars().all()
+                stmt.order_by(WorkflowTemplate.id.desc()))).scalars().all()
             return [WorkflowService._template_dto(r) for r in rows]
 
     @staticmethod

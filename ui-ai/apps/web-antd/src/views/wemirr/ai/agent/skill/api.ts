@@ -25,6 +25,10 @@ export interface SkillPageResp {
   skillFile?: string;
   resourceCount?: number;
   status: boolean;
+  /** 当前用户对这一条技能可执行的动作（后端 ACL 求值下发） */
+  actions?: string[];
+  /** 创建人展示名（后端按 created_by 批量翻好，别人据此找谁要授权） */
+  creatorName?: string;
 }
 
 export interface SkillDetailResp extends SkillPageResp {

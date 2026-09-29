@@ -1,18 +1,13 @@
 <script lang="ts" setup name="AiSkillPage">
-import type { Key } from 'ant-design-vue/es/table/interface';
 import type { UploadFile } from 'ant-design-vue';
+import type { Key } from 'ant-design-vue/es/table/interface';
 
-import type {
-  SkillDetailResp,
-  SkillPageResp,
-  SkillZipUploadReq,
-} from './api';
+import type { SkillDetailResp, SkillPageResp, SkillZipUploadReq } from './api';
 
 import { computed, nextTick, onMounted, reactive, ref } from 'vue';
 
-import { Page } from '@vben/common-ui';
-
 import { useAccess } from '@vben/access';
+import { Page } from '@vben/common-ui';
 
 import {
   CodeOutlined,
@@ -21,19 +16,20 @@ import {
   DownloadOutlined,
   EditOutlined,
   EyeOutlined,
-  FileOutlined,
-  FormOutlined,
   FileMarkdownOutlined,
+  FileOutlined,
   FileTextOutlined,
-  FolderOutlined,
   FolderOpenOutlined,
+  FolderOutlined,
+  FormOutlined,
   InboxOutlined,
   SaveOutlined,
   SettingOutlined,
+  ShareAltOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue';
+import { useFs } from '@fast-crud/fast-crud';
 import {
-  Card,
   Drawer,
   Form,
   Input,
@@ -44,12 +40,14 @@ import {
   Tree,
   Upload,
 } from 'ant-design-vue';
-import { useFs } from '@fast-crud/fast-crud';
 
-import * as api from './api';
-import createCrudOptions from './crud';
-import CodeEditor from './components/code-editor.vue';
+import { canAction } from '#/api/acl';
+
+import AclGrantModal from '../../shared/components/AclGrantModal.vue';
 import MarkdownRenderer from '../../workflow/components/debug/MarkdownRenderer.vue';
+import * as api from './api';
+import CodeEditor from './components/code-editor.vue';
+import createCrudOptions from './crud';
 
 interface SkillFormState {
   category?: string;
@@ -99,8 +97,8 @@ const previewLoading = ref(false);
 const previewSaving = ref(false);
 const uploadDrawerVisible = ref(false);
 const previewModalVisible = ref(false);
-const editingSkill = ref<SkillPageResp | null>(null);
-const previewSkill = ref<SkillDetailResp | null>(null);
+const editingSkill = ref<null | SkillPageResp>(null);
+const previewSkill = ref<null | SkillDetailResp>(null);
 const previewContentMap = ref<Record<string, string>>({});
 const previewTreeData = ref<PreviewTreeNode[]>([]);
 const expandedPreviewKeys = ref<string[]>([]);
@@ -132,14 +130,45 @@ const isMarkdownPreview = computed(() =>
   ['markdown', 'md'].includes(getPreviewExtension(selectedPreviewPath.value)),
 );
 
-// 技能卡片操作按钮按后端权限点显隐（与 workflow:skill:* 一一对应）
+/**
+ * 卡片按钮两层 AND：功能权限管「这类事让不让你做」，行上的 actions 管「这一条你能不能做」。
+ * actions 由列表接口按 ACL 求值下发，判定规则一律不在前端复制（否则早晚和后端分叉）。
+ * 动作码逐个对齐后端 skill 的动作清单（一个按钮一个动作，不再共用 edit）。
+ */
 const { hasPermission } = useAccess();
 const canAdd = computed(() => hasPermission('workflow:skill:add'));
-const canView = computed(() => hasPermission('workflow:skill:view'));
-const canDownload = computed(() => hasPermission('workflow:skill:download'));
-const canRename = computed(() => hasPermission('workflow:skill:rename'));
-const canReplace = computed(() => hasPermission('workflow:skill:replace'));
-const canDelete = computed(() => hasPermission('workflow:skill:delete'));
+const canView = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:view') && canAction(item, 'view');
+// 下载拿的是原始压缩包，比看内容更进一步 → export
+const canDownload = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:download') && canAction(item, 'export');
+// 预览抽屉里改文件内容 → edit；改名/换包/启停各为独立按钮 → rename/replace/toggle
+const canEdit = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:edit') && canAction(item, 'edit');
+const canRename = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:rename') && canAction(item, 'rename');
+const canReplace = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:replace') && canAction(item, 'replace');
+const canToggle = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:edit') && canAction(item, 'toggle');
+const canDelete = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:delete') && canAction(item, 'delete');
+const canGrant = (item: SkillPageResp) =>
+  hasPermission('workflow:skill:grant') && canAction(item, 'share');
+// 预览抽屉里的「保存」：抽屉开的是哪条技能，就按那一条的 actions 判定
+const previewRow = ref<null | SkillPageResp>(null);
+const canSavePreviewFile = computed(
+  () => !!previewRow.value && canEdit(previewRow.value),
+);
+
+// 资源授权弹窗（ACL）：整表提交，当前授权行由弹窗自己拉
+const grantModalVisible = ref(false);
+const grantSkill = ref<null | SkillPageResp>(null);
+
+function openGrant(item: SkillPageResp) {
+  grantSkill.value = item;
+  grantModalVisible.value = true;
+}
 
 const { crudBinding, crudExpose, crudRef } = useFs({
   createCrudOptions,
@@ -175,7 +204,10 @@ function normalizeRecord(value: unknown): Record<string, string> {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .filter(([, content]) => typeof content === 'string')
-        .map(([path, content]) => [normalizePreviewPath(path), content as string]),
+        .map(([path, content]) => [
+          normalizePreviewPath(path),
+          content as string,
+        ]),
     );
   }
   if (typeof value === 'string' && value) {
@@ -194,7 +226,9 @@ function normalizePreviewPath(path: string) {
 
 function getPreviewExtension(path: string) {
   const filename = path.split('/').pop() || '';
-  return filename.includes('.') ? filename.split('.').pop()?.toLowerCase() || '' : '';
+  return filename.includes('.')
+    ? filename.split('.').pop()?.toLowerCase() || ''
+    : '';
 }
 
 function getPreviewIconType(path: string) {
@@ -257,8 +291,10 @@ function buildPreviewTree(fileMap: Record<string, string>): PreviewTreeNode[] {
 }
 
 function buildPreviewFileMap(skill: SkillDetailResp) {
-  const fileMap: Record<string, string> = {};
-  fileMap['SKILL.md'] = skill.skillContent || '';
+  const fileMap: Record<string, string> = {
+    'SKILL.md': skill.skillContent || '',
+  };
+
   const resourceContents = normalizeRecord(skill.resourceContents);
   const resourcePaths = normalizeArray(skill.resources)
     .map(normalizePreviewPath)
@@ -279,8 +315,7 @@ function normalizeSkillCode(value: string) {
     .trim()
     .replaceAll('\\', '/')
     .split('/')
-    .filter(Boolean)
-    .pop()
+    .findLast(Boolean)
     ?.replace(/\.zip$/i, '')
     .replaceAll(/[^-\w]/g, '-')
     .replaceAll(/-+/g, '-')
@@ -393,6 +428,8 @@ async function submitSkill() {
 }
 
 async function openPreview(item: SkillPageResp) {
+  // 抽屉里的保存按钮要按本条技能的 actions 判定，先记住是哪一条（详情接口不下发 actions）
+  previewRow.value = item;
   previewModalVisible.value = true;
   previewSkill.value = null;
   previewContentMap.value = {};
@@ -408,9 +445,9 @@ async function openPreview(item: SkillPageResp) {
     previewTreeData.value = buildPreviewTree(previewContentMap.value);
     expandedPreviewKeys.value = getAllFolderKeys(previewTreeData.value);
     const firstPath =
-      previewContentMap.value['SKILL.md'] !== undefined
-        ? 'SKILL.md'
-        : Object.keys(previewContentMap.value)[0] || '';
+      previewContentMap.value['SKILL.md'] === undefined
+        ? Object.keys(previewContentMap.value)[0] || ''
+        : 'SKILL.md';
     selectedPreviewPath.value = firstPath;
     selectedPreviewKeys.value = firstPath ? [firstPath] : [];
   } finally {
@@ -479,7 +516,7 @@ async function toggleStatus(item: SkillPageResp, checked: boolean) {
 }
 
 const renameModalVisible = ref(false);
-const renameTarget = ref<SkillPageResp | null>(null);
+const renameTarget = ref<null | SkillPageResp>(null);
 const renameInput = ref('');
 const renameSaving = ref(false);
 
@@ -518,106 +555,133 @@ onMounted(() => {
 
 <template>
   <Page content-class="skill-page-content">
-    <Card class="skill-list-card" title="AI技能管理">
-      <fs-crud ref="crudRef" v-bind="crudBinding">
-        <template #actionbar-left>
-          <a-button v-if="canAdd" type="primary" @click="openCreateDrawer">
-            <template #icon><UploadOutlined /></template>
-            上传技能压缩包
-          </a-button>
-        </template>
-        <template #default>
-          <div v-if="crudBinding.data?.length" class="skill-card-grid">
-            <div
-              v-for="item in crudBinding.data"
-              :key="item.id"
-              class="skill-folder-card"
-              data-testid="skill-folder-card"
-            >
-              <div class="skill-card-main" @click="openPreview(item)">
-                <div class="skill-card-icon">
-                  <FolderOpenOutlined />
-                </div>
-                <div class="skill-card-content">
-                  <div class="skill-card-title-row">
-                    <h3 class="skill-card-title">{{ item.name }}</h3>
-                    <Tag :color="item.status ? 'success' : 'default'">
-                      {{ item.status ? '启用' : '禁用' }}
-                    </Tag>
-                  </div>
-                  <div class="skill-card-path">
-                    {{ item.skillPath || `skills/${item.code}` }}
-                  </div>
-                  <p class="skill-card-desc">
-                    {{ item.description || '暂无描述' }}
-                  </p>
-                </div>
+    <fs-crud ref="crudRef" v-bind="crudBinding">
+      <template #actionbar-left>
+        <a-button v-if="canAdd" type="primary" @click="openCreateDrawer">
+          <template #icon><UploadOutlined /></template>
+          上传技能压缩包
+        </a-button>
+      </template>
+      <template #default>
+        <div v-if="crudBinding.data?.length" class="skill-card-grid">
+          <div
+            v-for="item in crudBinding.data"
+            :key="item.id"
+            class="skill-folder-card"
+            data-testid="skill-folder-card"
+          >
+            <div class="skill-card-main" @click="openPreview(item)">
+              <div class="skill-card-icon">
+                <FolderOpenOutlined />
               </div>
-
-              <div class="skill-card-meta">
-                <span>{{ item.skillFile || 'SKILL.md' }}</span>
-                <span>{{ item.resourceCount || 0 }} 个资源</span>
-              </div>
-
-              <div class="skill-card-tags">
-                <Tag v-if="item.category">{{ item.category }}</Tag>
-                <Tag v-for="tag in normalizeArray(item.tags)" :key="tag">
-                  {{ tag }}
-                </Tag>
-              </div>
-
-              <div class="skill-card-footer">
-                <Switch
-                  :checked="item.status"
-                  checked-children="启用"
-                  size="small"
-                  un-checked-children="禁用"
-                  @change="(checked) => toggleStatus(item, Boolean(checked))"
-                />
-                <div class="skill-card-actions">
-                  <a-tooltip title="预览">
-                    <a-button v-if="canView" type="text" size="small" @click="openPreview(item)">
-                      <template #icon><EyeOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip title="下载">
-                    <a-button v-if="canDownload" type="text" size="small" @click="downloadSkill(item)">
-                      <template #icon><DownloadOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip title="重命名">
-                    <a-button v-if="canRename" type="text" size="small" @click="openRename(item)">
-                      <template #icon><FormOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip title="替换目录">
-                    <a-button
-                      v-if="canReplace"
-                      type="text"
-                      size="small"
-                      @click="openReplaceDrawer(item)"
-                    >
-                      <template #icon><EditOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip title="删除">
-                    <a-button
-                      v-if="canDelete"
-                      danger
-                      type="text"
-                      size="small"
-                      @click="confirmRemove(item)"
-                    >
-                      <template #icon><DeleteOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
+              <div class="skill-card-content">
+                <div class="skill-card-title-row">
+                  <h3 class="skill-card-title">{{ item.name }}</h3>
+                  <Tag :color="item.status ? 'success' : 'default'">
+                    {{ item.status ? '启用' : '禁用' }}
+                  </Tag>
                 </div>
+                <div class="skill-card-path">
+                  {{ item.skillPath || `skills/${item.code}` }}
+                </div>
+                <p class="skill-card-desc">
+                  {{ item.description || '暂无描述' }}
+                </p>
+              </div>
+            </div>
+
+            <div class="skill-card-meta">
+              <span>{{ item.skillFile || 'SKILL.md' }}</span>
+              <span>{{ item.resourceCount || 0 }} 个资源</span>
+              <span v-if="item.creatorName">
+                创建人：{{ item.creatorName }}
+              </span>
+            </div>
+
+            <div class="skill-card-tags">
+              <Tag v-if="item.category">{{ item.category }}</Tag>
+              <Tag v-for="tag in normalizeArray(item.tags)" :key="tag">
+                {{ tag }}
+              </Tag>
+            </div>
+
+            <div class="skill-card-footer">
+              <Switch
+                :checked="item.status"
+                :disabled="!canToggle(item)"
+                checked-children="启用"
+                size="small"
+                un-checked-children="禁用"
+                @change="(checked) => toggleStatus(item, Boolean(checked))"
+              />
+              <div class="skill-card-actions">
+                <a-tooltip title="预览">
+                  <a-button
+                    v-if="canView(item)"
+                    type="text"
+                    size="small"
+                    @click="openPreview(item)"
+                  >
+                    <template #icon><EyeOutlined /></template>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="下载">
+                  <a-button
+                    v-if="canDownload(item)"
+                    type="text"
+                    size="small"
+                    @click="downloadSkill(item)"
+                  >
+                    <template #icon><DownloadOutlined /></template>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="重命名">
+                  <a-button
+                    v-if="canRename(item)"
+                    type="text"
+                    size="small"
+                    @click="openRename(item)"
+                  >
+                    <template #icon><FormOutlined /></template>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="替换目录">
+                  <a-button
+                    v-if="canReplace(item)"
+                    type="text"
+                    size="small"
+                    @click="openReplaceDrawer(item)"
+                  >
+                    <template #icon><EditOutlined /></template>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="授权">
+                  <a-button
+                    v-if="canGrant(item)"
+                    type="text"
+                    size="small"
+                    @click="openGrant(item)"
+                  >
+                    <template #icon><ShareAltOutlined /></template>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="删除">
+                  <a-button
+                    v-if="canDelete(item)"
+                    danger
+                    type="text"
+                    size="small"
+                    @click="confirmRemove(item)"
+                  >
+                    <template #icon><DeleteOutlined /></template>
+                  </a-button>
+                </a-tooltip>
               </div>
             </div>
           </div>
-        </template>
-      </fs-crud>
-    </Card>
+        </div>
+      </template>
+    </fs-crud>
 
     <Drawer
       v-model:open="uploadDrawerVisible"
@@ -658,7 +722,7 @@ onMounted(() => {
         </a-form-item>
         <a-form-item label="技能压缩包" required>
           <Upload.Dragger
-            :accept="'.zip'"
+            accept=".zip"
             :before-upload="beforeUpload"
             :file-list="formState.skillPackage"
             :max-count="1"
@@ -669,7 +733,8 @@ onMounted(() => {
             </p>
             <p class="ant-upload-text">选择或拖入 SKILL.zip 压缩包</p>
             <p class="ant-upload-hint">
-              压缩包内必须包含 SKILL.md，上传后解压为技能目录存储；支持单层目录包裹。
+              压缩包内必须包含
+              SKILL.md，上传后解压为技能目录存储；支持单层目录包裹。
             </p>
           </Upload.Dragger>
         </a-form-item>
@@ -766,15 +831,23 @@ onMounted(() => {
           <div class="code-panel">
             <div class="preview-toolbar">
               <span class="preview-path">{{ selectedPreviewPath }}</span>
-              <a-button
-                :disabled="!selectedPreviewPath"
-                :loading="previewSaving"
-                type="primary"
-                @click="savePreviewFile"
+              <a-tooltip
+                :title="
+                  canSavePreviewFile
+                    ? ''
+                    : '无该技能的编辑权限，请联系创建人申请授权'
+                "
               >
-                <template #icon><SaveOutlined /></template>
-                保存
-              </a-button>
+                <a-button
+                  :disabled="!selectedPreviewPath || !canSavePreviewFile"
+                  :loading="previewSaving"
+                  type="primary"
+                  @click="savePreviewFile"
+                >
+                  <template #icon><SaveOutlined /></template>
+                  保存
+                </a-button>
+              </a-tooltip>
             </div>
             <div v-if="isMarkdownPreview" class="markdown-edit-layout">
               <div class="markdown-editor">
@@ -798,6 +871,14 @@ onMounted(() => {
         </div>
       </a-spin>
     </Modal>
+    <AclGrantModal
+      v-if="grantSkill"
+      v-model:open="grantModalVisible"
+      :key="grantSkill.id"
+      resource-code="skill"
+      :resource-id="grantSkill.id"
+      :resource-name="grantSkill.name"
+    />
   </Page>
 </template>
 
@@ -807,21 +888,8 @@ onMounted(() => {
   overflow: hidden;
 }
 
-.skill-list-card {
-  display: flex;
-  flex-direction: column;
+:deep(.fs-crud-container) {
   height: 100%;
-  overflow: hidden;
-
-  :deep(.ant-card-body) {
-    flex: 1;
-    padding: 12px;
-    overflow: hidden;
-  }
-
-  :deep(.fs-crud-container) {
-    height: 100%;
-  }
 }
 
 .skill-card-grid {
@@ -894,7 +962,8 @@ onMounted(() => {
 
 .skill-card-path {
   overflow: hidden;
-  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
   font-size: 12px;
   color: #667085;
   text-overflow: ellipsis;
@@ -969,7 +1038,8 @@ onMounted(() => {
     display: inline-block;
     max-width: 260px;
     overflow: hidden;
-    font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+    font-family:
+      ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
     font-size: 12px;
     text-overflow: ellipsis;
     vertical-align: middle;
@@ -997,7 +1067,8 @@ onMounted(() => {
 .preview-path {
   min-width: 0;
   overflow: hidden;
-  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
   font-size: 12px;
   color: #475467;
   text-overflow: ellipsis;

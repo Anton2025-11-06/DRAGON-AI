@@ -22,9 +22,10 @@ import {
   copyWorkflow,
   createWorkflowFromTemplate,
   deleteWorkflow,
-  listApiKeys,
+  listUsableApiKeys,
 } from '#/api/ai-workflow';
 
+import AclGrantModal from '../../shared/components/AclGrantModal.vue';
 import ApiKeyManager from '../components/ApiKeyManager.vue';
 import WorkflowChatModal from '../components/chat/WorkflowChatModal.vue';
 import SaveAsTemplateModal from '../templates/components/SaveAsTemplateModal.vue';
@@ -59,6 +60,10 @@ const apiDrawerItem = ref<null | WorkflowPageResp>(null);
 // 保存为模块弹窗（需求 4.2）
 const templateModalVisible = ref(false);
 const templateModalItem = ref<null | WorkflowPageResp>(null);
+
+// 资源授权弹窗（ACL）：哪张卡片能开由卡片自己按 actions 判定，这里只负责挂载
+const grantVisible = ref(false);
+const grantItem = ref<null | WorkflowPageResp>(null);
 
 // 去对话：先选启用中的 api-key，再开对话窗口
 const keySelectVisible = ref(false);
@@ -180,20 +185,18 @@ function handleApi(item: WorkflowPageResp) {
  * 去对话：对话走的是已发布版本的执行入口，前置条件是三件事同时成立——
  * 工作流已发布、已创建 api-key、api-key 处于启用状态，缺一不可，
  * 因此这里只按「有没有可用 key」判定，不满足就一次性提示到位。
+ *
+ * 只拉 /usable（后端已筛掉停用与过期）而不是管理列表：那个接口卡 apikey 动作，
+ * 只有 use 授权的人点「去对话」不该先撞一次 403。
  */
 async function handleChat(item: WorkflowPageResp) {
-  let keys: ApiKeyListResp[] = [];
+  let usable: ApiKeyListResp[] = [];
   try {
-    keys = await listApiKeys(item.id);
+    usable = (await listUsableApiKeys(item.id)) || [];
   } catch {
     message.error('查询 API Key 失败');
     return;
   }
-  const usable = (keys || []).filter(
-    (key) =>
-      key.status === 'ACTIVE' &&
-      (!key.expireTime || new Date(key.expireTime).getTime() > Date.now()),
-  );
   if (usable.length === 0) {
     Modal.warning({
       title: '暂时无法对话',
@@ -219,6 +222,12 @@ function handleSaveAsTemplate(item: WorkflowPageResp) {
   templateModalVisible.value = true;
 }
 
+/** 打开授权弹窗 */
+function handleGrant(item: WorkflowPageResp) {
+  grantItem.value = item;
+  grantVisible.value = true;
+}
+
 /** 模块保存成功 */
 function handleTemplateSaved() {
   message.success('保存为模块成功');
@@ -230,7 +239,11 @@ function handleTemplateSaved() {
     <fs-crud ref="crudRef" v-bind="crudBinding">
       <!-- 自定义新增按钮 -->
       <template #actionbar-left>
-        <a-button v-if="hasPermission('workflow:workflow:add')" type="primary" @click="handleCreate">
+        <a-button
+          v-if="hasPermission('workflow:workflow:add')"
+          type="primary"
+          @click="handleCreate"
+        >
           <template #icon><PlusOutlined /></template>
           新建工作流
         </a-button>
@@ -251,6 +264,7 @@ function handleTemplateSaved() {
             @chat="handleChat"
             @api="handleApi"
             @template="handleSaveAsTemplate"
+            @grant="handleGrant"
           />
         </div>
 
@@ -261,7 +275,12 @@ function handleTemplateSaved() {
           </div>
           <h3 class="empty-title">还没有工作流</h3>
           <p class="empty-desc">创建你的第一个 AI 工作流，开启自动化之旅</p>
-          <a-button v-if="hasPermission('workflow:workflow:add')" type="primary" size="large" @click="handleCreate">
+          <a-button
+            v-if="hasPermission('workflow:workflow:add')"
+            type="primary"
+            size="large"
+            @click="handleCreate"
+          >
             <template #icon><PlusOutlined /></template>
             新建工作流
           </a-button>
@@ -326,6 +345,16 @@ function handleTemplateSaved() {
       v-model:open="chatVisible"
       :api-key="chatApiKey"
       :workflow="chatWorkflow"
+    />
+
+    <!-- 资源授权：整表提交，弹窗自己拉当前授权行 -->
+    <AclGrantModal
+      v-if="grantItem"
+      v-model:open="grantVisible"
+      :key="grantItem.id"
+      resource-code="workflow"
+      :resource-id="grantItem.id"
+      :resource-name="grantItem.name"
     />
   </fs-page>
 </template>

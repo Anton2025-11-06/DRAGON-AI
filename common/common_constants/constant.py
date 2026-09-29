@@ -99,15 +99,7 @@ SERVICE_ALIASES = {
 }
 
 
-# ---- 技能/文件共享目录（环境变量可覆盖） ----
-SKILL_SHARE_DIR = "/data/skills"
-UPLOAD_TMP_DIR = "/data/tmp"
-MAX_SKILL_SIZE = 100 * 1024 * 1024      # 技能包最大 100MB
-MAX_DOC_SIZE = 50 * 1024 * 1024         # 文档最大 50MB
 
-# ---- Celery 队列 ----
-QUEUE_VECTORIZE = "vectorize_queue"
-QUEUE_PARSE = "parse_queue"
 
 # ---- 知识库状态 ----
 DOC_STATUS_PENDING = 0      # 待处理

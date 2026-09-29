@@ -12,7 +12,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from common.common_constants.constant import PREFIX_WORKFLOW_API_KEY
 from common.common_log.log_init import log
@@ -75,6 +75,42 @@ class WorkflowApiKeyService:
                 "totalCalls": r.total_calls,
                 "createTime": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
             } for r in rows]
+
+    @staticmethod
+    async def list_usable_for_chat(workflow_id: int) -> list[dict]:
+        """只能拉到真正能用的 key（ACTIVE 且未过期），给列表页「去对话」选 key 用。
+
+        与 list_by_workflow 分开是权限口径不同：对话只需要 use，拉整页 key（含停用/
+        过期与调用统计）属于管理动作 apikey。返回形状与 list_by_workflow 一致，
+        前端 ApiKeySelectModal / WorkflowChatModal 不区分两个来源。
+        """
+        now = datetime.now()
+        async with mysql_client.get_session() as session:
+            rows = (await session.execute(
+                select(WorkflowApiKey).where(
+                    WorkflowApiKey.workflow_id == workflow_id,
+                    WorkflowApiKey.status == "ACTIVE",
+                    or_(WorkflowApiKey.expire_time.is_(None),
+                        WorkflowApiKey.expire_time > now))
+                .order_by(WorkflowApiKey.id.desc()))).scalars().all()
+            return [{
+                "id": r.id, "name": r.name, "apiKey": r.api_key,
+                "status": r.status, "rateLimit": r.rate_limit,
+                "expireTime": r.expire_time.strftime("%Y-%m-%d %H:%M:%S") if r.expire_time else None,
+                "lastUsedTime": r.last_used_time.strftime("%Y-%m-%d %H:%M:%S") if r.last_used_time else None,
+                "totalCalls": r.total_calls,
+                "createTime": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
+            } for r in rows]
+
+    @staticmethod
+    async def owner_workflow(api_key_id: int) -> Optional[int]:
+        """这条 key 挂在哪个工作流上（key 不存在返回 None）。
+
+        管理动作的 ACL 判定得先知道归属资源：key 行上的 workflow_id 就是它的资源边界。
+        """
+        async with mysql_client.get_session() as session:
+            return await session.scalar(
+                select(WorkflowApiKey.workflow_id).where(WorkflowApiKey.id == api_key_id))
 
     @staticmethod
     async def update(api_key_id: int, changes: dict) -> bool:

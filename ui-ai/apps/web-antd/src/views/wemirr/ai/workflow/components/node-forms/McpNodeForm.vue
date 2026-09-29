@@ -2,7 +2,7 @@
 /**
  * MCP_TOOL 节点配置表单
  * 选定一个 MCP 连接 + 该连接 tools/list 里的工具，参数按工具的 inputSchema 生成绑定行：
- * - 连接下拉来自工作流侧的 MCP 分页接口，工具列表实时向连接要（连接不通时给出提示）
+ * - 连接下拉只给有「使用MCP」授权的那些连接，工具列表实时向连接要（连接不通时给出提示）
  * - 参数绑定行与 CODE / TOOL 节点同构（引用上游变量 / 自定义值）
  * 提交字段与后端 McpToolNodeExecutor 逐字对齐：mcpServerId / toolName / inputs / timeout / outputVariable
  * 输出：result（structuredContent 优先，否则文本 content）、content、urls

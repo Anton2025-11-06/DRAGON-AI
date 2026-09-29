@@ -10,13 +10,11 @@ import { h } from 'vue';
 
 import { useAccess } from '@vben/access';
 
-import {
-  ApiOutlined,
-  ToolOutlined,
-} from '@ant-design/icons-vue';
+import { ApiOutlined, ToolOutlined } from '@ant-design/icons-vue';
 import { dict } from '@fast-crud/fast-crud';
 import { message, Modal } from 'ant-design-vue';
 
+import { aclRowButton } from '#/plugin/fast-crud/acl-row';
 import { hiddenIdColumn, statusDict } from '#/plugin/fast-crud/shared';
 
 import * as api from './api';
@@ -24,9 +22,42 @@ import * as api from './api';
 export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
-  const { openToolsModal } = props.context || {};
-  // 操作按钮按后端权限点显隐（与 workflow:mcp:* 一一对应）
+  const { openGrantModal, openToolsModal } = props.context || {};
+  // 操作按钮两层 AND：功能权限管这类事让不让你做，行上的 actions 管这一条你能不能做
   const { hasPermission } = useAccess();
+
+  /** 按已保存的连接测一次：会真的外连第三方，所以后端卡的是「测试连接」 */
+  async function testConnection(row: any) {
+    const hide = message.loading('正在测试连接...', 0);
+    try {
+      const result = await api.TestConnection(row.id);
+      hide();
+      if (result.success) {
+        Modal.success({
+          content: h('div', [
+            h('p', `服务器: ${result.serverName}`),
+            h('p', `可用工具数量: ${result.toolCount}`),
+            h('p', `响应时间: ${result.responseTime}ms`),
+          ]),
+          title: '连接测试成功',
+        });
+      } else {
+        Modal.error({
+          content: h('div', [
+            h('p', { style: { color: 'red' } }, result.errorMessage),
+            h('p', `响应时间: ${result.responseTime}ms`),
+          ]),
+          title: '连接测试失败',
+        });
+      }
+    } catch (error: any) {
+      hide();
+      Modal.error({
+        content: error.message || '未知错误',
+        title: '连接测试失败',
+      });
+    }
+  }
 
   return {
     crudOptions: {
@@ -213,88 +244,73 @@ export default function createCrudOptions(
             width: 120,
           },
         },
+        // 创建人：按钮置灰时得知道找谁要授权（展示名由列表接口批量翻好）
+        creatorName: {
+          title: '创建人',
+          type: 'text',
+          column: { width: 110, ellipsis: true },
+          form: { show: false },
+          search: { show: false },
+        },
       },
       rowHandle: {
         fixed: 'right',
-        width: 280,
+        width: 320,
         buttons: {
-          edit: {
+          edit: aclRowButton({
+            action: 'edit',
+            order: 0,
             show: hasPermission('workflow:mcp:edit'),
             text: '编辑',
-          },
-          remove: {
+            // 自绘按钮走不到内置 edit 的默认行为，显式打开编辑表单
+            onClick: (row, scope) =>
+              props.crudExpose?.openEdit({ index: scope?.index, row }),
+          }),
+          remove: aclRowButton({
+            action: 'delete',
+            danger: true,
+            order: 1,
             show: hasPermission('workflow:mcp:delete'),
             text: '删除',
-            type: 'link',
-            async click(context: any) {
+            onClick: (row) => {
               Modal.confirm({
-                title: '确认删除',
-                content: `确定要删除MCP服务"${context.row.name}"吗？`,
+                content: `确定要删除MCP服务"${row.name}"吗？`,
                 okType: 'danger',
                 onOk: async () => {
-                  await context.doRemove();
+                  await props.crudExpose?.doRemove(
+                    { row },
+                    { noConfirm: true },
+                  );
                   message.success('删除成功');
                 },
               });
             },
-          },
-          testConnection: {
-            text: '测试连接',
-            type: 'link',
-            size: 'small',
-            icon: () => h(ApiOutlined),
-            title: '测试MCP连接',
-            show: hasPermission('workflow:mcp:test-external'),
-            click: async ({ row }: any) => {
-              const hide = message.loading('正在测试连接...', 0);
-              try {
-                const result = await api.TestConnection(row.id);
-                hide();
-
-                if (result.success) {
-                  Modal.success({
-                    title: '连接测试成功',
-                    content: h('div', [
-                      h('p', `服务器: ${result.serverName}`),
-                      h('p', `可用工具数量: ${result.toolCount}`),
-                      h('p', `响应时间: ${result.responseTime}ms`),
-                    ]),
-                  });
-                } else {
-                  Modal.error({
-                    title: '连接测试失败',
-                    content: h('div', [
-                      h('p', { style: { color: 'red' } }, result.errorMessage),
-                      h('p', `响应时间: ${result.responseTime}ms`),
-                    ]),
-                  });
-                }
-              } catch (error: any) {
-                hide();
-                Modal.error({
-                  title: '连接测试失败',
-                  content: error.message || '未知错误',
-                });
-              }
-            },
-            order: 1,
-          },
-          viewTools: {
-            text: '查看工具',
-            type: 'link',
-            size: 'small',
-            icon: () => h(ToolOutlined),
-            title: '查看MCP工具',
-            show: hasPermission('workflow:mcp:toolList'),
-            click: ({ row }: any) => {
-              if (openToolsModal) {
-                openToolsModal(row);
-              } else {
-                message.warning('工具查看功能暂不可用');
-              }
-            },
+          }),
+          testConnection: aclRowButton({
+            action: 'test',
+            icon: ApiOutlined,
             order: 2,
-          },
+            show: hasPermission('workflow:mcp:test-external'),
+            text: '测试连接',
+            title: '测试MCP连接',
+            onClick: (row) => void testConnection(row),
+          }),
+          viewTools: aclRowButton({
+            action: 'tools',
+            icon: ToolOutlined,
+            order: 3,
+            show: hasPermission('workflow:mcp:toolList'),
+            text: '查看工具',
+            title: '查看MCP工具',
+            onClick: (row) => openToolsModal?.(row),
+          }),
+          grant: aclRowButton({
+            action: 'share',
+            order: 4,
+            show: hasPermission('workflow:mcp:grant'),
+            text: '授权',
+            onClick: (row) => openGrantModal?.(row),
+          }),
         },
       },
     },

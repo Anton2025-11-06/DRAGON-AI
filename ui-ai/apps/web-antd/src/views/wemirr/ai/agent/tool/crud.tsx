@@ -4,14 +4,12 @@ import type {
   DelReq,
 } from '@fast-crud/fast-crud';
 
-import { h } from 'vue';
-
 import { useAccess } from '@vben/access';
 
 import { PlayCircleOutlined } from '@ant-design/icons-vue';
 import { dict } from '@fast-crud/fast-crud';
-import { message } from 'ant-design-vue';
 
+import { aclRowButton } from '#/plugin/fast-crud/acl-row';
 import { hiddenIdColumn } from '#/plugin/fast-crud/shared';
 
 import * as api from './api';
@@ -24,8 +22,14 @@ import * as api from './api';
 export default function createCrudOptions(
   props: CreateCrudOptionsProps,
 ): CreateCrudOptionsRet {
-  const { openFormModal, openTestModal, toggleStatus } = props.context || {};
-  // 操作按钮按后端权限点显隐（与 workflow:tool:* 一一对应）
+  const {
+    openFormModal,
+    openGrantModal,
+    openTestModal,
+    removeRow,
+    toggleStatus,
+  } = props.context || {};
+  // 操作按钮两层 AND：功能权限管这类事让不让你做，行上的 actions 管这一条你能不能做
   const { hasPermission } = useAccess();
 
   return {
@@ -90,6 +94,12 @@ export default function createCrudOptions(
           type: 'text',
           column: { width: 160 },
         },
+        // 创建人：按钮置灰时得知道找谁要授权（展示名由列表接口批量翻好）
+        creatorName: {
+          title: '创建人',
+          type: 'text',
+          column: { width: 110, ellipsis: true },
+        },
         update_time: {
           title: '更新时间',
           type: 'text',
@@ -98,37 +108,41 @@ export default function createCrudOptions(
       },
       rowHandle: {
         fixed: 'right',
-        width: 220,
+        width: 260,
         buttons: {
-          test: {
-            text: '运行测试',
-            type: 'link',
-            size: 'small',
-            icon: () => h(PlayCircleOutlined),
-            title: '在受限沙箱中运行函数',
-            show: hasPermission('workflow:tool:test'),
+          // 运行测试跑的是真代码，卡的是页面按钮对应的「运行测试」动作
+          test: aclRowButton({
+            action: 'test',
+            icon: PlayCircleOutlined,
             order: 0,
-            click({ row }: any) {
-              if (openTestModal) {
-                openTestModal(row);
-              } else {
-                message.warning('测试功能暂不可用');
-              }
-            },
-          },
-          edit: {
-            text: '编辑',
+            show: hasPermission('workflow:tool:test'),
+            text: '运行测试',
+            title: '在受限沙箱中运行函数',
+            onClick: (row) => openTestModal?.(row),
+          }),
+          edit: aclRowButton({
+            action: 'edit',
             order: 1,
             show: hasPermission('workflow:tool:edit'),
-            click({ row }: any) {
-              openFormModal?.(row.id);
-            },
-          },
-          remove: {
-            text: '删除',
+            text: '编辑',
+            onClick: (row) => openFormModal?.(row.id),
+          }),
+          grant: aclRowButton({
+            action: 'share',
             order: 2,
+            show: hasPermission('workflow:tool:grant'),
+            text: '授权',
+            onClick: (row) => openGrantModal?.(row),
+          }),
+          remove: aclRowButton({
+            action: 'delete',
+            confirm: (row: any) => `确定要删除工具「${row.name}」吗？`,
+            danger: true,
+            order: 3,
             show: hasPermission('workflow:tool:delete'),
-          },
+            text: '删除',
+            onClick: (row) => removeRow?.(row),
+          }),
         },
       },
     },

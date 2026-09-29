@@ -8,6 +8,8 @@ import { computed, reactive, ref, watch } from 'vue';
 import { CopyOutlined, PlayCircleOutlined } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
+import { copyToClipboard } from '#/utils/clipboard';
+
 import * as api from './api';
 
 interface ParamField {
@@ -188,10 +190,9 @@ async function runTest() {
 }
 
 async function copyResult() {
-  try {
-    await navigator.clipboard.writeText(resultValue.value);
+  if (await copyToClipboard(resultValue.value)) {
     message.success('结果已复制到剪贴板');
-  } catch {
+  } else {
     message.error('复制失败，请手动选择复制');
   }
 }

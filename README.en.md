@@ -3,7 +3,7 @@
 > **If you find this project useful, please give it a Star. Thank you.** ⭐
 > [![Star this repo](https://img.shields.io/github/stars/Anton2025-11-06/DRAGON-AI?style=social)](https://github.com/Anton2025-11-06/DRAGON-AI)
 
-> WeChat：![img.png](img.png)
+> WeChat：![img.png](docs/img.png)
 
 > Online：http://47.111.117.95:12345   viewer/viewer
 

@@ -16,8 +16,11 @@ import {
   MessageOutlined,
   MoreOutlined,
   PlusOutlined,
+  ShareAltOutlined,
 } from '@ant-design/icons-vue';
 import { Tag } from 'ant-design-vue';
+
+import { canAction } from '#/api/acl';
 
 interface Props {
   item: WorkflowTemplateResp;
@@ -30,7 +33,17 @@ const emit = defineEmits<{
   (e: 'remove', item: WorkflowTemplateResp): void;
   (e: 'export', item: WorkflowTemplateResp): void;
   (e: 'copy', item: WorkflowTemplateResp): void;
+  (e: 'grant', item: WorkflowTemplateResp): void;
 }>();
+
+/**
+ * 按钮只认后端下发的 actions（模板的 ACL 求值结果）：内置模板 created_by=0
+ * 天然只拿到 view+use+copy+export（平台声明的 system_actions），所以「删除」对所有人
+ * 都不该出现，不靠前端的 builtIn 判断。
+ */
+function can(action: string) {
+  return canAction(props.item, action);
+}
 
 // 分类配置
 const categoryConfig: Record<string, { color: string; icon: any }> = {
@@ -70,6 +83,11 @@ function handleExport() {
 function handleCopy() {
   emit('copy', props.item);
 }
+
+// 打开授权弹窗
+function handleGrant() {
+  emit('grant', props.item);
+}
 </script>
 
 <template>
@@ -87,36 +105,43 @@ function handleCopy() {
           {{ item.categoryDesc || item.category }}
         </Tag>
       </div>
-      <a-dropdown v-if="!item.builtIn" trigger="click">
+      <a-dropdown
+        v-if="
+          can('copy') ||
+          can('export') ||
+          can('edit') ||
+          can('delete') ||
+          can('share')
+        "
+        trigger="click"
+      >
         <a-button type="text" size="small">
           <template #icon><MoreOutlined /></template>
         </a-button>
         <template #overlay>
           <a-menu>
-            <a-menu-item key="copy" @click="handleCopy">
-              <CopyOutlined /> 复制
+            <a-menu-item v-if="can('copy')" key="copy" @click="handleCopy">
+              <CopyOutlined />
+              {{ item.builtIn ? '复制为自定义模板' : '复制' }}
             </a-menu-item>
-            <a-menu-item key="export" @click="handleExport">
+            <a-menu-item
+              v-if="can('export')"
+              key="export"
+              @click="handleExport"
+            >
               <DownloadOutlined /> 导出
             </a-menu-item>
-            <a-menu-divider />
-            <a-menu-item key="delete" danger @click="handleRemove">
+            <a-menu-item v-if="can('share')" key="grant" @click="handleGrant">
+              <ShareAltOutlined /> 授权
+            </a-menu-item>
+            <a-menu-divider v-if="can('delete')" />
+            <a-menu-item
+              v-if="can('delete')"
+              key="delete"
+              danger
+              @click="handleRemove"
+            >
               <DeleteOutlined /> 删除
-            </a-menu-item>
-          </a-menu>
-        </template>
-      </a-dropdown>
-      <a-dropdown v-else trigger="click">
-        <a-button type="text" size="small">
-          <template #icon><MoreOutlined /></template>
-        </a-button>
-        <template #overlay>
-          <a-menu>
-            <a-menu-item key="copy" @click="handleCopy">
-              <CopyOutlined /> 复制为自定义模板
-            </a-menu-item>
-            <a-menu-item key="export" @click="handleExport">
-              <DownloadOutlined /> 导出
             </a-menu-item>
           </a-menu>
         </template>
@@ -127,14 +152,18 @@ function handleCopy() {
       <p class="description">{{ item.description || '暂无描述' }}</p>
       <div class="meta">
         <span class="node-count">{{ item.nodeCount || 0 }} 个节点</span>
+        <span v-if="item.creatorName" class="node-count">
+          创建人：{{ item.creatorName }}
+        </span>
       </div>
     </div>
 
     <div class="card-footer">
-      <a-button type="primary" block @click="handleUse">
+      <a-button v-if="can('use')" type="primary" block @click="handleUse">
         <template #icon><PlusOutlined /></template>
         使用此模板
       </a-button>
+      <a-button v-else block disabled>无使用权限</a-button>
     </div>
   </div>
 </template>

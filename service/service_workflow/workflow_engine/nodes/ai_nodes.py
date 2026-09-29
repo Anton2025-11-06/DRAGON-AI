@@ -700,10 +700,10 @@ class LLMNodeExecutor(BaseNodeExecutor):
 
         if not binding.get("apiKeyId"):
             raise ValueError("未选择执行用 API Key")
-        detail = await WorkflowService.detail(workflow_id)
-        if detail is None:
+        # 执行链路没有登录用户，只取名不做 ACL 判定（能不能选到它在编辑器下拉里已经卡过）
+        wf_name = await WorkflowService.get_name(workflow_id)
+        if not wf_name:
             raise ValueError("子工作流不存在（已被删除？）")
-        wf_name = str(detail.get("name") or f"workflow_{workflow_id}")
         version = await resolve_version(workflow_id, binding, wf_name)
         snapshot = await WorkflowService.get_snapshot(workflow_id, version)
         if not snapshot:

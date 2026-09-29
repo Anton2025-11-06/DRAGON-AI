@@ -21,6 +21,8 @@ import {
 } from '@ant-design/icons-vue';
 import { message, Tooltip } from 'ant-design-vue';
 
+import { copyToClipboard } from '#/utils/clipboard';
+
 import MarkdownRenderer from '../debug/MarkdownRenderer.vue';
 import {
   asFileArray,
@@ -29,7 +31,6 @@ import {
   asNumberArray,
   asUrlArray,
   collectMediaUrls,
-  copyToClipboard,
   getMediaType,
   isUrlLike,
   parseJsonText,
