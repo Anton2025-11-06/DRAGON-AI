@@ -43,17 +43,30 @@ opentelemetry-instrumentation-grpc>=0.42b0
 redis==5.3.1
 
 # ===== AI 中台新增依赖 =====
-# 向量库 Milvus
-pymilvus>=2.4.0
-# 关键词检索（BM25）
-rank-bm25>=0.2.2
-# 文档解析
+# 知识库检索存储：Elasticsearch 单索引 rag_knowledge_chunk 同时承载 BM25 与 dense_vector（kNN）
+#   客户端原生 async（AsyncElasticsearch），与 common_es 全局单例配套
+elasticsearch>=8.13.0,<9.0.0
+# 知识图谱：Neo4j（仅 doc 型知识库），异步 driver（AsyncSession + 全局单例）
+neo4j>=5.14.0
+# 文本 token 计数：分块长度按 token 而非字符收口（tiktoken 缺失时解析器会退化为中文估算）
+tiktoken>=0.7.0
+# 图片元信息校验与缩放（图片型知识库入库前探测宽高/格式）
+pillow>=10.0.0
+# 文档解析（native 引擎，纯 Python 轻量路径，为默认引擎）
 pypdf>=4.2.0
+pdfplumber>=0.11.0
+beautifulsoup4>=4.12.0
 python-docx>=1.1.0
 openpyxl>=3.1.2
 python-pptx>=1.0.0
 xlrd>=2.0.1
 markdown>=3.6
+# 文档解析（docling 引擎：版面/表格结构还原，pip 安装即 CPU 推理，首次运行会下载模型）
+#   可选依赖：未安装时 parse_engine=docling 会明确报错并提示，不影响 native/minerU
+docling>=2.15.0
+# minerU 引擎走私有化 HTTP API（用已有 httpx，无需额外 pip 依赖）
+# 分块策略：语义分块 / 递归字符分块（标题层级、正则、Excel 等自实现，仅这两类用 LangChain）
+langchain-text-splitters>=0.2.0
 # 老格式 .doc/.ppt 解析依赖系统中安装的 LibreOffice（soffice），非 pip 依赖
 # 智能体自主规划框架（依赖 langgraph/smolagents）
 deepagents

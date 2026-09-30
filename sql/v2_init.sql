@@ -1,6 +1,6 @@
 -- =====================================================================================
 -- DRAGON-AI 数据库初始化（全新部署的唯一入口）
--- 版本：v2 ｜ 覆盖 27 张业务表 + 角色/管理员/部门/菜单/按钮权限种子
+-- 版本：v2 ｜ 覆盖 24 张业务表 + 角色/管理员/部门/菜单/权限种子
 --
 -- 怎么执行：
 --   mysql -h <host> -P 3306 -u <user> -p --default-character-set=utf8mb4 < sql/v2_init.sql
@@ -32,7 +32,8 @@
 --   tb_model               模型登记带着各厂商 api_key，属环境密钥，部署后在「模型广场-模型列表」录入
 --   tb_workflow_template   5 个内置模板由 workflow 服务首次请求时自动写入
 --                          （WorkflowService.seed_builtin_templates），这里不重复种
---   会话 / 在线用户 / 限流 / 队列 / 向量：分别落在 Redis、Nacos、Milvus，MySQL 里没有对应表
+--   会话 / 在线用户 / 限流 / 队列：落在 Redis 与 Nacos；向量与实体关系：落在 Elasticsearch 与
+--   Neo4j（分层见 PART 2 开头）；原件与图片媒体：落在公共存储。MySQL 里没有这些对应的表
 --   按钮权限点按后端 @has_permission 实际校验的清单生成；代码已不校验的历史权限点不再种
 -- =====================================================================================
 
@@ -186,7 +187,7 @@ CREATE TABLE IF NOT EXISTS `tb_resource_acl` (
     `grantee_type` TINYINT NOT NULL COMMENT '授权主体：1-用户 2-角色 3-部门 4-用户组 5-全员',
     `grantee_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '主体ID，全员时为0',
     `dept_include_sub` TINYINT NOT NULL DEFAULT 0 COMMENT '仅部门授权：0-仅本部门 1-含下级部门',
-    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/toggle/export/delete/share，mcp=view/use/test/tools/edit/delete/share',
+    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/toggle/export/delete/share，mcp=view/use/test/tools/edit/delete/share，knowledge_base=view/use/edit/upload/delete/share，document=view/reparse/graph/export/edit/delete/share',
     `expire_time` DATETIME DEFAULT NULL COMMENT '过期时间，NULL=永久（过期不定时清理，判定即失效）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `create_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '授权人（需持有该资源的 share）',
@@ -223,55 +224,113 @@ CREATE TABLE IF NOT EXISTS `tb_operate_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统操作日志表';
 
 -- =====================================================================================
--- PART 2  知识库 RAG（service_rag；正文与元数据在 MySQL，向量在 Milvus）
+-- PART 2  知识库 RAG（service_rag + arq ragflow worker）
+--   四家存储各存什么（口径来自 test/RAG知识库模块开发SPEC.md §12）：
+--     MySQL（本 PART）  资产与配置：知识库、文档原件元数据与状态机、切片的完整正文
+--     公共存储(OSS)     所有原件、文档内嵌图片、音视频媒体文件
+--     Elasticsearch     向量 + 检索用元数据 + 媒体 URL（单索引 rag_knowledge_chunk，靠 kb_id 隔离）
+--     Neo4j             实体与关系（只服务 kb_type=doc 且库级开关打开的知识库）
+--   这三层存储**一律不做权限校验**：可访问的 kb_id 白名单由上层 RBAC + ACL 算好后强制下推
+--   （见 common/common_permission/resource_guard.py），底层只按 kb_id filter 裸查。
 -- =====================================================================================
 
--- 2.1 知识库表
+-- 2.1 知识库表（三种类型共用一张表；kb_type 与向量模型一经创建永久锁定）
 CREATE TABLE IF NOT EXISTS `tb_knowledge_base` (
     `kb_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `kb_name` VARCHAR(128) NOT NULL COMMENT '知识库名称',
-    `description` VARCHAR(500) DEFAULT NULL,
-    `owner_dept_id` BIGINT UNSIGNED NOT NULL COMMENT '归属部门ID',
-    `parse_methods` JSON DEFAULT NULL COMMENT '不同文件的解析方法',
+    `description` VARCHAR(500) DEFAULT NULL COMMENT '描述',
+    `kb_type` VARCHAR(16) NOT NULL DEFAULT 'doc' COMMENT '类型：doc-文档问答 image-图片搜索 audio_video-音视频搜索。创建后不可改——存储链路与向量空间按类型分叉',
+    `org_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '组织隔离标识，随切片写入 ES、随实体写入 Neo4j。当前单租户部署取 Nacos service_rag 的 rag.org_id，缺省 0',
+    `embedding_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '向量模型 id（tb_model.id）。选定后永久锁定：换模型等于换向量空间，历史切片全部作废',
+    `embedding_dim` INT NOT NULL DEFAULT 1024 COMMENT '向量维度，建库时按模型能力写入并锁定（三类知识库统一 1024、同一空间）',
+    `rerank_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '重排序模型 id，0=不启用',
+    `chat_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '问答与图谱抽取用的大模型 id（仅 doc 型需要）',
+    `parser_engine` VARCHAR(16) NOT NULL DEFAULT 'native' COMMENT '解析引擎：native/docling/mineru（仅 doc 型生效，image/audio_video 型不解析文档）',
+    `parse_config` JSON COMMENT '解析与预处理配置 {remove_toc,remove_header_footer,image_understand} + 引擎专有参数，默认值见 rag_constant.PARSE_OPTION_DEFAULTS',
+    `chunk_config` JSON COMMENT '分块配置 {strategy,chunk_size,chunk_overlap,delimiter,regex_pattern,max_chars,keep_table_header,context_augment,title_path}，默认值见 rag_constant.CHUNK_CONFIG_DEFAULTS',
+    `retrieve_config` JSON COMMENT '检索配置 {top_k,score_threshold,vector_similarity_weight,rerank,keyword_boost}，默认值见 rag_constant.RETRIEVE_DEFAULTS',
+    `graph_enabled` TINYINT NOT NULL DEFAULT 0 COMMENT '知识图谱库级开关：仅 doc 型可开；开了还要在文档行上手动点「构建知识图谱」才抽实体',
+    `doc_count` INT NOT NULL DEFAULT 0 COMMENT '文档数（列表页展示，增删后由 service 重算）',
+    `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '切片数',
+    `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用（停用即从检索与下拉里消失，数据保留）',
+    `owner_dept_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '归属部门 id，仅展示与统计用；数据权限范围按 created_by 反查部门现算（resource_guard.build_visible_cond）',
+    `version` INT NOT NULL DEFAULT 1 COMMENT '配置版本号，每次修改 +1。摄取任务带着它跑，避免「改到一半的配置」被写进切片',
+    `metadata` JSON COMMENT '扩展元数据（前端透传，不参与解析与检索逻辑）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
-    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（ACL 归属人判定列）',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`kb_id`),
-    KEY `idx_owner` (`owner_dept_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库表';
+    KEY `idx_type` (`kb_type`, `is_deleted`),
+    KEY `idx_owner` (`created_by`),
+    KEY `idx_dept` (`owner_dept_id`),
+    KEY `idx_name` (`kb_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库表（doc/image/audio_video 三种类型共用）';
 
--- 2.2 知识库文档表
+-- 2.2 知识库文档表（原件在公共存储，本表存元数据 + 状态机；进度在 Redis，见 rag_constant 第八节）
 CREATE TABLE IF NOT EXISTS `tb_document` (
     `doc_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    `kb_id` BIGINT UNSIGNED NOT NULL,
-    `doc_name` VARCHAR(255) NOT NULL,
-    `description` VARCHAR(255) DEFAULT NULL,
-    `file_path` VARCHAR(500) NOT NULL COMMENT '文件存储路径',
-    `file_size` BIGINT NOT NULL DEFAULT 0,
-    `file_type` VARCHAR(16) DEFAULT NULL,
-    `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '分块数',
-    `status` TINYINT NOT NULL DEFAULT 0 COMMENT '0-PENDING 1-RUNNING 2-FINISHED 3-FAILED',
-    `error_msg` VARCHAR(500) DEFAULT NULL,
+    `kb_id` BIGINT UNSIGNED NOT NULL COMMENT '所属知识库（ES/Neo4j 的隔离维度，检索一律先过 kb_id 白名单）',
+    `doc_name` VARCHAR(255) NOT NULL COMMENT '文档标题，列表页可改（接口 DTO 里叫 title）',
+    `file_name` VARCHAR(255) DEFAULT NULL COMMENT '上传时的原始文件名',
+    `file_path` VARCHAR(500) NOT NULL COMMENT '原件在公共存储中的 key（rag/raw/{kb_id}/{doc_id}.{ext}）',
+    `file_ext` VARCHAR(16) DEFAULT NULL COMMENT '扩展名（小写、不含点），决定解析链路与分块默认策略',
+    `file_size` BIGINT NOT NULL DEFAULT 0 COMMENT '字节数',
+    `content_type` VARCHAR(128) DEFAULT NULL COMMENT 'MIME 类型（页面 contentType）',
+    `media_type` VARCHAR(16) DEFAULT NULL COMMENT 'text/image/audio_video，与库 kb_type 同族，列表按类型决定预览形态',
+    `parser_engine` VARCHAR(16) DEFAULT NULL COMMENT '本次实际使用的解析引擎（自动选择也回填结果，便于排查「为什么这份 PDF 解析成这样」）',
+    `parse_version` INT NOT NULL DEFAULT 0 COMMENT '产出这份解析结果时知识库的 version；与库当前 version 不一致即代表「配置已改，需要重解析」',
+    `sidecar_path` VARCHAR(500) DEFAULT NULL COMMENT '解析产物 blocks.jsonl 的存储 key（重跑分块不必重新解析，也供全文预览与溯源）',
+    `status` VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PARSING/ANALYZING/PROCESSING/PROCESSED/FAILED，合法流转见 rag_constant.DOC_STATUS_TRANSITIONS',
+    `vectorized` TINYINT NOT NULL DEFAULT 0 COMMENT '向量已写入 ES：0-否 1-是。与 status 分开记，重切分或清向量可单独回退这一位',
+    `graph_state` TINYINT NOT NULL DEFAULT 0 COMMENT '图谱构建态：0-未构建 1-构建中 2-已构建 3-失败（仅 doc 型且库开图谱；接口 DTO 的 graphed = 本列等于 2）',
+    `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '切片数',
+    `page_count` INT NOT NULL DEFAULT 0 COMMENT '页数（PDF/PPT），非分页文档为 0',
+    `media_duration` INT NOT NULL DEFAULT 0 COMMENT '音视频时长（秒），其他类型为 0',
+    `media_summary` MEDIUMTEXT COMMENT '音视频理解摘要（audio_video 型：这段摘要就是被检索命中的正文，不做抽帧与 ASR）',
+    `task_id` VARCHAR(64) DEFAULT NULL COMMENT '最近一次 ARQ 任务号（进度轮询与取消用）',
+    `error_msg` VARCHAR(1000) DEFAULT NULL COMMENT '失败原因（status=FAILED 时给到页面）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
-    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（ACL 归属人判定列）',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `update_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人用户ID',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`doc_id`),
-    KEY `idx_kb` (`kb_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档表';
+    KEY `idx_kb_status` (`kb_id`, `status`),
+    KEY `idx_owner` (`created_by`),
+    KEY `idx_task` (`task_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档表（原件在公共存储，本表存元数据与状态机）';
 
--- 2.3 文档分块表
+-- 2.3 文档切片表（切片的**完整正文**只在这里；ES 里的 content 是为检索准备的副本）
+--   本表是「可再生产物」：重新分块按 doc_id 整批物理替换，不做软删——留着旧行既不参与检索
+--   又会让 uk_doc_chunk 撞车。文档删除时随 doc_id 一起清，ES 侧另走 delete_by_query。
 CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     `chunk_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `kb_id` BIGINT UNSIGNED NOT NULL COMMENT '冗余存储：按库统计/清理不必回连文档表',
     `doc_id` BIGINT UNSIGNED NOT NULL,
-    `chunk_index` INT NOT NULL DEFAULT 0,
+    `chunk_index` INT NOT NULL DEFAULT 0 COMMENT '切片序号。与 kb_id/doc_id 拼成 ES 文档 _id：{kb_id}_{doc_id}_{chunk_index}，重跑幂等覆盖',
+    `chunk_type` VARCHAR(16) NOT NULL DEFAULT 'text' COMMENT 'text/image/audio_video（ES 侧同值，多模态检索按类型过滤）',
+    `content` MEDIUMTEXT NOT NULL COMMENT '切片正文（表格已渲染成文本，图片块存大模型描述）',
+    `embed_text` MEDIUMTEXT COMMENT '实际送向量模型的文本（面包屑 + 正文 + 前后文补齐）。与 content 分开存，页面预览看到的才是原文',
+    `title_path` VARCHAR(500) DEFAULT NULL COMMENT '标题层级面包屑（strategy=title 时的归属路径）',
+    `sheet_name` VARCHAR(128) DEFAULT NULL COMMENT 'Excel 工作表名',
+    `page_num` INT NOT NULL DEFAULT 0 COMMENT '起始页码，0=非分页文档',
+    `block_id` VARCHAR(64) DEFAULT NULL COMMENT '来源解析块 id，可对回 sidecar 里的版面信息',
+    `media_url` VARCHAR(500) DEFAULT NULL COMMENT '图片/音视频在公共存储中的 key（ES 只存这个 URL，不存二进制）',
+    `media_type` VARCHAR(32) DEFAULT NULL COMMENT '媒体 MIME 类型',
+    `token_count` INT NOT NULL DEFAULT 0 COMMENT 'token 数（软预算与统计）',
+    `available` TINYINT NOT NULL DEFAULT 1 COMMENT '0-人工停用（不删数据，检索直接排除）1-可用',
+    `vectorized` TINYINT NOT NULL DEFAULT 0 COMMENT '本切片向量已写入 ES：0-否 1-是（批量重向量化的断点续跑依据）',
+    `extra` JSON COMMENT '扩展（表头与行区间、图片位置框等，页面按需展开）',
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（继承所属文档的归属人）',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`chunk_id`),
-    KEY `idx_doc` (`doc_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档分块表';
+    UNIQUE KEY `uk_doc_chunk` (`doc_id`, `chunk_index`),
+    KEY `idx_kb` (`kb_id`),
+    KEY `idx_kb_type` (`kb_id`, `chunk_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档切片表（分块正文，ES 向量的 MySQL 权威副本）';
 
 
 
@@ -607,6 +666,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 (@d_home, '深度探索', 2, 'explorer', 'views/wemirr/home/index.vue', NULL, 1),
 (@d_kb, '知识库文档', 2, 'doc',  'views/wemirr/ai/rag/doc/index.vue',  'lucide:folder-open',    1),
 (@d_kb, '知识库对话', 2, 'chat', 'views/wemirr/ai/chat/rag/index.vue', 'lucide:messages-square', 2),
+(@d_kb, '知识库检索', 2, 'search', 'views/wemirr/ai/rag/search/index.vue', 'lucide:scan-search', 3),
 (@d_model_factory, '模型训练',     2, 'train',    'views/wemirr/model/train/index.vue',    NULL, 1),
 (@d_model_factory, '模型部署',     2, 'deploy',   'views/wemirr/model/deploy/index.vue',   NULL, 2),
 (@d_model_factory, '模型评测',     2, 'eval',     'views/wemirr/model/eval/index.vue',     NULL, 3),
@@ -614,6 +674,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 (@d_model_factory, '模型归档',     2, 'archive',  'views/wemirr/model/archive/index.vue',  NULL, 5),
 (@d_dataset, '数据集管理', 2, 'list', 'views/wemirr/dataset/index.vue', NULL, 1);
 SET @m_kb_doc = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识库文档');
+SET @m_kb_search = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识库检索');
 
 -- 8.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -726,6 +787,14 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_kb_doc,   '知识库授权', 3, 'ai:kb:grant',             1),
 (@m_kb_doc,   '文档授权',   3, 'ai:doc:grant',            2);
 
+-- 8.9 功能权限点：知识库（SPEC §3.1：RBAC 只管菜单可见、页面准入、新建知识库这三类全局入口）
+--     行级按钮不再挂功能权限：能不能改这个库、能不能删这份文档，全部由 ACL 的资源动作判定
+--     （knowledge_base / document 两类，见 resource_guard.RESOURCE_SPECS），两层各管一段不打架
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_kb_doc, '知识库查询', 3, 'ai:kb:list',   3),
+(@m_kb_doc, '新建知识库', 3, 'ai:kb:add',    4),
+(@m_kb_search, '知识库检索', 3, 'ai:kb:search', 1);
+
 -- =====================================================================================
 -- PART 9  种子：角色授权
 -- =====================================================================================
@@ -747,10 +816,10 @@ WHERE r.`role_code` = 'USER'
 -- =====================================================================================
 -- PART 10  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 27 张；菜单 112 行 = 目录 7 + 页面 25 + 按钮权限点 80；ADMIN 授权应覆盖这 112 行
-SELECT '表数量（应为 27）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
-SELECT '菜单行数（应为 112）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
-SELECT '菜单分层（应为 1:7 / 2:25 / 3:80）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
+-- 表 24 张；菜单 116 行 = 目录 7 + 页面 26 + 权限点 83；ADMIN 授权应覆盖这 116 行
+SELECT '表数量（应为 24）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+SELECT '菜单行数（应为 116）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
+SELECT '菜单分层（应为 1:7 / 2:26 / 3:83）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;
-SELECT 'ADMIN 授权行数（应为 112）' AS `自查项`, COUNT(*) AS `实际`
+SELECT 'ADMIN 授权行数（应为 116）' AS `自查项`, COUNT(*) AS `实际`
 FROM `tb_role_menu` rm JOIN `tb_role` r ON r.`role_id` = rm.`role_id` WHERE r.`role_code` = 'ADMIN';

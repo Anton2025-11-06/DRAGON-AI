@@ -3,10 +3,10 @@ from sqlalchemy import or_, select
 from common.common_log.log_init import log
 from common.common_milvus.milvus import milvus_client
 from common.common_mysql.mysql import mysql_client
-from common.common_rag.embed_client import EmbeddingClient
-from common.common_rag.rerank_client import RerankClient
-from common.common_rag.rrf import reciprocal_rank_fusion
-from common.common_rag.text_splitter import extract_keywords
+from common.common_file_parser.embed_client import EmbeddingClient
+from common.common_file_parser.rerank_client import RerankClient
+from common.common_file_parser.rrf import reciprocal_rank_fusion
+from common.common_file_parser.text_splitter import extract_keywords
 from service.service_rag.models.kb_entity import DocumentChunk
 from service.service_rag.schemas.kb_schema import SearchRequest
 from service.service_rag.services.kb_service import KbService

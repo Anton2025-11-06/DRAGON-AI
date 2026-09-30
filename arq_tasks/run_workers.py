@@ -1,21 +1,8 @@
 # -*- coding: utf-8 -*-
-"""多进程启动 arq worker。
+"""多进程启动 arq worker（按 -t 分派 workflow / ragflow 两条流水线）。
 
-arq CLI 本身只启动单进程（一个进程 = 一个 asyncio worker），
-没有 -w/--workers 这类参数（老版本 -w 是 --max-jobs，本版本已移除）。
-要横向扩展必须自行拉起多个进程（等同 supervisor 配置 N 个 program）。
-
-用法（项目根目录执行）：
-    python -m arq_tasks.run_workers -n 4 -p 1    # 启动 4 个 worker 消费切片 1（split_1）队列
-    python -m arq_tasks.run_workers -n 4 -p 2    # 启动 4 个 worker 消费切片 2（split_2）队列
-
-行为：
-- 切片号经子进程环境变量 SPLIT_NUMBER 传入,worker 端 WorkerSettings.queue_name
-  拼成 workflow_queue:split_{N} 分片队列(生产/消费两端取相同值才会对上)
-- 每个子进程实际执行 `python -m arq arq_tasks.worker_settings.WorkerSettings`
-- Ctrl+C：Windows 控制台会同时向进程组发 CTRL_C_EVENT（arq 收到后优雅退出），
-  本脚本再兜底 terminate/强杀未退出的进程
-- 子进程 stdout/stderr 直接继承当前控制台，日志与直接跑 arq 一致
+两条流水线各用自己的 WorkerSettings 与队列（workflow_queue:split_{N} /
+rag_queue:split_{N}），同一个切片号在两边是两个独立队列，部署可以分开拉。
 """
 import argparse
 import os
@@ -23,33 +10,44 @@ import subprocess
 import sys
 import time
 
+from common.common_arq.queue import PIPELINE_RAG, PIPELINE_WORKFLOW, queue_name_of
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# -t 取值 → （arq 流水线标识, WorkerSettings 完整路径）。CLI 只认得到这两份名字，
+# 新增第三条流水线就必须在这里登记，不给它拼字符串的自由（拼错是启动才发现）
+_PIPELINES = {
+    "workflow": (PIPELINE_WORKFLOW, "arq_tasks.worker_settings.WorkerSettings"),
+    "ragflow": (PIPELINE_RAG, "arq_tasks.worker_settings_rag.WorkerSettingsRag"),
+}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="启动多个 arq worker 进程（arq CLI 单进程，需自行拉多进程）")
+        description="启动多个worker 进程（arq CLI 单进程，需自行拉多进程）")
+    parser.add_argument(
+        "-t", type=str, required=True, choices=["ragflow", "workflow"],
+        help="业务类型：ragflow|workflow")
     parser.add_argument(
         "-n", type=int, required=True,
         help="worker 进程数")
     parser.add_argument(
         "-p", type=int, required=True,
-        help="队列切片号,"
-             "写入子进程环境变量，worker 消费 workflow_queue:split_{N} 队列）")
+        help="队列切片号,写入子进程环境变量，worker 消费 {业务队列}:split_{N} 队列）")
     args = parser.parse_args()
 
     if args.n < 1:
         parser.error("worker 数量必须 >= 1")
     if args.p < 1:
         parser.error("切片号必须 >= 1")
+    pipeline, settings_path = _PIPELINES[args.t]
     # 切片号注入子进程环境:worker 端 WorkerSettings.queue_name 据此拼分片队列名
     os.environ["SPLIT_NUMBER"] = str(args.p)
 
-    cmd = [sys.executable, "-m", "arq",
-           "arq_tasks.worker_settings.WorkerSettings"]
+    cmd = [sys.executable, "-m", "arq", settings_path]
     procs: list[subprocess.Popen] = []
-    queue_name = f"workflow_queue:split_{args.p}"
-    print(f"[run_workers] 启动 {args.n} 个 worker，消费队列 {queue_name}")
+    queue_name = queue_name_of(args.p, pipeline)
+    print(f"[run_workers] 启动 {args.n} 个 {args.t} worker，消费队列 {queue_name}")
     try:
         for i in range(args.n):
             p = subprocess.Popen(cmd, cwd=_ROOT, env=os.environ.copy())

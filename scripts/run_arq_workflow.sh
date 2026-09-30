@@ -9,6 +9,8 @@
 #   SPLIT_NUMBER    本容器消费的队列切片号，默认 1
 #       队列名 = workflow_queue:split_${SPLIT_NUMBER}；要横向扩切片就多起几个容器，
 #       每个给一个不同的 SPLIT_NUMBER，切片总数由监控页写入 Redis key workflow_queue:split_number
+# -t workflow 是必填参数：同一个 run_workers 入口也用来拉 rag 流水线（见 run_arq_ragflow.sh），
+# 靠 -t 分派到各自的 WorkerSettings，两条流水线的队列与并发互不相干。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +21,7 @@ SPLIT_NUMBER="${SPLIT_NUMBER:-1}"
 
 echo "[run_arq_workflow] ${ARQ_WORKERS} 个 worker，消费 workflow_queue:split_${SPLIT_NUMBER}"
 
-python -m arq_tasks.run_workers -n "$ARQ_WORKERS" -p "$SPLIT_NUMBER" &
+python -m arq_tasks.run_workers -t workflow -n "$ARQ_WORKERS" -p "$SPLIT_NUMBER" &
 CHILD=$!
 
 # docker stop 发的是 TERM，而 run_workers 的优雅退出分支挂在 SIGINT（等价 Ctrl+C）上；

@@ -9,7 +9,7 @@ service_gateway:
     port: 3306
     user: root
     password: Jzh@616294
-    database: ai2
+    database: ai3
     pool_size: 50
     max_overflow: 100
     echo: false
@@ -25,7 +25,7 @@ service_system:
     port: 3306
     user: root
     password: Jzh@616294
-    database: ai2
+    database: ai3
     pool_size: 10
     max_overflow: 10
     echo: False
@@ -41,7 +41,7 @@ service_login:
     port: 3306
     user: root
     password: Jzh@616294
-    database: ai2
+    database: ai3
     pool_size: 50
     max_overflow: 100
     echo: False
@@ -56,26 +56,26 @@ service_workflow:
   storage:
     type: oss                       # local | oss（oss 走官方异步客户端 aio.AsyncClient；s3/minio 已下线）
     url_expires: 3600               # 匿名 URL 有效期（秒）：oss 为预签名有效期（上限 7 天），
-                                    # local 为文件可读期（到期自动清理）
+    # local 为文件可读期（到期自动清理）
     region: cn-hangzhou             # 必须与 bucket 实际所在地域一致，否则 V4 签名校验不通过
-    bucket: dragon-ai2
+    bucket: dragon-ai3
     access_key: ''                  # ★ 到 Nacos 控制台里填真值：本文件在公开仓库里，AK 不要提交
     secret_key: ''                  # ★ 同上；留空则回退环境变量 OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET
     path_prefix: dragon-ai/         # 对象键前缀，与桶里其它用途隔离
-    # ---------- 以下均可选（bucket 名全局唯一，须与控制台一致）----------
-    # endpoint: ''                  # 缺省按 region 构造 oss-<region>.aliyuncs.com
-    # security_token: ''            # STS 临时凭证才填（对应环境变量 OSS_SESSION_TOKEN）
-    # use_internal_endpoint: false  # 同地域 ECS 部署可开内网域名（免公网流量费）
-    # use_accelerate_endpoint: false # 传输加速域名
-    # use_cname: false              # 自定义域名访问
-    # connect_timeout: 10           # 建连超时（秒）
-    # readwrite_timeout: 30         # 读写超时（秒）
-    # retry_max_attempts: 3         # 可重试错误的最大尝试次数
-    # ---------- 仅 type: local 时生效 ----------
-    # local_dir: data/storage_files # 落盘目录（环境变量 STORAGE_LOCAL_DIR）
-    # public_base: ''               # 匿名下载基址（环境变量 STORAGE_PUBLIC_BASE）；
-                                    # 留空则按上传请求的对外地址推导，跨域名/公网转发场景必填：
-                                    # 例 https://ai.example.com/api/workflow/workflow-files/download
+      # ---------- 以下均可选（bucket 名全局唯一，须与控制台一致）----------
+      # endpoint: ''                  # 缺省按 region 构造 oss-<region>.aliyuncs.com
+      # security_token: ''            # STS 临时凭证才填（对应环境变量 OSS_SESSION_TOKEN）
+      # use_internal_endpoint: false  # 同地域 ECS 部署可开内网域名（免公网流量费）
+      # use_accelerate_endpoint: false # 传输加速域名
+      # use_cname: false              # 自定义域名访问
+      # connect_timeout: 10           # 建连超时（秒）
+      # readwrite_timeout: 30         # 读写超时（秒）
+      # retry_max_attempts: 3         # 可重试错误的最大尝试次数
+      # ---------- 仅 type: local 时生效 ----------
+      # local_dir: data/storage_files # 落盘目录（环境变量 STORAGE_LOCAL_DIR）
+      # public_base: ''               # 匿名下载基址（环境变量 STORAGE_PUBLIC_BASE）；
+    # 留空则按上传请求的对外地址推导，跨域名/公网转发场景必填：
+    # 例 https://ai.example.com/api/workflow/workflow-files/download
   redis:
     host: 127.0.0.1
     port: 26379
@@ -86,14 +86,116 @@ service_workflow:
     port: 3306
     user: root
     password: Jzh@616294
-    database: ai2
-    pool_size: 10
+    database: ai3
+    pool_size: 10 
     max_overflow: 10
     echo: False
 
 
+# ==================== 知识库（RAG）模块 ====================
+# service_rag（API 进程）与 arq_ragflow（摄取/图谱 worker）必须读到同一套
+# mysql/storage/es/neo4j：上传在 API 进程落 OSS、解析在 worker 取文件，两处存储后端
+# 不一致就会出现「上传成功、worker 找不到文件」；两段的 es/neo4j 亦必须同实例，
+# 否则写入与检索分属两个集群。
+service_rag:
+  redis:
+    host: 10.88.128.15
+    port: 26379
+    password: ""
+    max_connections: 300
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai3
+    pool_size: 10
+    max_overflow: 100
+    echo: False
+  # 统一文件存储（common.common_storage）：原始文件与解析产物 sidecar 全部落这里，
+  # 对象键前缀 rag/{kb_id}/...（path_prefix + kb_id），代码内不写死本地落盘目录。
+  storage:
+    type: aliyun                    # local | oss | aliyun（aliyun 为 oss 的同义别名）
+    url_expires: 3600
+    region: cn-hangzhou
+    bucket: dragon-ai2
+    access_key: ''                  # ★ 到 Nacos 控制台里填真值：本文件在公开仓库里，AK 不要提交
+    secret_key: ''                  # ★ 同上；留空则回退环境变量 OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET
+    path_prefix: rag/
+  # Elasticsearch：BM25 + dense_vector 共用单索引 rag_knowledge_chunk（common_es 全局异步单例读本段）
+  es:
+    url:
+    # username: ''                  # 未开 security 可省略；开了认证才填
+    # password: ''
+    # verify_certs: false           # 自签证书时关
+    # request_timeout: 60           # 单请求超时（秒）
+    # index: rag_knowledge_chunk    # 索引名（缺省用常量 RAG_CHUNK_INDEX）
+  # Neo4j：知识图谱（仅 doc 型知识库，common_neo4j 全局异步单例读本段）
+  neo4j:
+    url:
+    user: neo4j
+    password: Jzh@616294
+    # database: neo4j               # 社区版无多库，留空即默认库
+    # max_connection_pool_size: 50
+  # minerU 私有化解析服务（parse_engine=mineru 时才需要；留空则选该引擎会直接报错）
+  mineru:
+    base_url: ''                    # 例 http://10.88.x.x:8000
+    api_key: ''                     # 有鉴权才填（Bearer）
+    poll_interval: 3                # 轮询间隔（秒）
+    timeout: 1800                   # 单文档最大等待（秒）
+  # RAG 模块自身的运行参数：代码里不写死任何数值，缺省值见 service_rag/services/rag_settings.py
+  rag:
+    org_id: 0                       # 组织隔离标识：新建知识库的默认 org_id，随切片写 ES、随实体写 Neo4j
+    embedding_batch_size: 16        # 一次送向量模型的切片数（太小打不满 HTTP 批量、太大单请求超时）
+    embedding_concurrency: 2        # 批量向量化时的并发请求数
+    rerank_max_docs: 50             # 重排一次最多送多少条候选
+    graph_extract_chunks: 20        # 单文档抽实体最多读多少条切片（大文档防爆上下文与 token）
+    graph_max_triples: 200          # 单次抽取返回的最大三元组数
+    open_api_max_files: 20          # 开放 API 单次批量上传的文件数上限
+    preview_max_chars: 20000        # 文档详情正文预览截断长度（与单块上限同量级）
+    graph_viz_default_limit: 100    # 图谱可视化默认返回节点数
 
-arq_workflow:
+
+# ragflow worker（解析/向量化/图谱/媒体理解）的纯 CPU 流水线，与 arq_workflow 完整隔离：
+# 两套队列不互偷任务，workflow 的 max_tries=1/不重试语义不会拖住知识库摄取。
+# worker 的 arq Redis 从本段 redis.url 读，其余后端字段与 service_rag 同源。
+arq_ragflow:
   redis:
     url: redis://10.88.128.15:26379/0
-    #password: Jzh@616294
+  mysql:
+    host: 10.87.106.143
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai3
+    pool_size: 10
+    max_overflow: 100
+    echo: False
+  storage:
+    type: aliyun
+    url_expires: 3600
+    region: cn-hangzhou
+    bucket: dragon-ai2
+    access_key: ''                  # ★ 与 service_rag.storage 保持同源，否则 worker 读写错位置
+    secret_key: ''
+    path_prefix: rag/
+  es:
+    url:
+  neo4j:
+    url:
+    user: neo4j
+    password: Jzh@616294
+  mineru:
+    base_url: ''
+    api_key: ''
+    poll_interval: 3
+    timeout: 1800
+  # worker 侧只用到批量与图谱规模这几项；org_id 必须与 service_rag.rag 同源，
+  # 否则 API 建的库和 worker 写入的切片会落在两个组织下。
+  rag:
+    org_id: 0
+    embedding_batch_size: 16
+    embedding_concurrency: 2
+    graph_extract_chunks: 20
+    graph_max_triples: 200
+

@@ -12,18 +12,27 @@ import os
 from arq.connections import RedisSettings
 
 from arq_tasks.tasks.workflow import shutdown, bootstrap, prepare_config
-from common.common_arq.queue import worker_health_key, SPLIT_NAME, QUEUE_NAME
+from common.common_arq.queue import (
+    PIPELINE_WORKFLOW,
+    queue_name_of,
+    worker_health_key,
+)
 
 
 class WorkerSettings:
-    """arq CLI 读取的 worker 配置类(类名固定,被 `arq x.WorkerSettings` 引用)。"""
+    """arq CLI 读取的 workflow 流水线 worker 配置类(类名固定,被 `arq x.WorkerSettings` 引用)。
+
+    rag 流水线在 worker_settings_rag.py 里另有一份(两类不能混在一个类上:
+    functions 与队列名都是类属性,混在一起就等于让知识库摄取任务去抢工作流 worker)。
+    """
 
     SPLIT_NUMBER = os.environ.get('SPLIT_NUMBER', '1')
 
-    # 队列名: 分片队列
-    queue_name = f"{QUEUE_NAME}:{SPLIT_NAME}{SPLIT_NUMBER}"
+    # 队列名: 分片队列(拼法与生产端共用 queue_name_of,两侧不可能算出两个名字)
+    pipeline = PIPELINE_WORKFLOW
+    queue_name = queue_name_of(int(SPLIT_NUMBER), PIPELINE_WORKFLOW)
 
-    health_check_key = worker_health_key(queue_name)
+    health_check_key = worker_health_key(queue_name, PIPELINE_WORKFLOW)
 
     # 本 worker 能执行的任务函数(按模块路径注册,worker 进程按名解析)
     # 只留 execute_workflow:首跑与再提交(重新执行/审批后恢复)共用它,resume_workflow

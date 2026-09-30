@@ -1,1 +1,0 @@
-from common.common_milvus.milvus import milvus_client

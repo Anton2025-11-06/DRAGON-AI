@@ -29,7 +29,7 @@ SERVICE_SKILL_PORT = 9006
 
 ARQ_WORKFLOW = 'arq_workflow'
 
-ARQ_RAG = 'arq_rag'
+ARQ_RAGFLOW = 'arq_ragflow'
 
 ARQ_HARNESS = 'arq_harness'
 
@@ -101,9 +101,5 @@ SERVICE_ALIASES = {
 
 
 
-# ---- 知识库状态 ----
-DOC_STATUS_PENDING = 0      # 待处理
-DOC_STATUS_PARSING = 1      # 解析中
-DOC_STATUS_VECTORIZING = 2  # 向量化中
-DOC_STATUS_READY = 3        # 已完成
-DOC_STATUS_FAILED = -1      # 失败
+# 知识库（RAG）的状态机、类型、引擎与索引名一律在 common_constants/rag_constant.py，
+# 这里不再留第二套编号：DB 列是 VARCHAR，两份定义必然分叉。

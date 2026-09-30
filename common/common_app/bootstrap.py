@@ -11,8 +11,8 @@ from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 
-from common.common_arq.queue import CustomRedisSettings, get_arq_redis
-from common.common_constants.constant import ARQ_WORKFLOW
+from common.common_arq.queue import PIPELINE_RAG, CustomRedisSettings, get_arq_redis
+from common.common_constants.constant import ARQ_RAGFLOW, ARQ_WORKFLOW
 from common.common_log.log_init import log
 from common.common_middleware.exception_handler import register_exception_handlers
 from common.common_middleware.request_log_middleware import RequestLogMiddleware
@@ -65,6 +65,31 @@ def get_container_default_ip():
         return "127.0.0.1"
 
 
+# ES / Neo4j 延迟导入：只有开了开关的服务（目前只有 service_rag）才需要这两个客户端包，
+# 放到模块顶层会让 login/gateway 之类不碰知识库的服务也被迫装齐依赖（装不上就是起不来）
+async def _init_es(es_cfg: dict):
+    from common.common_es import init_es
+
+    await init_es(es_cfg)
+
+
+async def _init_neo4j(neo4j_cfg: dict):
+    from common.common_neo4j import init_neo4j
+
+    await init_neo4j(neo4j_cfg)
+
+
+async def _close_vector_backends(enable_es: bool, enable_neo4j: bool):
+    if enable_neo4j:
+        from common.common_neo4j import close_neo4j
+
+        await close_neo4j()
+    if enable_es:
+        from common.common_es import close_es
+
+        await close_es()
+
+
 def create_app(service_name: str,
                default_port: int,
                routers: list[APIRouter],
@@ -75,14 +100,17 @@ def create_app(service_name: str,
                enable_operate_log: bool = False,
                enable_httpx_pool: bool = True,
                enable_storage: bool = False,
-               enbale_arq_workflow_redis: bool = False
+               enbale_arq_workflow_redis: bool = False,
+               enable_arq_rag_redis: bool = False,
+               enable_es: bool = False,
+               enable_neo4j: bool = False
                ) -> FastAPI:
     """
     统一的 FastAPI 服务引导工厂：
-    1. lifespan 中完成 Nacos 注册/配置拉取、Redis/MySQL 连接池初始化与释放
+    1. lifespan 中完成 Nacos 注册/配置拉取、Redis/MySQL/存储/ES/Neo4j 连接初始化与释放
     2. 统一挂载 CORS、请求日志、Token鉴权、限流中间件和全局异常处理
     3. 注册业务路由
-    4. 启动后执行扩展初始化钩子（如 Milvus 连接）
+    4. 需要哪个后端由开关决定，不在各服务里自己写一遍 lifespan：连接池的用法全项目只有一份
 
     :param service_name: 服务名（同时作为 Nacos data_id 和注册名）
     :param default_port: 默认端口（可被环境变量 {service_name}_port 覆盖）
@@ -92,6 +120,11 @@ def create_app(service_name: str,
     :param enable_token_check: 是否开启 Token 鉴权中间件
     :param enable_rate_limit: 是否开启 Redis 限流中间件（网关使用）
     :param enable_operate_log: 是否开启操作日志中间件（RBAC 审计使用，需 MySQL）
+    :param enbale_arq_workflow_redis: 是否建工作流投递队列的连接池（读 Nacos 的 arq_workflow 段）
+    :param enable_arq_rag_redis: 是否建知识库摄取队列的连接池（读 arq_ragflow 段）。
+        生产者与 rag worker 必须读到同一段的 redis.url，否则任务投了没人消费
+    :param enable_es: 是否初始化 Elasticsearch 全局单例（读 Nacos 的 es 段）
+    :param enable_neo4j: 是否初始化 Neo4j 全局单例（读 Nacos 的 neo4j 段）
     """
     port = int(os.environ.get(service_name + "_port", default_port))
 
@@ -112,7 +145,7 @@ def create_app(service_name: str,
         await nacos_client.register_service()
         yml_config = await nacos_client.get_config_content(service_name)
 
-        # 暴露给业务扩展（如 Milvus、向量化配置），保持 app.state.config 全服务可用
+        # 暴露给业务扩展（如检索参数、向量化配置），保持 app.state.config 全服务可用
         app.state.config = yml_config
 
         try:
@@ -134,6 +167,18 @@ def create_app(service_name: str,
                 CustomRedisSettings.yml = await nacos_client.get_config_content(ARQ_WORKFLOW)
                 await get_arq_redis()
                 log.info("Arq workflow Redis initialized")
+            if enable_arq_rag_redis:
+                # 与 rag worker 同一段配置（arq_ragflow）：两个流水线可以不是同一个 Redis 实例
+                CustomRedisSettings.yml_rag = await nacos_client.get_config_content(ARQ_RAGFLOW)
+                await get_arq_redis(PIPELINE_RAG)
+                log.info("Arq rag Redis initialized")
+            if enable_es:
+                # 单索引 rag_knowledge_chunk 承载全部知识库；建索引与探测分词器在 init_es 里做
+                await _init_es(yml_config.get("es", {}))
+                log.info("Elasticsearch initialized")
+            if enable_neo4j:
+                await _init_neo4j(yml_config.get("neo4j", {}))
+                log.info("Neo4j initialized")
 
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
@@ -163,6 +208,14 @@ def create_app(service_name: str,
                 # 异步存储后端（阿里云 OSS 的 aiohttp 会话）必须显式关闭，否则退出时刷
                 # "Unclosed client session"；本地后端的 close() 是空实现
                 await close_storage()
+            if enable_es or enable_neo4j:
+                # 两个向量/图后端都是异步连接池，不关会在进程退出时报未关闭告警
+                await _close_vector_backends(enable_es, enable_neo4j)
+            if enbale_arq_workflow_redis or enable_arq_rag_redis:
+                # 按已建的池全部释放（未建过的流水线是空操作）
+                from common.common_arq.queue import close_arq_redis
+
+                await close_arq_redis()
         except Exception as e:
             log.warning(f"Some deregister failed: {e}")
 
