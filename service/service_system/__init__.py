@@ -23,5 +23,6 @@ app = create_app(
     default_port=SERVICE_SYSTEM_PORT,
     routers=[user_router, rbac_router, log_router, online_router, rate_limit_router,
              model_router, arq_monitor_router, usergroup_router, acl_router],
-    enbale_arq_workflow_redis=True
+    enbale_arq_workflow_redis=True,
+    enable_arq_ragflow_redis=True
 )

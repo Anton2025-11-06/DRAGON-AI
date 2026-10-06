@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""多进程启动 arq worker（按 -t 分派 workflow / ragflow 两条流水线）。
+"""多进程启动 arq worker（按 -t 分派 workflow / ragflow / graphflow 三条流水线）。
 
-两条流水线各用自己的 WorkerSettings 与队列（workflow_queue:split_{N} /
-rag_queue:split_{N}），同一个切片号在两边是两个独立队列，部署可以分开拉。
+三条流水线各用自己的 WorkerSettings 与队列（workflow_queue:split_{N} /
+rag_queue:split_{N} / graphflow_queue:split_{N}），同一个切片号在各自队列里是独立分片，
+部署可以分开拉（图谱比文档解析更耗时，单独成队后可各自扩缩容、互不抢占 worker）。
 """
 import argparse
 import os
@@ -10,15 +11,21 @@ import subprocess
 import sys
 import time
 
-from common.common_arq.queue import PIPELINE_RAG, PIPELINE_WORKFLOW, queue_name_of
+from common.common_arq.queue import (
+    PIPELINE_GRAPH,
+    PIPELINE_RAG,
+    PIPELINE_WORKFLOW,
+    queue_name_of,
+)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# -t 取值 → （arq 流水线标识, WorkerSettings 完整路径）。CLI 只认得到这两份名字，
-# 新增第三条流水线就必须在这里登记，不给它拼字符串的自由（拼错是启动才发现）
+# -t 取值 → （arq 流水线标识, WorkerSettings 完整路径）。CLI 只认得到这几份名字，
+# 新增流水线就必须在这里登记，不给它拼字符串的自由（拼错是启动才发现）
 _PIPELINES = {
     "workflow": (PIPELINE_WORKFLOW, "arq_tasks.worker_settings.WorkerSettings"),
     "ragflow": (PIPELINE_RAG, "arq_tasks.worker_settings_rag.WorkerSettingsRag"),
+    "graphflow": (PIPELINE_GRAPH, "arq_tasks.worker_settings_graph.WorkerSettingsGraph"),
 }
 
 
@@ -26,8 +33,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="启动多个worker 进程（arq CLI 单进程，需自行拉多进程）")
     parser.add_argument(
-        "-t", type=str, required=True, choices=["ragflow", "workflow"],
-        help="业务类型：ragflow|workflow")
+        "-t", type=str, required=True, choices=["ragflow", "workflow", "graphflow"],
+        help="业务类型：ragflow|workflow|graphflow")
     parser.add_argument(
         "-n", type=int, required=True,
         help="worker 进程数")

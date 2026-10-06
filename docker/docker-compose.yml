@@ -1,4 +1,4 @@
-# 一键起「后端能用的四个服务 + arq worker + 前端」。
+# 一键起「后端五个服务 + 三条 arq 流水线 + 前端」。
 #
 # MySQL / Redis / Nacos 不在这里：中台的业务配置全部存在 Nacos（data_id = 服务名，
 # 见 sql/init_nacos.yaml），库里还得先执行 sql/v2_init.sql 建表灌种子。
@@ -7,7 +7,8 @@
 #   cd docker
 #   NACOS_ADDR=10.0.0.9:8848 docker compose up -d --build
 #
-# 常用覆盖：WORKERS（每个服务的 gunicorn worker 数）、ARQ_WORKERS、SPLIT_NUMBER、TAG、UI_PORT
+# 常用覆盖：WORKERS（每个服务的 gunicorn worker 数）、ARQ_WORKERS、RAG_ARQ_WORKERS、
+#           GRAPH_ARQ_WORKERS、SPLIT_NUMBER、RAG_SPLIT_NUMBER、GRAPH_SPLIT_NUMBER、TAG、UI_PORT
 
 name: dragon-ai
 
@@ -72,6 +73,16 @@ services:
     depends_on:
       - gateway
 
+  # 知识库（RAG）服务：配置 CRUD、文档管理、检索、图谱查询、开放 API。
+  # ES / Neo4j / OSS 的连接参数不在这里注入，全在 Nacos 的 service_rag 段里（见 init_nacos.yaml）。
+  rag:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: service_rag
+    depends_on:
+      - gateway
+
   # 工作流的异步执行进程。多扩几个实例时给每个不同的 SPLIT_NUMBER（消费不同切片队列），
   # 并把监控页里的「切片数」改成同样的份数，生产端才会把任务轮询到这些队列上。
   arq_workflow:
@@ -81,6 +92,33 @@ services:
       SERVICE_NAME: arq_workflow
       ARQ_WORKERS: ${ARQ_WORKERS:-4}
       SPLIT_NUMBER: ${SPLIT_NUMBER:-1}
+
+  # 知识库摄取的异步流水线 worker（解析/分块/向量化/媒体理解），纯 CPU。
+  # 与 arq_workflow 是两个独立容器组：队列名不同（rag_queue:split_N），
+  # 一边排队堆积不会拖死另一边（SPEC §4.1）；图谱构建已拆到下方 arq_graphflow。
+  arq_ragflow:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: arq_ragflow
+      # 进程数默认比工作流少：摄取任务的重活在 WorkerSettingsRag.max_jobs（读 Nacos）
+      ARQ_WORKERS: ${RAG_ARQ_WORKERS:-2}
+      SPLIT_NUMBER: ${RAG_SPLIT_NUMBER:-1}
+    depends_on:
+      - rag
+
+  # 知识图谱构建的独立 worker（graphflow 队列）。图谱逐批走大模型、比文档摄取更耗时，
+  # 单独成队后图谱积压不再占用摄取 worker 的并发槽位，两边可各自扩缩容。
+  # Redis 与后端配置仍读 Nacos 的 arq_ragflow 段（同一实例），只是队列/worker 名独立。
+  arq_graphflow:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: arq_graphflow
+      ARQ_WORKERS: ${GRAPH_ARQ_WORKERS:-2}
+      SPLIT_NUMBER: ${GRAPH_SPLIT_NUMBER:-1}
+    depends_on:
+      - rag
 
   ui:
     build:

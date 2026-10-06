@@ -39,6 +39,7 @@ class KnowledgeBase(Base):
         String(16), nullable=False, default=RC.KB_TYPE_DOC, index=True,
         comment="doc/image/audio_video，创建后锁定")
     # 组织隔离标识：随切片写入 ES、随实体写入 Neo4j（上层鉴权、底层裸查，隔离维度靠它兜底）
+    # 建库时取创建人的归属部门 id（没部门直接拒绝建库，不读任何配置），创建后不可改
     org_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     embedding_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                                     comment="向量模型 id（tb_model.id），锁定")
@@ -47,7 +48,16 @@ class KnowledgeBase(Base):
     rerank_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                                  comment="0=不启用重排")
     chat_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
-                                               comment="问答与图谱抽取的大模型 id（仅 doc 型）")
+                                               comment="音视频型的媒体理解/摘要模型 id（doc 型已拆到下面两列）")
+    # doc 型把「图谱抽取」与「图片理解」从 chat_model_id 里拆出来各自一位：
+    # 一个模型同时背两个职责时，用户换了问答模型会连带把图谱抽取换成另一个厂商的
+    # 输出风格，已建图谱的实体口径跟着漂；旧库两列为 0 时按 chat_model_id 回退。
+    extract_model_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="知识图谱实体抽取模型 id（仅 doc 型且开了图谱时必填，0=沿用 chat_model_id）")
+    image_model_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="图片理解模型 id（仅 doc 型且解析开关 image_understand 打开时必填）")
     parser_engine: Mapped[str] = mapped_column(
         String(16), nullable=False, default=RC.PARSE_ENGINE_NATIVE,
         comment="native/docling/mineru（仅 doc 型生效）")
@@ -62,12 +72,12 @@ class KnowledgeBase(Base):
     doc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[int] = mapped_column(Integer, nullable=False, default=1,
-                                        comment="0-停用（检索与下拉里消失，数据保留）1-启用")
+                                        comment="保留列（启用/停用功能已取消，代码不再读写，默认恒为 1）")
     owner_dept_id: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="归属部门（展示/统计）；数据权限按 created_by 现算")
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1,
-        comment="配置版本号，每次修改 +1；摄取任务带着它跑，文档的 parse_version 与它比对即知是否需要重解析")
+        comment="配置版本号，每次修改 +1；解析任务带着它跑，文档的 parse_version 与它比对即知是否需要重解析")
     # 列名 metadata 与 SQLAlchemy 声明基类的 Base.metadata 冲突，故属性名换成 kb_metadata
     kb_metadata: Mapped[Optional[dict]] = mapped_column(
         "metadata", JSON, nullable=True, comment="扩展元数据（前端透传，不参与解析与检索）")
@@ -84,7 +94,7 @@ class Document(Base):
     """知识库文档表：原件在公共存储（rag/ 前缀 + kb_id 目录），本表存元数据与状态机。
 
     三个彼此独立的状态维度：
-    - status：摄取流水线状态机（rag_constant.DOC_STATUS_*），进度明细在 Redis
+    - status：解析流水线状态机（rag_constant.DOC_STATUS_*），进度明细在 Redis
     - vectorized：向量是否已写 ES（重切分/清向量可单独回退这一位）
     - graph_state：图谱构建态（0/1/2/3，文档处理完成后可独立重跑的后置任务）
     """

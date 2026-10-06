@@ -3,8 +3,10 @@
 
 对外只暴露 entry 层的几个函数：
 
-    doc = await parse_document(raw, name, parse_config=kb.parse_config, image_hook=hook)
-    chunks = chunk_parsed_document(doc, kb.chunk_config, embed_fn=fn)
+    doc = await parse_document(raw, name, engine=kb.parser_engine,
+                               parse_config=kb.parse_config, image_hook=hook)
+    sidecar = render_sidecar(doc)                    # 落存储：改分块配置重跑不必重解析
+    chunks = await chunk_parsed_document(doc, kb.chunk_config, embed_fn=fn)
 
 引擎（native/docling/minerU）与分块策略（8 种）都在内部按配置路由，产物结构统一为
 ParsedBlock / Chunk，业务侧不需要感知具体格式。

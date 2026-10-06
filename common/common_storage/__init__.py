@@ -96,8 +96,19 @@ async def download(name: str) -> bytes:
 
 
 async def delete(name: str) -> bool:
-    """按文件名删除；不存在返回 False（幂等）。"""
-    return await get_storage().delete(check_name(name))
+    """按文件名删除；不存在返回 False（幂等，不抛异常）。
+
+    先判存在再删，是为了**两个后端给同一个返回值**：OSS 的 DeleteObject 对不存在的对象
+    也回成功（服务端幂等），后端自己拿不到「删没删到东西」；本地后端能。不统一的话，
+    同一个删除接口在本地回「文件不存在」、在 OSS 回「删除成功」，调用方按返回值做的
+    判断（以及 workflow_file_router 给用户的提示）就成了错的。删除是低频冷路径，
+    多一次 HeadObject 换语义一致，值得。
+    """
+    backend = get_storage()
+    n = check_name(name)
+    if not await backend.exists(n):
+        return False
+    return await backend.delete(n)
 
 
 async def exists(name: str) -> bool:

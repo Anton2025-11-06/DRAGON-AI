@@ -91,6 +91,10 @@ service_workflow:
     max_overflow: 10
     echo: False
 
+arq_workflow:
+  redis:
+    url: redis://XXX:26739/0
+    password: Jzh@616294
 
 # ==================== 知识库（RAG）模块 ====================
 # service_rag（API 进程）与 arq_ragflow（摄取/图谱 worker）必须读到同一套
@@ -123,13 +127,17 @@ service_rag:
     secret_key: ''                  # ★ 同上；留空则回退环境变量 OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET
     path_prefix: rag/
   # Elasticsearch：BM25 + dense_vector 共用单索引 rag_knowledge_chunk（common_es 全局异步单例读本段）
+  # 必填只有一项 url（多节点逗号分隔）；其余键注掉即走默认，认证都不填=不认证（内网未开 security）
   es:
     url:
-    # username: ''                  # 未开 security 可省略；开了认证才填
+    # username: ''                  # 开了 security 才填（也可用 api_key）
     # password: ''
-    # verify_certs: false           # 自签证书时关
+    # verify_certs: false           # 自签证书时关；填 true/false 或布尔都行
     # request_timeout: 60           # 单请求超时（秒）
     # index: rag_knowledge_chunk    # 索引名（缺省用常量 RAG_CHUNK_INDEX）
+    # shards: 1                     # 仅建索引时生效（已存在的索引改分片要重建）
+    # replicas: 0
+    # analyzer: ik_max_word         # ES 装了 ik 分词插件才填
   # Neo4j：知识图谱（仅 doc 型知识库，common_neo4j 全局异步单例读本段）
   neo4j:
     url:
@@ -143,17 +151,9 @@ service_rag:
     api_key: ''                     # 有鉴权才填（Bearer）
     poll_interval: 3                # 轮询间隔（秒）
     timeout: 1800                   # 单文档最大等待（秒）
-  # RAG 模块自身的运行参数：代码里不写死任何数值，缺省值见 service_rag/services/rag_settings.py
-  rag:
-    org_id: 0                       # 组织隔离标识：新建知识库的默认 org_id，随切片写 ES、随实体写 Neo4j
-    embedding_batch_size: 16        # 一次送向量模型的切片数（太小打不满 HTTP 批量、太大单请求超时）
-    embedding_concurrency: 2        # 批量向量化时的并发请求数
-    rerank_max_docs: 50             # 重排一次最多送多少条候选
-    graph_extract_chunks: 20        # 单文档抽实体最多读多少条切片（大文档防爆上下文与 token）
-    graph_max_triples: 200          # 单次抽取返回的最大三元组数
-    open_api_max_files: 20          # 开放 API 单次批量上传的文件数上限
-    preview_max_chars: 20000        # 文档详情正文预览截断长度（与单块上限同量级）
-    graph_viz_default_limit: 100    # 图谱可视化默认返回节点数
+  # 本服务不再有 rag 运行参数段：分批粒度、并发、提示词只取
+  # common/common_constants/rag_constant.py 里的常量（要调就改常量并提交）；
+  # 除开放 API 单次 100 个文件外，代码里已不再设任何人为的数据上限
 
 
 # ragflow worker（解析/向量化/图谱/媒体理解）的纯 CPU 流水线，与 arq_workflow 完整隔离：
@@ -190,12 +190,3 @@ arq_ragflow:
     api_key: ''
     poll_interval: 3
     timeout: 1800
-  # worker 侧只用到批量与图谱规模这几项；org_id 必须与 service_rag.rag 同源，
-  # 否则 API 建的库和 worker 写入的切片会落在两个组织下。
-  rag:
-    org_id: 0
-    embedding_batch_size: 16
-    embedding_concurrency: 2
-    graph_extract_chunks: 20
-    graph_max_triples: 200
-

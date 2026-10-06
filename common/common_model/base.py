@@ -8,6 +8,9 @@
 - 高性能：AsyncOpenAI 与 httpx 均按 (base_url, api_key) 复用连接池客户端，避免每次
   重建 TLS 连接；原生非 OpenAI 端点(rerank / 异步视频 / multimodal-embedding)复用
   全局 common_httpx.httpx_pool。
+- 厂商的「单次请求条数/长度上限」属于协议约束，一律放在能力层拆批兜住
+  （见 text_embedding 的 max_batch_size、text_rerank 的 max_documents、
+  MultimodalContentsMixin 的 contents 配额），不让业务层为某一家改自己的批量策略。
 """
 from __future__ import annotations
 
@@ -127,6 +130,76 @@ def _materialize_tool_calls(acc: dict) -> Optional[list]:
     calls = [acc[i] for i in sorted(acc)
              if acc[i]["function"]["name"] or acc[i]["function"]["arguments"]]
     return calls or None
+
+
+class MultimodalContentsMixin:
+    """多模态 contents 端点（通义 multimodal-embedding 一族）的单请求配额与拆批。
+
+    一次请求能塞几个内容元素是厂商协议约束，而且**按类型分别限**：
+    multimodal-embedding-v1 是「元素总数 ≤ 20，其中图片、视频各最多 1 条，文本最多 20 条」。
+    一次塞 16 张图不是慢一点，是整次 400 —— 「图片批量」看着是业务参数，天花板其实在这里。
+    子类声明配额，这里负责按配额切批、逐批发送、再按送出顺序把向量拼回去，调用方不需要
+    知道实际发了几次。0/负数 = 该项不限。
+    """
+
+    max_contents: int = 0
+    max_texts: int = 0
+    max_images: int = 0
+    max_videos: int = 0
+
+    def _pack_contents(self, contents: list[dict]) -> list[list[dict]]:
+        """contents → 若干批：任何一批都不越总数配额，也不越该类型的条数配额。
+
+        装不下才另起一批，所以元素顺序就是发送顺序（上层按切片序号拼 ES 的 _id，
+        乱序是看不出来的静默脏数据）。
+        """
+        quota = {"text": int(self.max_texts or 0),
+                 "image": int(self.max_images or 0),
+                 "video": int(self.max_videos or 0)}
+        total = int(self.max_contents or 0)
+        batches: list[list[dict]] = [[]]
+        used: list[dict] = [{}]
+        for item in contents:
+            # 每项是 {"text"|"image"|"video": 值}，按 key 认类型（multi_images 之类
+            # 不在这层的配额里，落到 text 计数上一起受总数约束）
+            kind = next((k for k in quota if k in item), "text")
+            limit = quota[kind]
+            if batches[-1] and ((total and len(batches[-1]) >= total)
+                                or (limit and used[-1].get(kind, 0) >= limit)):
+                batches.append([])
+                used.append({})
+            batches[-1].append(item)
+            used[-1][kind] = used[-1].get(kind, 0) + 1
+        return [b for b in batches if b]
+
+    @staticmethod
+    def _batch_embeddings(data: dict) -> list:
+        """单批响应里的 embeddings：按厂商回传的 index 还原成发送顺序。
+
+        index 是本批内的序号，所以只在批内排 —— 跨批排会把两批混成一团。
+        """
+        embs = (data.get("output") or {}).get("embeddings") or []
+        return sorted(embs, key=lambda e: e.get("index", 0))
+
+    def _contents_result(self, responses: list[dict]) -> ModelResult:
+        """各批原始响应 → 一个 ModelResult：向量按送出顺序拼接，token 统计累加。"""
+        vectors: list = []
+        usage: dict = {}
+        embeddings: list = []
+        for data in responses:
+            embs = self._batch_embeddings(data)
+            embeddings.extend(embs)
+            vectors.extend(e["embedding"] for e in embs)
+            for key, value in (data.get("usage") or {}).items():
+                usage[key] = usage.get(key, 0) + value \
+                    if isinstance(value, (int, float)) else value
+        if len(responses) == 1:
+            raw = responses[0]
+        else:
+            # 拆过批就把各批 embeddings 摊平成同一个形状，另附 batches 说明来源
+            raw = {"output": {"embeddings": embeddings}, "usage": usage,
+                   "batches": len(responses)}
+        return ModelResult(vectors=vectors, usage=usage, raw=raw)
 
 
 async def poll_task(fetch, is_done, is_fail, *, interval: float = 3.0, timeout: float = 600.0):

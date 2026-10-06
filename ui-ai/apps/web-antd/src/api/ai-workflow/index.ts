@@ -441,6 +441,8 @@ export function uploadWorkflowFile(file: File): Promise<WorkflowFileUpload> {
     formData,
     {
       headers: { 'Content-Type': 'multipart/form-data' },
+      // 上传要等文件整块传到公共存储并生成带签名 URL，默认的 10s 不够
+      timeout: 60_000,
     },
   );
 }
@@ -458,6 +460,8 @@ export function uploadWorkflowFiles(
     formData,
     {
       headers: { 'Content-Type': 'multipart/form-data' },
+      // 批量比单文件更容易超 10s，同样放宽到 60s
+      timeout: 60_000,
     },
   );
 }

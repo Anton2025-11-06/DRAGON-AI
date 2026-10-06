@@ -12,11 +12,15 @@ from __future__ import annotations
 from typing import Any
 
 from common.common_constants.model_constant import MT_MULTIMODAL_EMBEDDING
-from common.common_model.base import BaseModel, ModelResult
+from common.common_model.base import (BaseModel, ModelResult,
+                                      MultimodalContentsMixin)
 
 
-class MultimodalEmbeddingBase(BaseModel):
-    """多模态向量抽象父类：入参支持 text / image / video 任意组合。"""
+class MultimodalEmbeddingBase(BaseModel, MultimodalContentsMixin):
+    """多模态向量抽象父类：入参支持 text / image / video 任意组合。
+
+    单请求能塞几条由 MultimodalContentsMixin 的配额拆批兜住（上层只管送多少拿回多少）。
+    """
 
     category = MT_MULTIMODAL_EMBEDDING
 

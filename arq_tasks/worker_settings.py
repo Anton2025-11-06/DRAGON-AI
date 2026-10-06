@@ -23,7 +23,7 @@ class WorkerSettings:
     """arq CLI 读取的 workflow 流水线 worker 配置类(类名固定,被 `arq x.WorkerSettings` 引用)。
 
     rag 流水线在 worker_settings_rag.py 里另有一份(两类不能混在一个类上:
-    functions 与队列名都是类属性,混在一起就等于让知识库摄取任务去抢工作流 worker)。
+    functions 与队列名都是类属性,混在一起就等于让知识库解析任务去抢工作流 worker)。
     """
 
     SPLIT_NUMBER = os.environ.get('SPLIT_NUMBER', '1')

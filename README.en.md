@@ -121,15 +121,20 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 ```
 
 **2) Create the Nacos configs**, one per `data_id` = service name: `service_system` / `service_login` /
-`service_workflow` / `service_gateway` / `arq_workflow`. Copy `sql/init_nacos.yaml` and change the
-connection details.
+`service_workflow` / `service_gateway` / `service_rag` / `arq_workflow` / `arq_ragflow`. Copy
+`sql/init_nacos.yaml` and change the connection details.
 
 > ★ The `arq_workflow` section must contain `redis.url`, and it must point at the same Redis the
 > `service_workflow` producer uses — otherwise jobs are enqueued where nobody consumes them.
+> ★ Same for `arq_ragflow`: its `redis.url` is the rag queue Redis, while `mysql/storage/es/neo4j`
+>   must point at the same instances `service_rag` uses — uploads are written by the API process and
+>   read back by the worker, so a mismatch means "upload succeeded, worker cannot find the file".
+>   The `worker:` sub-section of that block holds the rag worker's concurrency/timeout knobs
+>   (omit it and the code defaults apply).
 > The `storage:` section is only needed when workflow files go to object storage; without it the
 > local directory backend is used.
 
-**3) Start the back end** — four services plus the worker; see 3.3 (bare metal) or 3.4 (containers).
+**3) Start the back end** — five services plus the two worker pipelines; see 3.3 (bare metal) or 3.4 (containers).
 
 **4) Start the front end** — `pnpm build:antd` produces static files; serve them with nginx and proxy
 `/api` to the gateway. With the front-end image from 3.4 you only pass `GATEWAY_URL`.
@@ -149,8 +154,12 @@ pip install -r requirements.txt
 python -m service.service_login.login          # :9004
 python -m service.service_system.system        # :9001
 python -m service.service_workflow.workflow    # :9003
+python -m service.service_rag.rag              # :9002 (knowledge base; needs ES + Neo4j)
 python -m service.service_gateway.gateway      # :18000
-python -m arq_tasks.run_workers -n 4 -p 1      # arq workers: 4 processes on shard 1
+
+# arq workers: -t is required, one process group per pipeline (fully separated queues)
+python -m arq_tasks.run_workers -t workflow -n 4 -p 1    # 4 processes on workflow_queue:split_1
+python -m arq_tasks.run_workers -t ragflow  -n 2 -p 1    # 2 processes on rag_queue:split_1
 
 cd ui-ai && pnpm install && pnpm dev:antd      # :5666 (vite already proxies /api → 127.0.0.1:18000)
 ```
@@ -178,6 +187,12 @@ docker run -d --name arq --init \
   -e ARQ_WORKERS=4 -e SPLIT_NUMBER=1 \
   dragon-ai-backend:latest
 
+# knowledge-ingestion worker (pure CPU, no GPU flags anywhere)
+docker run -d --name arq-rag --init \
+  -e SERVICE_NAME=arq_ragflow -e NACOS_ADDR=10.0.0.9:8848 \
+  -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
+  dragon-ai-backend:latest
+
 # Front end: GATEWAY_URL tells nginx where to send /api
 docker run -d --name ui --init -p 8080:80 \
   -e GATEWAY_URL=http://10.0.0.9:18000 \
@@ -194,11 +209,12 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `SERVICE_NAME` | Which process the container runs: `service_login` / `service_system` / `service_gateway` / `service_workflow` / `service_rag` / `arq_workflow` | none (required) |
+| `SERVICE_NAME` | Which process the container runs: `service_login` / `service_system` / `service_gateway` / `service_workflow` / `service_rag` / `arq_workflow` / `arq_ragflow` | none (required) |
 | `NACOS_ADDR` `NACOS_NAME` `NACOS_PASSWD` `NACOS_NS_ID` | Registry and config centre | none |
 | `<service_name>_port` | Override the listening port (lower-case service name — that is the format the code reads) | per-service default |
 | `WORKERS` | gunicorn worker count per micro-service | 4 |
 | `ARQ_WORKERS` / `SPLIT_NUMBER` | worker process count / queue shard this instance consumes | 4 / 1 |
+| `RAG_ARQ_WORKERS` / `RAG_SPLIT_NUMBER` | compose-only overrides for the `arq_ragflow` container, so the two pipelines scale independently | 2 / 1 |
 | `GATEWAY_URL` / `LISTEN_PORT` | Front-end container: gateway address / listening port | `http://127.0.0.1:18000` / 80 |
 
 **All start-up scripts live in `scripts/`** — the container and a bare-metal run use the same file:
@@ -207,7 +223,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 |---|---|
 | `scripts/docker-entrypoint.sh` | Single container entry, dispatches on `SERVICE_NAME` |
 | `scripts/run_service.sh` | gunicorn + `uvicorn.workers.UvicornWorker`, 4 workers per service by default. Production flags: `--backlog 4096`, `--timeout 120`, `--graceful-timeout 30`, `--max-requests 50000 (+jitter)`, `--worker-tmp-dir /dev/shm`, `--proxy-headers --forwarded-allow-ips '*'`, logs to stdout |
-| `scripts/run_arq_workflow.sh` | Starts N arq workers and translates `docker stop`'s TERM into the INT path that the graceful shutdown branch handles |
+| `scripts/run_arq_workflow.sh` | Starts N workflow arq workers (`-t workflow`) and translates `docker stop`'s TERM into the INT path that the graceful shutdown branch handles |
+| `scripts/run_arq_ragflow.sh` | Same with `-t ragflow`: knowledge-ingestion workers, 2 processes by default (the real concurrency knob is `arq_ragflow.worker.max_jobs` in Nacos) |
 | `scripts/run_ui.sh` | Renders `GATEWAY_URL` into the nginx site config and runs nginx in the foreground |
 
 ### 3.5 Kubernetes
@@ -222,12 +239,13 @@ The `k8s/` directory is reserved; no manifests yet.
 |---|---|
 | Back end | Python 3.11 · FastAPI (fully async) · SQLAlchemy 2.0 + aiomysql · Pydantic v2 |
 | Process & deploy | gunicorn + UvicornWorker · Docker · Nacos (registry / config centre) |
-| Data & middleware | MySQL 8.x · Redis (sessions / rate limits / cache / arq queues) · Aliyun OSS · Milvus (client layer ready) |
-| Async tasks | arq 0.28 with Redis sharded queues, multi-process scaling |
+| Data & middleware | MySQL 8.x · Redis (sessions / rate limits / cache / ingestion progress + the two arq queues) · Aliyun OSS · Elasticsearch 8.x · Neo4j 5.x |
+| Async tasks | arq 0.28 with Redis sharded queues and multi-process scaling; the **workflow and ragflow pipelines consume independently** (`-t workflow|ragflow`) |
 | Communication | httpx global connection pool (HTTP/2) · WebSocket · SSE (sse-starlette) |
 | Model access | One `openai_impl` / `dashscope_impl` / `zhipu_impl` per capability, dispatched by `common_model.entry` on (capability, provider) |
 | Agents | Official MCP Python SDK · sandboxed process isolation (psutil) · code nodes share the same sandbox; `deepagents` is declared as a dependency but the planning loop is not implemented |
-| Retrieval | pymilvus client layer · rank-bm25 keyword scoring (knowledge base not wired up yet; document parsing already reused by the workflow side) |
+| Retrieval | single ES index `rag_knowledge_chunk`: BM25 + 1024-dim dense_vector kNN (RRF fusion, optional rerank) · text / image / audio-video share one vector space · rank-bm25 keyword scoring kept for the legacy path |
+| Document parsing | `common_file_parser`: native (pypdf/docx/xlsx…) · docling (pip, CPU) · minerU (private HTTP API), auto engine selection, 8 chunking strategies (20000 chars per chunk cap) |
 | Observability | loguru + home-grown `x-trace-id` (OpenTelemetry dependencies declared, not yet wired into code) |
 | Front end | Vue 3.5 · TypeScript · Vite · vben v5 (pnpm + turbo monorepo) · ant-design-vue · Vue Flow canvas · CodeMirror/Monaco |
 | AuthZ/AuthN | JWT + Redis session · dual-channel API key · RBAC permission points |
@@ -241,10 +259,11 @@ The `k8s/` directory is reserved; no manifests yet.
 │   ├── common_app/               #   create_app bootstrap factory (lifespan + middleware + errors)
 │   ├── common_nacos/             #   Nacos registration, discovery and config pull
 │   ├── common_middleware/        #   RequestLog / TokenCheck / RateLimit / OperateLog / exception handlers
-│   ├── common_permission/        #   @has_permission checks
+│   ├── common_permission/        #   @has_permission checks + resource_guard row-level ACL
 │   ├── common_model/             #   12 capabilities × 3 providers + entry dispatch
+│   ├── common_file_parser/       #   parsing: 3 engines + 8 chunkers + preprocessing/image enrichment
 │   ├── common_storage/           #   StorageBackend: local / Aliyun OSS, bytes only
-│   ├── common_mysql|redis|milvus|httpx|arq/   # pools and queue wrappers
+│   ├── common_mysql|redis|es|neo4j|httpx|arq/   # pools and queue wrappers (es/neo4j are global async singletons)
 │   ├── common_entity/            #   ApiResponse / RBAC entities
 │   ├── common_log|utils|exception|constants|threadpool/
 ├── service/                      # Business micro-services, one port each
@@ -255,9 +274,11 @@ The `k8s/` directory is reserved; no manifests yet.
 │   │   ├── execution/            #     round request / pause state / approval projection / exec tree / submit resolver
 │   │   ├── workflow_engine/      #     graph engine (nodes / context / validation / snapshots)
 │   │   ├── routers|services|models|schemas|utils/
-│   ├── service_rag/              #   :9002  knowledge base (in progress)
+│   ├── service_rag/              #   :9002  knowledge base: configs / documents / progress / retrieval / graph / open API
+│   │   ├── services/             #     kb·doc·task(queueing + state machine)·ingest·graph·retrieval·rag_settings
+│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / open
 │   └── service_datasets|train|inference|eval_model|notebook/   # planned, empty packages
-├── arq_tasks/                    # worker settings + workflow task + multi-process launcher
+├── arq_tasks/                    # worker settings for both pipelines + task functions + multi-process launcher
 ├── ui-ai/                        # front end, vben v5 monorepo (apps/web-antd is the one we ship)
 ├── scripts/                      # start-up scripts, shared by containers and bare metal
 ├── docker/                       # Dockerfile (back end) · Dockerfile.ui (front end) · compose · nginx template
@@ -283,38 +304,42 @@ The `k8s/` directory is reserved; no manifests yet.
 │  /api/model: OpenAI-compatible entry (key → quota → vendor → SSE)     │
 └──────┬──────────────┬───────────────┬───────────────┬─────────────┘
        ▼              ▼               ▼               ▼
-  system :9001    login :9004    workflow :9003    rag :9002 (WIP)
-  RBAC / models   JWT+session    canvas/submit     knowledge base
-  audit/monitors                 approval/tools         ↓ (not wired)
-                                     │
-                                     ▼ async execution (Redis sharded queue)
-                          ┌────────────────────────┐
-                          │ arq worker × N × shard  │  execute_workflow
-                          │ snapshots / recovery    │
-                          └────────────────────────┘
+  system :9001    login :9004    workflow :9003    rag :9002
+  RBAC / models   JWT+session    canvas/submit     knowledge base (3 types)
+  audit/monitors                 approval/tools    configs/docs/retrieval/graph/open API
+       │                             │                   │
+       │                             ▼ async execution (Redis sharded queue)
+       │                  ┌────────────────────────┐  ┌────────────────────────┐
+       │                  │ arq workflow worker     │  │ arq ragflow worker      │
+       │                  │ × N × shard, recovery   │  │ × N × shard, pure CPU   │
+       │                  └────────────────────────┘  └─────┬──────────────────┘
+       │                                                    ▼
+       │                              ES rag_knowledge_chunk · Neo4j · OSS
 ┌───────────────────────────────────────────────────────────────────┐
-│ Infra: Nacos (registry + all business config) · MySQL · Redis · OSS  │
+│ Infra: Nacos (registry + all business config) · MySQL · Redis · OSS · ES · Neo4j │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 ### Conventions that run through the whole codebase
 
-1. **One `create_app` bootstraps every service** (`common_app.bootstrap`): Nacos registration, Redis/MySQL/storage/arq pools, the middleware stack and exception handling all live in the lifespan; a service only declares its routers and switches. If a dependency fails to initialise, the Nacos registration is rolled back so no unusable instance stays in the registry.
-2. **Environment differences exist only in Nacos**: no connection string in code; `data_id` is the service name and the port is overridden by the `<service_name>_port` env var.
-3. **A permission point is a menu row**: `menu_type=3` in `tb_menu` serves both front-end button visibility and backend `@has_permission`; the seeds in `sql/v2_init.sql` are generated from what the backend actually checks, so the two cannot drift apart.
-4. **One fact, one owner, one copy** (execution contract, see `docs/workflow-execution-contract.md`): externally only `executionId` / `pendingApprovals` / `submit`; internal coordinates (child execution id, pause scope, generation) appear solely on the troubleshooting endpoint.
-5. **No legacy compatibility shims**: superseded endpoints, fields and comments get deleted, not marked `@deprecated`, so old and new paths never run in parallel.
-6. **Storage moves bytes only**: business code has exactly `upload/download/delete/exists`; swapping backends changes no code, and since there is no "give me a local path" API, document parsing happens in memory.
-7. **Uniform request/response shape**: every response is `ApiResponse{code, message, data}`, exceptions are normalised by the global handler, model-call failures pass the upstream status code through.
+1. **One `create_app` bootstraps every service** (`common_app.bootstrap`): Nacos registration, Redis/MySQL/storage/arq/ES/Neo4j pools, the middleware stack and exception handling all live in the lifespan; a service only declares its routers and switches (services that need to load business parameters add the `on_ready` hook). If a dependency fails to initialise, the Nacos registration is rolled back so no unusable instance stays in the registry.
+2. **Authorise at the top, query raw at the bottom**: functional permission points are checked once at the route entry, while row-level visibility and operability are decided by the `resource_guard` ACL; ES/Neo4j/storage only ever query with the `kb_id` allow-list handed down by the service layer and never make permission decisions themselves.
+3. **Environment differences exist only in Nacos**: no connection string in code; `data_id` is the service name and the port is overridden by the `<service_name>_port` env var.
+4. **A permission point is a menu row**: `menu_type=3` in `tb_menu` serves both front-end button visibility and backend `@has_permission`; the seeds in `sql/v2_init.sql` are generated from what the backend actually checks, so the two cannot drift apart.
+5. **One fact, one owner, one copy** (execution contract, see `docs/workflow-execution-contract.md`): externally only `executionId` / `pendingApprovals` / `submit`; internal coordinates (child execution id, pause scope, generation) appear solely on the troubleshooting endpoint.
+6. **No legacy compatibility shims**: superseded endpoints, fields and comments get deleted, not marked `@deprecated`, so old and new paths never run in parallel.
+7. **Storage moves bytes only**: business code has exactly `upload/download/delete/exists`; swapping backends changes no code, and since there is no "give me a local path" API, document parsing happens in memory.
+8. **Uniform request/response shape**: every response is `ApiResponse{code, message, data}`, exceptions are normalised by the global handler, model-call failures pass the upstream status code through.
 
 ---
 
 ## 7. Roadmap
 
-1. Knowledge base pipeline: `common_rag` (chunking / keywords / RRF) + vectorisation task + Milvus collections, which lights up the `KNOWLEDGE_RETRIEVAL` node
-2. Harness agent: an autonomous planning loop on top of the skill / tool / MCP resource centres (`:9005` / `:9006`)
-3. Datasets / training / inference / evaluation / Notebook
-4. Kubernetes manifests and a Helm chart
+1. Knowledge base front-end pages: list / config panel / upload / document table / retrieval page (one layout per kb type), plus the user-group page and the grant dialog
+2. Wire the workflow `KNOWLEDGE_RETRIEVAL` node to the rag retrieval path (the workflow worker needs ES and an auth context first)
+3. Harness agent: an autonomous planning loop on top of the skill / tool / MCP resource centres (`:9005` / `:9006`)
+4. Datasets / training / inference / evaluation / Notebook
+5. Kubernetes manifests and a Helm chart
 
 ## 8. Further reading
 
@@ -324,7 +349,8 @@ The `k8s/` directory is reserved; no manifests yet.
 | `docs/workflow-approval-memory.md` | Approval & memory state machines, review conclusions, implementation notes |
 | `docs/workflow-design.md` | Orchestration module design |
 | `sql/v2_init.sql` | The only database initialisation entry for a fresh environment |
-| `sql/init_nacos.yaml` | Nacos config sample, including what every `storage:` field means |
+| `sql/init_nacos.yaml` | Nacos config sample: what every `storage:` field means and how the two arq pipelines stay in sync |
+| `docs/RAG知识库模块开发SPEC.md` | Requirements and design baseline of the knowledge-base (RAG) module: three kb types, two pipelines, top-level authorisation |
 
 ---
 

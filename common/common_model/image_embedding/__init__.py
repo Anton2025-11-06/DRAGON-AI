@@ -9,10 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from common.common_constants.model_constant import MT_IMAGE_EMBEDDING
-from common.common_model.base import BaseModel, ModelResult
+from common.common_model.base import (BaseModel, ModelResult,
+                                      MultimodalContentsMixin)
 
 
-class ImageEmbeddingBase(BaseModel):
+class ImageEmbeddingBase(BaseModel, MultimodalContentsMixin):
+    """图片向量抽象父类（与多模态向量同一个厂商端点，配额拆批也走同一套）。"""
+
     category = MT_IMAGE_EMBEDDING
 
     async def aparse(self, result: ModelResult) -> Any:

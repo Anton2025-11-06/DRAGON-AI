@@ -1,6 +1,6 @@
 -- =====================================================================================
 -- DRAGON-AI 数据库初始化（全新部署的唯一入口）
--- 版本：v2 ｜ 覆盖 24 张业务表 + 角色/管理员/部门/菜单/权限种子
+-- 版本：v2 ｜ 覆盖 26 张业务表 + 角色/管理员/部门/菜单/权限种子
 --
 -- 怎么执行：
 --   mysql -h <host> -P 3306 -u <user> -p --default-character-set=utf8mb4 < sql/v2_init.sql
@@ -25,6 +25,9 @@
 --   skill_zip_storage.sql                  技能表 zip_file_name / zip_storage_name
 --   menu_agent_move.sql                    智能体菜单提升与改名（本文件按最终形态直接种）
 --   init_nacos.yaml                        不是 SQL：Nacos 配置中心的初始化内容
+--   v2_1_legacy_upgrade.sql                存量库（只跑过 sql/old 那一代）升级到本文件口径的
+--                                          增量脚本：RAG 三表重建 + ACL 三表 + 部门组织树列 +
+--                                          知识库权限点种子（带「有数据就不 DROP」闸门）
 --   → 已经跑过老版本的存量库别指望本文件补列：CREATE TABLE IF NOT EXISTS 遇到老表会整条跳过，
 --     缺的列不会补上，请按上表逐个执行对应的增量脚本。全新环境只用本文件。
 --
@@ -180,6 +183,9 @@ CREATE TABLE IF NOT EXISTS `tb_user_group_member` (
 --   只登记显式授权事实：「我创建的」「部门内的」是隐式规则，由归属列现算，不落库，
 --   否则部门一变动就要刷全量授权行。只做加法（无 deny 行），收紧靠「不授权」。
 --   不穿透：工作流被授权不等于它引用的知识库被授权，各资源只到各自的页面授权。
+--   唯一例外（产品口径）：knowledge_base 上「库内文件」那一组的六个码（preview/content/chunk/
+--   reparse/graph/doc_delete）对该库当前与以后的所有文档生效，文档侧判定在自身 ACL 判不过时
+--   回看父库那一行（resource_guard.KB_FILE_TO_DOC）；库上的 edit/upload/delete/share/use 一律不兜。
 CREATE TABLE IF NOT EXISTS `tb_resource_acl` (
     `acl_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `resource_code` VARCHAR(32) NOT NULL COMMENT '资源类型编码 knowledge_base/document/workflow/workflow_template/tool/skill/mcp',
@@ -187,7 +193,7 @@ CREATE TABLE IF NOT EXISTS `tb_resource_acl` (
     `grantee_type` TINYINT NOT NULL COMMENT '授权主体：1-用户 2-角色 3-部门 4-用户组 5-全员',
     `grantee_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '主体ID，全员时为0',
     `dept_include_sub` TINYINT NOT NULL DEFAULT 0 COMMENT '仅部门授权：0-仅本部门 1-含下级部门',
-    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/toggle/export/delete/share，mcp=view/use/test/tools/edit/delete/share，knowledge_base=view/use/edit/upload/delete/share，document=view/reparse/graph/export/edit/delete/share',
+    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/export/delete/share（启停与编辑同码，不再有 toggle），mcp=view/use/test/tools/edit/delete/share，knowledge_base=view/edit/upload/delete/share/preview/content/chunk/reparse/graph/doc_delete/use（后六个里除 use 都是「库内文件」组：在库上勾一次，对库内所有文档生效；content=查看解析后内容、doc_delete=删除知识，与库自己的 view/delete 分码是为了不让「删库」和「删库里一篇文档」共用一个勾选项），document=view/edit/preview/chunk/reparse/graph/delete/share',
     `expire_time` DATETIME DEFAULT NULL COMMENT '过期时间，NULL=永久（过期不定时清理，判定即失效）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `create_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '授权人（需持有该资源的 share）',
@@ -240,21 +246,23 @@ CREATE TABLE IF NOT EXISTS `tb_knowledge_base` (
     `kb_name` VARCHAR(128) NOT NULL COMMENT '知识库名称',
     `description` VARCHAR(500) DEFAULT NULL COMMENT '描述',
     `kb_type` VARCHAR(16) NOT NULL DEFAULT 'doc' COMMENT '类型：doc-文档问答 image-图片搜索 audio_video-音视频搜索。创建后不可改——存储链路与向量空间按类型分叉',
-    `org_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '组织隔离标识，随切片写入 ES、随实体写入 Neo4j。当前单租户部署取 Nacos service_rag 的 rag.org_id，缺省 0',
+    `org_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '组织隔离标识，随切片写入 ES、随实体写入 Neo4j。建库时取创建人的归属部门 id（无配置兜底：没有部门直接拒绝建库），创建后不可改',
     `embedding_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '向量模型 id（tb_model.id）。选定后永久锁定：换模型等于换向量空间，历史切片全部作废',
     `embedding_dim` INT NOT NULL DEFAULT 1024 COMMENT '向量维度，建库时按模型能力写入并锁定（三类知识库统一 1024、同一空间）',
-    `rerank_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '重排序模型 id，0=不启用',
-    `chat_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '问答与图谱抽取用的大模型 id（仅 doc 型需要）',
+    `rerank_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '重排序模型 id，0=不启用（建库页已不再提供该配置项，列保留兼容存量库）',
+    `chat_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '媒体理解与摘要模型 id（audio_video 型必需）；doc 型已拆到 extract_model_id / image_model_id，本列仅作存量库回退',
+    `extract_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '知识图谱实体抽取模型 id（仅 doc 型且 graph_enabled=1 时必填），0=沿用 chat_model_id',
+    `image_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '图片理解模型 id（仅 doc 型且 parse_config.image_understand=true 时必填）',
     `parser_engine` VARCHAR(16) NOT NULL DEFAULT 'native' COMMENT '解析引擎：native/docling/mineru（仅 doc 型生效，image/audio_video 型不解析文档）',
     `parse_config` JSON COMMENT '解析与预处理配置 {remove_toc,remove_header_footer,image_understand} + 引擎专有参数，默认值见 rag_constant.PARSE_OPTION_DEFAULTS',
     `chunk_config` JSON COMMENT '分块配置 {strategy,chunk_size,chunk_overlap,delimiter,regex_pattern,max_chars,keep_table_header,context_augment,title_path}，默认值见 rag_constant.CHUNK_CONFIG_DEFAULTS',
     `retrieve_config` JSON COMMENT '检索配置 {top_k,score_threshold,vector_similarity_weight,rerank,keyword_boost}，默认值见 rag_constant.RETRIEVE_DEFAULTS',
-    `graph_enabled` TINYINT NOT NULL DEFAULT 0 COMMENT '知识图谱库级开关：仅 doc 型可开；开了还要在文档行上手动点「构建知识图谱」才抽实体',
+    `graph_enabled` TINYINT NOT NULL DEFAULT 0 COMMENT '知识图谱库级开关：仅 doc 型可开；开了会在解析完成后自动投递图谱抽取任务，也可在文档列表勾选文档手动点「构建图谱」重跑',
     `doc_count` INT NOT NULL DEFAULT 0 COMMENT '文档数（列表页展示，增删后由 service 重算）',
     `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '切片数',
-    `status` TINYINT NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用（停用即从检索与下拉里消失，数据保留）',
+    `status` TINYINT NOT NULL DEFAULT 1 COMMENT '保留列（启用/停用功能已取消，代码不再读写，默认恒为 1）',
     `owner_dept_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '归属部门 id，仅展示与统计用；数据权限范围按 created_by 反查部门现算（resource_guard.build_visible_cond）',
-    `version` INT NOT NULL DEFAULT 1 COMMENT '配置版本号，每次修改 +1。摄取任务带着它跑，避免「改到一半的配置」被写进切片',
+    `version` INT NOT NULL DEFAULT 1 COMMENT '配置版本号，每次修改 +1。解析任务带着它跑，避免「改到一半的配置」被写进切片',
     `metadata` JSON COMMENT '扩展元数据（前端透传，不参与解析与检索逻辑）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（ACL 归属人判定列）',
@@ -303,7 +311,7 @@ CREATE TABLE IF NOT EXISTS `tb_document` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档表（原件在公共存储，本表存元数据与状态机）';
 
 -- 2.3 文档切片表（切片的**完整正文**只在这里；ES 里的 content 是为检索准备的副本）
---   本表是「可再生产物」：重新分块按 doc_id 整批物理替换，不做软删——留着旧行既不参与检索
+--   本表是「可再生产物」：构建向量按 doc_id 整批物理替换，不做软删——留着旧行既不参与检索
 --   又会让 uk_doc_chunk 撞车。文档删除时随 doc_id 一起清，ES 侧另走 delete_by_query。
 CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     `chunk_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -390,6 +398,40 @@ CREATE TABLE IF NOT EXISTS `tb_model_apply` (
     KEY `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型广场-申请审批';
 
+
+
+
+-- =====================================================================================
+-- PART 4  模型对话（service_workflow：模型广场「模型体验」与会话持久化）
+-- =====================================================================================
+
+-- 4.1 模型对话-会话表（reasoning/stream 是偏好快照，切会话时恢复）
+CREATE TABLE IF NOT EXISTS `tb_model_chat_session` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `user_id` INT NOT NULL COMMENT '所属用户',
+    `title` VARCHAR(128) NOT NULL DEFAULT '新会话' COMMENT '会话标题',
+    `model_apply_id` INT NOT NULL DEFAULT 0 COMMENT '授权记录 apply_id',
+    `model_name` VARCHAR(128) DEFAULT NULL COMMENT '模型标识',
+    `reasoning` TINYINT NOT NULL DEFAULT 0 COMMENT '深度思考偏好 0关 1开',
+    `stream` TINYINT NOT NULL DEFAULT 1 COMMENT '流式偏好 0关 1开',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_user` (`user_id`, `update_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型对话-会话';
+
+-- 4.2 模型对话-消息表（会话内按 id 递增即时间序，不另存序号）
+CREATE TABLE IF NOT EXISTS `tb_model_chat_message` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `session_id` INT NOT NULL COMMENT '会话 id',
+    `role` VARCHAR(16) NOT NULL COMMENT '角色 USER/ASSISTANT',
+    `content` MEDIUMTEXT COMMENT '消息内容',
+    `reasoning_content` MEDIUMTEXT COMMENT '深度思考内容',
+    `model_name` VARCHAR(128) DEFAULT NULL COMMENT '模型标识',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_session` (`session_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型对话-消息';
 
 
 
@@ -662,19 +704,22 @@ SET @m_arq = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND 
 SET @m_usergroup = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '用户组管理');
 
 -- 8.3 首页 / 知识库 / 模型工厂 / 数据集工厂 下的页面菜单
+--     知识库下三页：知识维护（库列表 + 文档）、知识检索、图谱检索；
+--     「知识库对话」页与旧「知识库检索」页已取消（检索/图谱从列表行内按钮提升为独立菜单）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (@d_home, '深度探索', 2, 'explorer', 'views/wemirr/home/index.vue', NULL, 1),
-(@d_kb, '知识库文档', 2, 'doc',  'views/wemirr/ai/rag/doc/index.vue',  'lucide:folder-open',    1),
-(@d_kb, '知识库对话', 2, 'chat', 'views/wemirr/ai/chat/rag/index.vue', 'lucide:messages-square', 2),
-(@d_kb, '知识库检索', 2, 'search', 'views/wemirr/ai/rag/search/index.vue', 'lucide:scan-search', 3),
+(@d_kb, '知识维护', 2, 'doc',      'views/wemirr/ai/rag/doc/index.vue',      'lucide:folder-open', 1),
+(@d_kb, '知识检索', 2, 'retrieve', 'views/wemirr/ai/rag/retrieve/index.vue', 'lucide:scan-search', 2),
+(@d_kb, '图谱检索', 2, 'graph',    'views/wemirr/ai/rag/graph/index.vue',    'lucide:network',     3),
 (@d_model_factory, '模型训练',     2, 'train',    'views/wemirr/model/train/index.vue',    NULL, 1),
 (@d_model_factory, '模型部署',     2, 'deploy',   'views/wemirr/model/deploy/index.vue',   NULL, 2),
 (@d_model_factory, '模型评测',     2, 'eval',     'views/wemirr/model/eval/index.vue',     NULL, 3),
 (@d_model_factory, 'NoteBook开发', 2, 'notebook', 'views/wemirr/model/notebook/index.vue', NULL, 4),
 (@d_model_factory, '模型归档',     2, 'archive',  'views/wemirr/model/archive/index.vue',  NULL, 5),
 (@d_dataset, '数据集管理', 2, 'list', 'views/wemirr/dataset/index.vue', NULL, 1);
-SET @m_kb_doc = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识库文档');
-SET @m_kb_search = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识库检索');
+SET @m_kb_doc = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识维护');
+SET @m_kb_retrieve = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识检索');
+SET @m_kb_graph = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '图谱检索');
 
 -- 8.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -790,10 +835,12 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 -- 8.9 功能权限点：知识库（SPEC §3.1：RBAC 只管菜单可见、页面准入、新建知识库这三类全局入口）
 --     行级按钮不再挂功能权限：能不能改这个库、能不能删这份文档，全部由 ACL 的资源动作判定
 --     （knowledge_base / document 两类，见 resource_guard.RESOURCE_SPECS），两层各管一段不打架
+--     「知识库查询」/「新建知识库」两个按钮位就列在知识维护页下，由系统管理-菜单管理直接控制
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
 (@m_kb_doc, '知识库查询', 3, 'ai:kb:list',   3),
 (@m_kb_doc, '新建知识库', 3, 'ai:kb:add',    4),
-(@m_kb_search, '知识库检索', 3, 'ai:kb:search', 1);
+(@m_kb_retrieve, '知识检索', 3, 'ai:kb:search', 1),
+(@m_kb_graph, '图谱检索', 3, 'ai:kb:graph',     1);
 
 -- =====================================================================================
 -- PART 9  种子：角色授权
@@ -816,10 +863,10 @@ WHERE r.`role_code` = 'USER'
 -- =====================================================================================
 -- PART 10  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 24 张；菜单 116 行 = 目录 7 + 页面 26 + 权限点 83；ADMIN 授权应覆盖这 116 行
-SELECT '表数量（应为 24）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
-SELECT '菜单行数（应为 116）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
-SELECT '菜单分层（应为 1:7 / 2:26 / 3:83）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
+-- 表 26 张；菜单 117 行 = 目录 7 + 页面 26 + 权限点 84；ADMIN 授权应覆盖这 117 行
+SELECT '表数量（应为 26）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+SELECT '菜单行数（应为 117）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
+SELECT '菜单分层（应为 1:7 / 2:26 / 3:84）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;
-SELECT 'ADMIN 授权行数（应为 116）' AS `自查项`, COUNT(*) AS `实际`
+SELECT 'ADMIN 授权行数（应为 117）' AS `自查项`, COUNT(*) AS `实际`
 FROM `tb_role_menu` rm JOIN `tb_role` r ON r.`role_id` = rm.`role_id` WHERE r.`role_code` = 'ADMIN';

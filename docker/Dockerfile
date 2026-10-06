@@ -1,4 +1,4 @@
-# 后端镜像：五个微服务 + arq worker 共用一个镜像，起哪个进程由 SERVICE_NAME 决定。
+# 后端镜像：五个微服务 + 三条 arq 流水线 worker 共用一个镜像，起哪个进程由 SERVICE_NAME 决定。
 #
 # 构建（上下文是仓库根目录，.dockerignore 已排除 ui-ai 与本机状态）：
 #   docker build -f docker/Dockerfile -t dragon-ai-backend:latest .
@@ -7,6 +7,8 @@
 #   docker run -d -e SERVICE_NAME=service_workflow -e NACOS_ADDR=10.0.0.9:8848 \
 #              -p 9003:9003 dragon-ai-backend:latest
 #   docker run -d -e SERVICE_NAME=arq_workflow -e NACOS_ADDR=10.0.0.9:8848 dragon-ai-backend:latest
+#   docker run -d -e SERVICE_NAME=arq_ragflow -e NACOS_ADDR=10.0.0.9:8848 dragon-ai-backend:latest
+#   docker run -d -e SERVICE_NAME=arq_graphflow -e NACOS_ADDR=10.0.0.9:8848 dragon-ai-backend:latest
 
 FROM python:3.11-slim
 
@@ -18,8 +20,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 只补时区数据：依赖全都有 manylinux wheel（grpcio / pymilvus / psutil / pillow 等），
-# 不需要装编译工具链
+# 只补时区数据：依赖全都有 manylinux wheel（grpcio / psutil / pillow / docling 等），
+# 不需要装编译工具链；ragflow worker 纯 CPU，镜像内不带任何 GPU 依赖
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
@@ -42,7 +44,8 @@ RUN sed -i 's/\r$//' scripts/*.sh && chmod +x scripts/*.sh
 # service_system 9001 / service_rag 9002 / service_workflow 9003 / service_login 9004 / gateway 18000
 EXPOSE 9001 9002 9003 9004 18000
 
-# 必须注入：SERVICE_NAME=service_login|service_system|service_gateway|service_workflow|service_rag|arq_workflow
+# 必须注入：SERVICE_NAME=service_login|service_system|service_gateway|service_workflow|service_rag|arq_workflow|arq_ragflow|arq_graphflow
 # 常用配套变量：NACOS_ADDR NACOS_NAME NACOS_PASSWD NACOS_NS_ID WORKERS ARQ_WORKERS SPLIT_NUMBER
+#               （rag 流水线的 worker 并发/超时看 Nacos 的 arq_ragflow.worker 段，不在这里注入）
 # 不写默认值：漏了 SERVICE_NAME 应该启动失败，而不是静默跑起一个谁都没想到的服务
 CMD ["/app/scripts/docker-entrypoint.sh"]

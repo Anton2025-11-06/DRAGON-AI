@@ -9,7 +9,7 @@
   （两条流水线的 redis 段可以不同实例，故连接池按流水线索引，不做单一全局池）；
 - 队列按切片号分片：队列名 = {基础队列名}:split_{split_number}，生产端
   enqueue_job(split_number=...) 与消费端 WorkerSettings.SPLIT_NUMBER 取相同值才对上；
-  切片数配置也是每条流水线一份（知识库摄取放量时只加 rag 的切片，不动工作流队列）；
+  切片数配置也是每条流水线一份（知识库解析放量时只加 rag 的切片，不动工作流队列）；
 - enqueue 时指定 job_id 可实现全局幂等：同一 job_id 重复投递会被 arq 拒绝
   （execute 防重、resume 防多次触发恢复、同一文档重复入队都依赖这一点）。
 """
@@ -23,14 +23,18 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 
 from common.common_log.log_init import log
 
-# ==================== 双流水线标识 ====================
+# ==================== 多流水线标识 ====================
 # 必须先于 CustomRedisSettings 定义：类方法签名里的默认值在 import 期就要求值
 PIPELINE_WORKFLOW = "workflow"
-PIPELINE_RAG = "rag"
+PIPELINE_RAG = "ragflow"
+# 图谱构建独立流水线：抽取比文档解析更耗时（一篇全量切片逐批走大模型），单拆一队
+# 避免慢图谱占满解析 worker 的并发槽位；连接与后端复用 arq_ragflow 段（见 get_redis_setting）
+PIPELINE_GRAPH = "graphflow"
 
 # 队列名常量（分片队列：{基础名}:split_{N}，生产端 enqueue 与消费端 WorkerSettings 共用同一拼法）
 QUEUE_NAME = "workflow_queue"
-RAG_QUEUE_NAME = "rag_queue"
+RAG_QUEUE_NAME = "ragflow_queue"
+GRAPH_QUEUE_NAME = "graphflow_queue"
 
 SPLIT_NAME = "split_"
 
@@ -45,13 +49,22 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 #   key = {worker_name}:{queue_name}:{hostname}:{pid}，TTL = health_check_interval + 1 秒
 # 定义在公共模块，worker_settings / tasks 的 bootstrap / system 监控端共用同一实现（单一来源）
 DEFAULT_WORKER_NAME = "workflow_worker"
-RAG_WORKER_NAME = "rag_worker"
+RAG_WORKER_NAME = "ragflow_worker"
+GRAPH_WORKER_NAME = "graphflow_worker"
+
+# 监控页下拉的展示名（流水线 → 中文名）：只给 UI 用，不参与队列名/ key 拼接
+PIPELINE_LABELS: dict[str, str] = {
+    PIPELINE_WORKFLOW: "工作流执行监控",
+    PIPELINE_RAG: "知识库解析监控",
+    PIPELINE_GRAPH: "知识图谱构建监控",
+}
 
 # 每条流水线的（基础队列名, 切片数配置 key, worker 健康 key 前缀）。
 # 切片数 key 存到 Redis 而不是 Nacos：监控页改完即时生效，不需要重启 worker。
 _PIPELINE_CFG: dict[str, tuple[str, str, str]] = {
     PIPELINE_WORKFLOW: (QUEUE_NAME, "workflow_queue:split_number", DEFAULT_WORKER_NAME),
-    PIPELINE_RAG: (RAG_QUEUE_NAME, "rag_queue:split_number", RAG_WORKER_NAME),
+    PIPELINE_RAG: (RAG_QUEUE_NAME, "ragflow_queue:split_number", RAG_WORKER_NAME),
+    PIPELINE_GRAPH: (GRAPH_QUEUE_NAME, "graphflow_queue:split_number", GRAPH_WORKER_NAME),
 }
 
 # workflow 流水线的切片数配置 key（值 = 切片数，存在即生效；不存在按默认 1）：
@@ -67,12 +80,16 @@ class CustomRedisSettings:
     不在 import 期读 Nacos：worker_settings 的模块级代码只能同步拿到已解析好的字典。
     """
     yml: dict = {}          # arq_workflow 段（workflow 流水线）
-    yml_rag: dict = {}      # arq_ragflow 段（rag 流水线）
+    yml_rag: dict = {}      # arq_ragflow 段（rag 与 graph 流水线共用：图谱只是拆队，不换实例）
 
     @classmethod
     def get_redis_setting(cls, pipeline: str = PIPELINE_WORKFLOW) -> RedisSettings:
-        """取本流水线的 arq Redis 连接参数（redis.url 必配，缺了直接抛错，不静默连本机 db0）。"""
-        yml = (cls.yml_rag if pipeline == PIPELINE_RAG else cls.yml).get("redis", {}) or {}
+        """取本流水线的 arq Redis 连接参数（redis.url 必配，缺了直接抛错，不静默连本机 db0）。
+
+        graphflow 复用 arq_ragflow 这一段 Redis：图谱拆独立队列是为了隔离并发，不是隔离
+        存储；多引一份 Nacos data_id 只会多出一次对不上的机会。
+        """
+        yml = (cls.yml_rag if pipeline in (PIPELINE_RAG, PIPELINE_GRAPH) else cls.yml).get("redis", {}) or {}
         settings = RedisSettings.from_dsn(yml["url"])
         if yml.get("password"):
             settings.password = yml.get("password")
@@ -105,6 +122,23 @@ def pipeline_cfg(pipeline: str = PIPELINE_WORKFLOW) -> tuple[str, str, str]:
     if cfg is None:
         raise ValueError(f"未注册的 arq 流水线: {pipeline}")
     return cfg
+
+
+def pipelines() -> list[dict]:
+    """已注册流水线的清单（供监控页渲染「监控哪条队列」的下拉选项）。
+
+    选项来自 _PIPELINE_CFG 而不是前端硬编码：以后加第三条流水线，前端不改也能选到，
+    也不会出现「下拉里有、后端报未注册流水线」的口径分叉。
+    """
+    return [
+        {
+            "key": key,
+            "label": PIPELINE_LABELS.get(key, key),
+            "queueName": base_queue,
+            "workerName": worker_name,
+        }
+        for key, (base_queue, _split_key, worker_name) in _PIPELINE_CFG.items()
+    ]
 
 
 def queue_name_of(split_number: int, pipeline: str = PIPELINE_WORKFLOW) -> str:

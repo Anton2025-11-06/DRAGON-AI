@@ -42,12 +42,9 @@ opentelemetry-instrumentation-grpc>=0.42b0
 # redis要求8+，支持stream
 redis==5.3.1
 
-# ===== AI 中台新增依赖 =====
-# 知识库检索存储：Elasticsearch 单索引 rag_knowledge_chunk 同时承载 BM25 与 dense_vector（kNN）
-#   客户端原生 async（AsyncElasticsearch），与 common_es 全局单例配套
-elasticsearch>=8.13.0,<9.0.0
-# 知识图谱：Neo4j（仅 doc 型知识库），异步 driver（AsyncSession + 全局单例）
+elasticsearch>=8.13.0
 neo4j>=5.14.0
+
 # 文本 token 计数：分块长度按 token 而非字符收口（tiktoken 缺失时解析器会退化为中文估算）
 tiktoken>=0.7.0
 # 图片元信息校验与缩放（图片型知识库入库前探测宽高/格式）

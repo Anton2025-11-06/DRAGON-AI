@@ -16,6 +16,8 @@
    （如 LibreOffice 子进程转换）由调用方自己写临时文件并在 finally 删除。
 3. **错误语义**：load 的「不存在/已过期」→ ValueError；delete / exists 的「不存在」
    不是错误（返回 False）；未初始化就调用 → RuntimeError（ensure_ready）。
+   delete 的返回值以**入口方法为准**（入口先判存在）：OSS 的 DeleteObject 对不存在的对象
+   也回成功，后端自己分不出「删到了」还是「本来就没了」，不必在后端里补这个判定。
 4. **URL 有效期**：public_url 返回 (url, expires_in 秒)。OSS 是预签名 URL（签名自带有效期），
    本地后端是业务模块的下载接口地址（由后端按「写入时间 + 有效期」判定，过期即清理）。
 5. close() 进程停机时统一 await，且必须可重复调用；close 后实例视为不可用。

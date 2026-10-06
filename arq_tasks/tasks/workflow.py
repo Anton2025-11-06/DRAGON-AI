@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """arq 任务实现:工作流执行(首跑 + 再提交) + worker 进程生命周期钩子。
 
-与旧 celery 方案的本质差异:
 - arq worker 进程本身就是 asyncio 事件循环,任务函数直接写 async def 并 await,
-  不再需要 celery 时代的线程适配层(AsyncLoopRunner)与每任务幂等 bootstrap;
 - 任务函数只负责「从 DB 重建运行时并驱动引擎」,执行记录/状态/快照全程以 DB 为权威:
   engine 在每个节点执行前调用状态检查钩子,读到 CANCELLED 就按取消收尾(暂停只由
   审批节点在节点边界触发,不存在外部触发的暂停/恢复任务);

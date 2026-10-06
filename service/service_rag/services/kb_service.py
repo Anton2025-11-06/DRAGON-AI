@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""知识库服务：三类知识库的分页 / 详情 / 下拉 / 新建 / 修改 / 停用 / 删除。
+"""知识库服务：三类知识库的分页 / 详情 / 下拉 / 新建 / 修改 / 删除。
 
 四条主线，改动前先对着看：
 
@@ -32,7 +32,7 @@ from common.common_permission.resource_guard import (
     ACTION_DELETE, ACTION_EDIT, ACTION_USE, ACTION_VIEW, build_visible_cond,
     decorate_actions, ensure_action, maybe_session,
 )
-from common.common_utils.creator_util import attach_creator
+from common.common_utils.creator_util import attach_creator, attach_dept
 from service.service_rag.models.kb_entity import Document, DocumentChunk, KnowledgeBase
 from service.service_rag.schemas.rag_schema import KbPageReq, KbSaveReq, KnowledgeBaseResp
 from service.service_rag.services import rag_settings as settings
@@ -43,6 +43,8 @@ from service.service_rag.services.task_service import RagTaskService
 RESOURCE = "knowledge_base"
 # dump() 出来的行是 camelCase，授权与创建人补全按这份键名取归属列
 OWNER_KEY = "createdBy"
+# 行内存「归属部门 id」的键（_to_dict 用驼峰输出，attach_dept 拿它去查 tb_dept）
+DEPT_OWNER_KEY = "ownerDeptId"
 
 
 class KnowledgeBaseService:
@@ -78,17 +80,17 @@ class KnowledgeBaseService:
             return kb
 
     @staticmethod
-    async def visible_ids(login_user: dict, *, session=None, action: str = ACTION_USE,
-                          only_enabled: bool = True) -> list[int]:
+    async def visible_ids(login_user: dict, *, session=None,
+                          action: str = ACTION_USE) -> list[int]:
         """当前用户可见（且可按该动作使用）的知识库 id 列表。
 
         检索与图谱的前置白名单就来自这里（SPEC §10.2）：ES 与 Neo4j 是裸查存储，
         权限只在这一层收口，所以任何一次底层检索都必须带着这份 kb_id 集合下去。
+
+        不再按 status 过滤：启用/停用功能已取消，库可见与否只看归属、数据范围与 ACL。
         """
         async with maybe_session(session) as s:
             conds = [KnowledgeBase.is_deleted == 0]
-            if only_enabled:
-                conds.append(KnowledgeBase.status == 1)
             visible = build_visible_cond(login_user, RESOURCE,
                                          KnowledgeBase.kb_id, KnowledgeBase.created_by,
                                          action=action)
@@ -121,10 +123,12 @@ class KnowledgeBaseService:
                 conds.append(KnowledgeBase.kb_name.like(f"%{req.name}%"))
             if req.description:
                 conds.append(KnowledgeBase.description.like(f"%{req.description}%"))
-            if req.kb_type:
-                conds.append(KnowledgeBase.kb_type == settings.check_kb_type(req.kb_type))
-            if req.status is not None:
-                conds.append(KnowledgeBase.status == req.status)
+            # 类型筛选：下拉里的「全部类型」传 all（或空串），后端一律理解为不做筛选
+            kb_type = str(req.kb_type or "").strip().lower()
+            if kb_type and kb_type != "all":
+                conds.append(KnowledgeBase.kb_type == settings.check_kb_type(kb_type))
+            # 启停已取消：不再按 status 筛选，列表范围全部交给 build_visible_cond 的三档并集
+            # （自己创建的 ∪ 数据权限内的 ∪ 持有 view 授权的；ADMIN 不限）
             visible = build_visible_cond(login_user, RESOURCE,
                                          KnowledgeBase.kb_id, KnowledgeBase.created_by)
             if visible is not None:
@@ -139,6 +143,8 @@ class KnowledgeBaseService:
             await decorate_actions(login_user, RESOURCE, items,
                                    owner_key=OWNER_KEY, session=session)
             await attach_creator(items, id_key=OWNER_KEY, session=session)
+            # 归属部门与创建人成对补全（前端列表卡片要显示「谁建的 / 哪个部门的」）
+            await attach_dept(items, id_key=DEPT_OWNER_KEY, session=session)
             return {"records": items, "total": total,
                     "current": req.current, "size": req.size}
 
@@ -156,6 +162,7 @@ class KnowledgeBaseService:
             await decorate_actions(login_user, RESOURCE, items,
                                    owner_key=OWNER_KEY, session=session)
             await attach_creator(items, id_key=OWNER_KEY, session=session)
+            await attach_dept(items, id_key=DEPT_OWNER_KEY, session=session)
             return items[0]
 
     @staticmethod
@@ -166,7 +173,7 @@ class KnowledgeBaseService:
         在这里选不到它，比让他在节点里选了之后报 403 好懂。
         """
         async with mysql_client.get_session() as session:
-            conds = [KnowledgeBase.is_deleted == 0, KnowledgeBase.status == 1]
+            conds = [KnowledgeBase.is_deleted == 0]
             visible = build_visible_cond(login_user, RESOURCE,
                                          KnowledgeBase.kb_id, KnowledgeBase.created_by,
                                          action=ACTION_USE)
@@ -188,21 +195,33 @@ class KnowledgeBaseService:
 
         ES 单索引在应用启动时幂等建好（common_es.ensure_index），图片型/音视频型也写同一个
         索引，所以建库不需要碰 ES；Neo4j 也不需要建库级容器（靠 kb_id 属性隔离）。
+
+        org_id（组织隔离标识）就是**创建人的归属部门**，没有任何配置兜底：这一列是 ES 切片
+        与 Neo4j 节点上 org_id 的唯一来源，填成 0 等于把不同部门的库压进同一个隔离维度，
+        事后按 org_id 过滤与统计都不可信（创建后不可改，改它等于重写整库切片）。
         """
         kb_type = settings.check_kb_type(req.kb_type)
         name = (req.name or "").strip()
         if not name:
             raise ValueError("知识库名称不能为空")
+        # 没部门直接拒绝建库：宁可让用户先去「用户管理」把部门补上，也不要落一个来历不明的 0
+        dept_id = int(login_user.get("dept_id") or 0)
+        if dept_id <= 0:
+            raise ValueError("无法确定知识库的组织隔离标识：创建人没有归属部门，"
+                             "请先在「用户管理」为该用户分配部门（登录态较旧时重新登录）")
+        # 解析配置先归一再到模型校验：「图片智能解析」开关决定图片理解模型是不是必填
+        engine, parse_config = settings.normalize_parse_config(
+            kb_type, req.parser_engine, req.parse_config)
         # 模型校验在前：选了个 text_rerank 当向量模型，要等第一篇文档向量化时才炸，
         # 而那时用户已经传了文件、队列里也排上了任务，排查成本比建库时高一个量级
         checked = await RagModelService.validate_kb_models(
             kb_type, embed_model_id=req.embed_model_id,
             rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
-            enable_graph=bool(req.enable_graph))
+            extract_model_id=req.extract_model_id or 0, image_model_id=req.image_model_id or 0,
+            enable_graph=bool(req.enable_graph),
+            image_understand=bool(parse_config.get("image_understand")))
         dim = RagModelService.embedding_dim(checked["embed"])
 
-        engine, parse_config = settings.normalize_parse_config(
-            kb_type, req.parser_engine, req.parse_config)
         chunk_config = settings.normalize_chunk_config(
             req.chunk_config, chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap)
         retrieve_config = settings.normalize_retrieve_config(
@@ -217,21 +236,23 @@ class KnowledgeBaseService:
                 raise ValueError(f"已存在同名的{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}：{name}")
             kb = KnowledgeBase(
                 kb_name=name, description=req.description, kb_type=kb_type,
-                org_id=settings.org_id(),
+                org_id=dept_id,
                 embedding_model_id=req.embed_model_id, embedding_dim=dim,
                 rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
+                extract_model_id=req.extract_model_id or 0, image_model_id=req.image_model_id or 0,
                 parser_engine=engine, parse_config=parse_config,
                 chunk_config=chunk_config, retrieve_config=retrieve_config,
                 graph_enabled=graph_enabled, status=1,
-                owner_dept_id=int(login_user.get("dept_id") or 0),
+                # 归属部门与 org_id 同值但语义不同：前者只作展示统计，后者是存储侧的隔离维度
+                owner_dept_id=dept_id,
                 kb_metadata=req.metadata,
                 created_by=int(login_user.get("user_id") or 0))
             session.add(kb)
             await session.flush()
             kb_id = kb.kb_id
             await session.commit()
-        log.info("知识库已创建: id={} name={} type={} engine={} graph={}",
-                 kb_id, name, kb_type, engine, graph_enabled)
+        log.info("知识库已创建: id={} name={} type={} engine={} graph={} org={}",
+                 kb_id, name, kb_type, engine, graph_enabled, dept_id)
         return kb_id
 
     # ==================== 修改 ====================
@@ -261,25 +282,32 @@ class KnowledgeBaseService:
                         KnowledgeBase.is_deleted == 0))).first():
                 raise ValueError(f"已存在同名的{RC.KB_TYPE_LABELS.get(kb.kb_type, kb.kb_type)}：{name}")
 
-            checked = await RagModelService.validate_kb_models(
-                kb.kb_type, embed_model_id=kb.embedding_model_id,
-                rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
-                enable_graph=bool(req.enable_graph) if req.enable_graph is not None
-                else bool(kb.graph_enabled))
-            if checked["dim"] != kb.embedding_dim:
-                raise ValueError(f"向量模型维度与知识库不一致（知识库 {kb.embedding_dim} 维）")
-
+            # 图谱开关与解析配置先算出来再校验模型：这两列在「解析配置」页上，
+            # 用户只改名称时不会重传它们，缺省沿用库里已有的选择
+            graph_enabled = settings.normalize_graph_enabled(
+                kb.kb_type, kb.graph_enabled if req.enable_graph is None else req.enable_graph)
             engine, parse_config = settings.normalize_parse_config(
                 kb.kb_type, req.parser_engine or kb.parser_engine,
                 req.parse_config if req.parse_config is not None else kb.parse_config)
+            image_understand = bool(parse_config.get("image_understand"))
+            # 开关没开时不参与校验：库里存着一个已被删掉的模型不该拖住一次无关的保存
+            extract_model_id = int(req.extract_model_id or 0) or kb.extract_model_id
+            image_model_id = int(req.image_model_id or 0) or kb.image_model_id
+            checked = await RagModelService.validate_kb_models(
+                kb.kb_type, embed_model_id=kb.embedding_model_id,
+                rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
+                extract_model_id=extract_model_id if graph_enabled else 0,
+                image_model_id=image_model_id if image_understand else 0,
+                enable_graph=bool(graph_enabled), image_understand=image_understand)
+            if checked["dim"] != kb.embedding_dim:
+                raise ValueError(f"向量模型维度与知识库不一致（知识库 {kb.embedding_dim} 维）")
+
             chunk_config = settings.normalize_chunk_config(
                 req.chunk_config if req.chunk_config is not None else kb.chunk_config,
                 chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap)
             retrieve_config = settings.normalize_retrieve_config(
                 req.retrieve_config if req.retrieve_config is not None else kb.retrieve_config,
                 top_k=req.top_k, score_threshold=req.score_threshold)
-            graph_enabled = settings.normalize_graph_enabled(
-                kb.kb_type, kb.graph_enabled if req.enable_graph is None else req.enable_graph)
 
             # 只有会让已有切片作废的改动才推版本号（检索配置与名称不参与解析）
             reindex = (engine != kb.parser_engine
@@ -290,6 +318,8 @@ class KnowledgeBaseService:
                 else kb.description,
                 "rerank_model_id": req.rerank_model_id or 0,
                 "chat_model_id": req.chat_model_id or 0,
+                "extract_model_id": extract_model_id or 0,
+                "image_model_id": image_model_id or 0,
                 "parser_engine": engine, "parse_config": parse_config,
                 "chunk_config": chunk_config, "retrieve_config": retrieve_config,
                 "graph_enabled": graph_enabled,
@@ -306,17 +336,40 @@ class KnowledgeBaseService:
         return True
 
     @staticmethod
-    async def switch_status(login_user: dict, kb_id: int, enabled: bool) -> bool:
-        """停用/启用：停用后检索与下拉里消失，数据与 ES 向量全部保留（不是删除的轻量替代）。"""
-        async with mysql_client.get_session() as session:
-            await KnowledgeBaseService.require(login_user, kb_id, ACTION_EDIT, session=session)
-            await session.execute(update(KnowledgeBase).where(
-                KnowledgeBase.kb_id == kb_id).values(
-                    status=1 if enabled else 0,
-                    update_by=int(login_user.get("user_id") or 0)))
-            await session.commit()
-        log.info("知识库状态切换: id={} enabled={}", kb_id, enabled)
-        return True
+    async def apply_chunk_override(login_user: dict, kb_id: int, *,
+                                   chunk_config: Optional[dict] = None,
+                                   chunk_size: Optional[int] = None,
+                                   chunk_overlap: Optional[int] = None,
+                                   session=None) -> dict:
+        """只改分块配置（文档列表「构建向量」按新配置重跑的前半段）。
+
+        配置归一与版本推进都留在本类：doc_service 只负责「谁有资格重跑这一批文档」，
+        不必再解释一遍哪些改动会让已有切片作废。一个覆盖都没给时只回当前配置、
+        不动库（页面最常见的构建向量就是“配置没变，重跑一次”）。
+        """
+        async with maybe_session(session) as s:
+            kb = await KnowledgeBaseService.load(s, kb_id)
+            if not kb:
+                raise ValueError("知识库不存在")
+            current = KnowledgeBaseService.chunk_of(kb)
+            if chunk_config is None and chunk_size is None and chunk_overlap is None:
+                return current
+            # 改配置比改一篇文档重跑一次的影响面大（整库后续切片都按新配置），所以卡 edit
+            await ensure_action(login_user, RESOURCE, kb_id, ACTION_EDIT,
+                                owner_id=kb.created_by, session=s)
+            cfg = settings.normalize_chunk_config(
+                chunk_config if chunk_config is not None else kb.chunk_config,
+                chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            values: dict[str, Any] = {
+                "chunk_config": cfg,
+                "update_by": int(login_user.get("user_id") or 0)}
+            if cfg != (kb.chunk_config or {}):
+                values["version"] = kb.version + 1
+            await s.execute(update(KnowledgeBase).where(
+                KnowledgeBase.kb_id == kb_id).values(**values))
+            await s.commit()
+            log.info("知识库分块配置已覆盖: id={} 需重解析={}", kb_id, "version" in values)
+            return cfg
 
     # ==================== 删除 ====================
     @staticmethod
@@ -347,7 +400,7 @@ class KnowledgeBaseService:
     # ==================== 计数回写 ====================
     @staticmethod
     async def refresh_counters(kb_id: int, session: Optional[AsyncSession] = None) -> dict:
-        """按真实数据回写 doc_count / chunk_count（摄取与删除链路收尾时调用）。
+        """按真实数据回写 doc_count / chunk_count（解析与删除链路收尾时调用）。
 
         这两个数是「派生值」，不做增量累加：增量要么漏（异常分支没走到）要么重
         （任务重试过），一旦对不上，页面显示的分块总数就再也无法自证清白。
@@ -378,6 +431,7 @@ class KnowledgeBaseService:
             tenant_id=row.org_id, collection_name=RC.RAG_CHUNK_INDEX,
             embed_model_id=row.embedding_model_id, embedding_dim=row.embedding_dim,
             rerank_model_id=row.rerank_model_id, chat_model_id=row.chat_model_id,
+            extract_model_id=row.extract_model_id, image_model_id=row.image_model_id,
             top_k=retrieve_config["top_k"],
             score_threshold=retrieve_config["score_threshold"],
             chunk_size=chunk_config["chunk_size"], chunk_overlap=chunk_config["chunk_overlap"],
@@ -386,15 +440,16 @@ class KnowledgeBaseService:
             parse_config=parse_config, chunk_config=chunk_config,
             retrieve_config=retrieve_config,
             version=row.version, doc_count=row.doc_count, chunk_count=row.chunk_count,
-            status=row.status, metadata=row.kb_metadata, created_by=row.created_by,
+            metadata=row.kb_metadata, created_by=row.created_by,
+            owner_dept_id=row.owner_dept_id,
             create_time=_fmt_time(row.create_time), update_time=_fmt_time(row.update_time))
         return resp.dump()
 
     @staticmethod
     def pick(row: KnowledgeBase, *fields: str) -> dict[str, Any]:
-        """给内部链路（摄取/检索/图谱）取几个字段的轻量字典，避免为读配置加载整行 ORM。"""
+        """给内部链路（解析/检索/图谱）取几个字段的轻量字典，避免为读配置加载整行 ORM。"""
         data = {"kb_id": row.kb_id, "kb_type": row.kb_type, "org_id": row.org_id,
-                "version": row.version, "status": row.status,
+                "version": row.version,
                 "graph_enabled": bool(row.graph_enabled)}
         for f in fields:
             data[f] = getattr(row, f, None)

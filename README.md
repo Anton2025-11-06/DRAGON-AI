@@ -116,12 +116,15 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 ```
 
 **2) 在 Nacos 建配置**，`data_id` = 服务名：`service_system` / `service_login` / `service_workflow` /
-`service_gateway` / `arq_workflow`，内容照抄 `sql/init_nacos.yaml` 改连接信息。
+`service_gateway` / `service_rag` / `arq_workflow` / `arq_ragflow`，内容照抄 `sql/init_nacos.yaml` 改连接信息。
 
 > ★ `arq_workflow` 段必须有 `redis.url`，且与 `service_workflow` 用的 Redis 同源——否则任务投了没人消费。
+> ★ `arq_ragflow` 同理：它的 `redis.url` 是 rag 队列的 Redis，而 `mysql/storage/es/neo4j` 必须与 `service_rag` 同实例——
+>   原件在 API 进程写进对象存储、在 worker 里读，两处不一致就是「上传成功、worker 找不到文件」。
+>   本段的 `worker:` 子段是 rag worker 的并发/超时（省略则用代码默认值）。
 > 只有工作流要传文件到对象存储时才需要 `storage:` 段，不配即本地目录。
 
-**3) 起后端** —— 四个服务 + worker，见 3.3（本机）或 3.4（容器）。
+**3) 起后端** —— 五个服务 + 两条 worker 流水线，见 3.3（本机）或 3.4（容器）。
 
 **4) 起前端** —— `pnpm build:antd` 出静态产物交给 nginx，把 `/api` 反代到网关；用 3.4 的前端镜像就直接带上 `GATEWAY_URL`。
 
@@ -138,8 +141,12 @@ pip install -r requirements.txt
 python -m service.service_login.login          # :9004
 python -m service.service_system.system        # :9001
 python -m service.service_workflow.workflow    # :9003
+python -m service.service_rag.rag              # :9002（知识库：需 ES/Neo4j）
 python -m service.service_gateway.gateway      # :18000
-python -m arq_tasks.run_workers -n 4 -p 1      # arq worker：4 进程消费切片 1
+
+# arq worker：-t 必填，两条流水线各自一个进程组（队列完全隔离，互不偷任务）
+python -m arq_tasks.run_workers -t workflow -n 4 -p 1    # 工作流：4 进程消费 workflow_queue:split_1
+python -m arq_tasks.run_workers -t ragflow  -n 2 -p 1    # 知识库：2 进程消费 rag_queue:split_1
 
 cd ui-ai && pnpm install && pnpm dev:antd      # :5666（vite 已配 /api → 127.0.0.1:18000 代理）
 ```
@@ -166,6 +173,12 @@ docker run -d --name arq --init \
   -e ARQ_WORKERS=4 -e SPLIT_NUMBER=1 \
   dragon-ai-backend:latest
 
+# 起知识库摄取 worker（纯 CPU，无 GPU 参数）
+docker run -d --name arq-rag --init \
+  -e SERVICE_NAME=arq_ragflow -e NACOS_ADDR=10.0.0.9:8848 \
+  -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
+  dragon-ai-backend:latest
+
 # 起前端：GATEWAY_URL 告诉 nginx 把 /api 转发到哪
 docker run -d --name ui --init -p 8080:80 \
   -e GATEWAY_URL=http://10.0.0.9:18000 \
@@ -182,11 +195,12 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 | 变量 | 作用 | 默认 |
 |---|---|---|
-| `SERVICE_NAME` | 容器里起哪个进程：`service_login`/`service_system`/`service_gateway`/`service_workflow`/`service_rag`/`arq_workflow` | 无（必填） |
+| `SERVICE_NAME` | 容器里起哪个进程：`service_login`/`service_system`/`service_gateway`/`service_workflow`/`service_rag`/`arq_workflow`/`arq_ragflow` | 无（必填） |
 | `NACOS_ADDR` `NACOS_NAME` `NACOS_PASSWD` `NACOS_NS_ID` | 注册中心与配置中心 | 无 |
 | `<服务名>_port` | 覆盖监听端口（小写服务名，代码里读的就是这个格式） | 各服务默认端口 |
 | `WORKERS` | 微服务 gunicorn worker 数 | 4 |
 | `ARQ_WORKERS` / `SPLIT_NUMBER` | worker 进程数 / 消费的队列切片号 | 4 / 1 |
+| `RAG_ARQ_WORKERS` / `RAG_SPLIT_NUMBER` | compose 里给 `arq_ragflow` 容器覆盖上面两个变量（两条流水线分开扩容） | 2 / 1 |
 | `GATEWAY_URL` / `LISTEN_PORT` | 前端容器：网关地址 / 监听端口 | `http://127.0.0.1:18000` / 80 |
 
 **启动脚本统一在 `scripts/`**，容器里和裸机跑的是同一份：
@@ -195,7 +209,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 |---|---|
 | `scripts/docker-entrypoint.sh` | 容器唯一入口，按 `SERVICE_NAME` 分发 |
 | `scripts/run_service.sh` | gunicorn + `uvicorn.workers.UvicornWorker`，每服务默认 4 worker；生产参数：`--backlog 4096`、`--timeout 120`、`--graceful-timeout 30`、`--max-requests 50000(+jitter)`、`--worker-tmp-dir /dev/shm`、`--proxy-headers --forwarded-allow-ips '*'`、日志走 stdout |
-| `scripts/run_arq_workflow.sh` | 起 N 个 arq worker，并把 `docker stop` 的 TERM 转成 INT 走优雅退出分支 |
+| `scripts/run_arq_workflow.sh` | 起 N 个工作流 arq worker（`-t workflow`），并把 `docker stop` 的 TERM 转成 INT 走优雅退出分支 |
+| `scripts/run_arq_ragflow.sh` | 同上但 `-t ragflow`：知识库摄取 worker，进程数默认 2（并发大头在 Nacos 的 `arq_ragflow.worker.max_jobs`） |
 | `scripts/run_ui.sh` | 把 `GATEWAY_URL` 渲染进 nginx 站点配置，前台起 nginx |
 
 ### 3.5 K8s
@@ -210,12 +225,13 @@ docker compose -f docker/docker-compose.yml up -d --build
 |---|---|
 | 后端 | Python 3.11 · FastAPI（全异步）· SQLAlchemy 2.0 + aiomysql · Pydantic v2 |
 | 进程与部署 | gunicorn + UvicornWorker · Docker · Nacos（注册/配置中心） |
-| 数据与中间件 | MySQL 8.x · Redis（登录态/限流/缓存/arq 队列）· 阿里云 OSS · Milvus（客户端层已备） |
-| 异步任务 | arq 0.28，Redis 分片队列，多进程横向扩展 |
+| 数据与中间件 | MySQL 8.x · Redis（登录态/限流/缓存/进度的 arq 双队列）· 阿里云 OSS · Elasticsearch 8.x · Neo4j 5.x |
+| 异步任务 | arq 0.28，Redis 分片队列；workflow 与 ragflow **两条流水线完全隔离消费**（`-t workflow|ragflow`），多进程横向扩展 |
 | 通信 | httpx 全局连接池（HTTP/2）· WebSocket · SSE（sse-starlette） |
 | 模型接入 | 每类能力一个 `openai_impl` / `dashscope_impl` / `zhipu_impl`，统一由 `common_model.entry` 按（能力, 供应商）分发 |
 | 智能体 | MCP 官方 Python SDK · 沙箱进程隔离（psutil）· 代码节点走同一沙箱；自主规划框架 deepagents 仅声明了依赖，循环未落地 |
-| 向量与检索 | pymilvus 客户端层 · rank-bm25 关键词检索（知识库未接入，文档解析已在工作流侧复用） |
+| 向量与检索 | ES 单索引 `rag_knowledge_chunk`：BM25 + 1024 维 dense_vector kNN（RRF 融合 + 可选 rerank）· 文本/图片/音视频共用一个向量空间 · rank-bm25 兼容旧链路 |
+| 文档解析 | `common_file_parser`：native（pypdf/docx/xlsx…）· docling（pip CPU）· minerU（私有化 HTTP）三引擎 + auto 调度，8 种分块策略（单块上限 20000 字） |
 | 可观测 | loguru + 自研 `x-trace-id` 链路（OpenTelemetry 依赖已声明，尚未接入代码） |
 | 前端 | Vue 3.5 · TypeScript · Vite · vben v5（pnpm + turbo monorepo）· ant-design-vue · Vue Flow 画布 · CodeMirror/Monaco |
 | 鉴权 | JWT + Redis 会话 · API Key 双通道 · RBAC 权限点 |
@@ -229,10 +245,11 @@ docker compose -f docker/docker-compose.yml up -d --build
 │   ├── common_app/               #   create_app 统一引导工厂（lifespan + 中间件 + 异常）
 │   ├── common_nacos/             #   Nacos 注册发现与配置拉取
 │   ├── common_middleware/        #   RequestLog / TokenCheck / RateLimit / OperateLog / 异常处理
-│   ├── common_permission/        #   @has_permission 权限点校验
+│   ├── common_permission/        #   @has_permission 权限点校验 + resource_guard 资源级 ACL
 │   ├── common_model/             #   12 类模型能力 × 3 家供应商的调用实现与 entry 分发
+│   ├── common_file_parser/       #   文档解析：三引擎 + 8 分块策略 + 预处理/图片增强
 │   ├── common_storage/           #   StorageBackend：本地 / 阿里云 OSS，只搬字节
-│   ├── common_mysql|redis|milvus|httpx|arq/  # 连接池与队列封装
+│   ├── common_mysql|redis|es|neo4j|httpx|arq/  # 连接池与队列封装（es/neo4j 为全局异步单例）
 │   ├── common_entity/            #   统一响应体 ApiResponse / RBAC 实体
 │   ├── common_log|utils|exception|constants|threadpool/
 ├── service/                      # 业务微服务，一服务一端口
@@ -243,9 +260,11 @@ docker compose -f docker/docker-compose.yml up -d --build
 │   │   ├── execution/            #     执行域：轮次请求 / 暂停状态 / 审批投影 / 执行树 / submit 解析
 │   │   ├── workflow_engine/      #     图执行引擎（nodes / 上下文 / 校验 / 快照）
 │   │   ├── routers|services|models|schemas|utils/
-│   ├── service_rag/              #   :9002  知识库（开发中）
+│   ├── service_rag/              #   :9002  知识库：三类库配置/文档/摄取进度/混合检索/图谱/开放 API
+│   │   ├── services/             #     kb·doc·task(入队与状态机)·ingest·graph·retrieval·rag_settings
+│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / open
 │   └── service_datasets|train|inference|eval_model|notebook/   # 规划中，空包
-├── arq_tasks/                    # worker 配置 + 工作流执行任务 + 多进程启动脚本
+├── arq_tasks/                    # 两条流水线的 worker 配置 + 任务函数 + 多进程启动入口（run_workers -t）
 ├── ui-ai/                        # 前端 vben v5 monorepo（apps/web-antd 是实际使用的 app）
 ├── scripts/                      # 启动脚本：容器与裸机共用同一份
 ├── docker/                       # Dockerfile（后端）· Dockerfile.ui（前端）· compose · nginx 模板
@@ -271,38 +290,42 @@ docker compose -f docker/docker-compose.yml up -d --build
 │  /api/model：OpenAI 兼容模型入口（api-key → 限流 → 厂商直连 → SSE）      │
 └──────┬──────────────┬───────────────┬───────────────┬─────────────┘
        ▼              ▼               ▼               ▼
-  system :9001    login :9004    workflow :9003    rag :9002(开发中)
-  RBAC/模型广场    JWT+会话       画布/submit/审批    知识库
-  审计/监控/限流                 工具/MCP/技能       ↓（未接入）
-                                     │
-                                     ▼ 异步执行（投 Redis 分片队列）
-                          ┌────────────────────────┐
-                          │ arq worker × N × 切片   │  execute_workflow
-                          │ 快照落库 / 跨进程恢复     │
-                          └────────────────────────┘
+  system :9001    login :9004    workflow :9003    rag :9002
+  RBAC/模型广场    JWT+会话       画布/submit/审批    知识库(三类库)
+  审计/监控/限流                 工具/MCP/技能       配置/文档/检索/图谱/开放API
+       │                             │                   │
+       │                             ▼ 异步执行（投 Redis 分片队列）
+       │                  ┌────────────────────────┐  ┌────────────────────────┐
+       │                  │ arq workflow worker     │  │ arq ragflow worker      │
+       │                  │ × N × 切片 · 快照恢复   │  │ × N × 切片 · 纯 CPU     │
+       │                  └────────────────────────┘  └─────┬──────────────────┘
+       │                                                    ▼
+       │                                    ES rag_knowledge_chunk · Neo4j · OSS
 ┌───────────────────────────────────────────────────────────────────┐
-│ 基础设施  Nacos（注册 + 全部业务配置）· MySQL · Redis · 阿里云 OSS（可选）│
+│ 基础设施  Nacos（注册 + 全部业务配置）· MySQL · Redis · 阿里云 OSS · ES · Neo4j │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 ### 几条贯穿全局的设计约定
 
-1. **一个 `create_app` 引导所有服务**（`common_app.bootstrap`）：Nacos 注册、Redis/MySQL/存储/arq 连接池、中间件栈、异常处理全在 lifespan 里，服务自己只声明路由和开关。依赖初始化失败会回滚 Nacos 注册，不留下不可用实例。
-2. **环境差异只存在于 Nacos**：代码里不写死任何连接串；`data_id` 就是服务名，端口用 `<服务名>_port` 环境变量覆盖。
-3. **权限点即菜单**：`tb_menu` 里 `menu_type=3` 的行就是权限点，一份数据同时驱动前端按钮显隐与后端 `@has_permission`；`sql/v2_init.sql` 的种子按后端实际校验的清单生成，两边不会脱节。
-4. **每个事实只有一个 owner、一份副本**（执行域契约，见 `docs/workflow-execution-contract.md`）：对外只有 `executionId` / `pendingApprovals` / `submit` 三个概念，内部坐标（子执行 id、暂停范围、代次）只在排障接口出现。
-5. **不做旧口径保留**：被取代的端点、字段、注释直接删除，不留 `@deprecated` 薄壳，避免新旧双轨。
-6. **存储只搬字节**：业务侧只有 `upload/download/delete/exists` 四个方法，换后端不改代码；不提供「取本地路径」的能力，因此文档解析也在内存做。
-7. **统一出入参格式**：响应一律 `ApiResponse{code, message, data}`，异常经全局处理器归一化，模型调用失败按上游状态码透传。
+1. **一个 `create_app` 引导所有服务**（`common_app.bootstrap`）：Nacos 注册、Redis/MySQL/存储/arq/ES/Neo4j 连接池、中间件栈、异常处理全在 lifespan 里，服务自己只声明路由和开关（需要装配业务参数再加一个 `on_ready` 钩子）。依赖初始化失败会回滚 Nacos 注册，不留下不可用实例。
+2. **上层鉴权、底层裸查**：功能权限点只在路由入口校验一次，行级可见与可操作全部由 `resource_guard` 的 ACL 判定；ES/Neo4j/存储只按上层给定的 `kb_id` 白名单裸查，自己不做任何权限判断。
+3. **环境差异只存在于 Nacos**：代码里不写死任何连接串；`data_id` 就是服务名，端口用 `<服务名>_port` 环境变量覆盖。
+4. **权限点即菜单**：`tb_menu` 里 `menu_type=3` 的行就是权限点，一份数据同时驱动前端按钮显隐与后端 `@has_permission`；`sql/v2_init.sql` 的种子按后端实际校验的清单生成，两边不会脱节。
+5. **每个事实只有一个 owner、一份副本**（执行域契约，见 `docs/workflow-execution-contract.md`）：对外只有 `executionId` / `pendingApprovals` / `submit` 三个概念，内部坐标（子执行 id、暂停范围、代次）只在排障接口出现。
+6. **不做旧口径保留**：被取代的端点、字段、注释直接删除，不留 `@deprecated` 薄壳，避免新旧双轨。
+7. **存储只搬字节**：业务侧只有 `upload/download/delete/exists` 四个方法，换后端不改代码；不提供「取本地路径」的能力，因此文档解析也在内存做。
+8. **统一出入参格式**：响应一律 `ApiResponse{code, message, data}`，异常经全局处理器归一化，模型调用失败按上游状态码透传。
 
 ---
 
 ## 七、路线图
 
-1. 知识库链路落地：`common_rag`（切块 / 关键词 / RRF）+ 向量化任务 + Milvus 建表，点亮 `KNOWLEDGE_RETRIEVAL` 节点
-2. harness 智能体：在技能 / 工具 / MCP 三个资源中心之上做自主规划循环（`:9005` / `:9006`）
-3. 数据集 / 训练 / 推理 / 评估 / Notebook 模块落地
-4. K8s 清单与 Helm chart
+1. 知识库前端页面：知识库列表/配置面板/上传/文档列表/检索页（三类库分型展示）与用户组、授权弹窗
+2. 工作流 `KNOWLEDGE_RETRIEVAL` 节点接上 rag 检索链（需 workflow worker 具备 ES 与鉴权上下文）
+3. harness 智能体：在技能 / 工具 / MCP 三个资源中心之上做自主规划循环（`:9005` / `:9006`）
+4. 数据集 / 训练 / 推理 / 评估 / Notebook 模块落地
+5. K8s 清单与 Helm chart
 
 ## 八、相关文档
 
@@ -312,7 +335,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 | `docs/workflow-approval-memory.md` | 审批与记忆的状态机、需求评审结论与实现补记 |
 | `docs/workflow-design.md` | 编排模块设计 |
 | `sql/v2_init.sql` | 新环境数据库初始化唯一入口 |
-| `sql/init_nacos.yaml` | Nacos 配置样例（含 storage 段每个字段的含义） |
+| `sql/init_nacos.yaml` | Nacos 配置样例（含 storage 段每个字段的含义、两条 arq 流水线的同源关系） |
+| `docs/RAG知识库模块开发SPEC.md` | 知识库（RAG）模块需求与设计口径（三类库、双流水线、上层鉴权） |
 
 ---
 

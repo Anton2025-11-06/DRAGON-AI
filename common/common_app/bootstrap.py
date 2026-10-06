@@ -101,9 +101,10 @@ def create_app(service_name: str,
                enable_httpx_pool: bool = True,
                enable_storage: bool = False,
                enbale_arq_workflow_redis: bool = False,
-               enable_arq_rag_redis: bool = False,
+               enable_arq_ragflow_redis: bool = False,
                enable_es: bool = False,
-               enable_neo4j: bool = False
+               enable_neo4j: bool = False,
+               on_ready: Optional[Callable[[dict], Awaitable[None]]] = None
                ) -> FastAPI:
     """
     统一的 FastAPI 服务引导工厂：
@@ -121,10 +122,13 @@ def create_app(service_name: str,
     :param enable_rate_limit: 是否开启 Redis 限流中间件（网关使用）
     :param enable_operate_log: 是否开启操作日志中间件（RBAC 审计使用，需 MySQL）
     :param enbale_arq_workflow_redis: 是否建工作流投递队列的连接池（读 Nacos 的 arq_workflow 段）
-    :param enable_arq_rag_redis: 是否建知识库摄取队列的连接池（读 arq_ragflow 段）。
+    :param enable_arq_rag_redis: 是否建知识库解析队列的连接池（读 arq_ragflow 段）。
         生产者与 rag worker 必须读到同一段的 redis.url，否则任务投了没人消费
     :param enable_es: 是否初始化 Elasticsearch 全局单例（读 Nacos 的 es 段）
     :param enable_neo4j: 是否初始化 Neo4j 全局单例（读 Nacos 的 neo4j 段）
+    :param on_ready: 全部依赖初始化成功后的回调，收到本服务的 Nacos 配置字典。
+        给「配置要落进全局单例」的模块用（如 service_rag 的 rag_settings.bootstrap）：
+        放在每个请求里懒加载会让首个请求读到默认值，放在 import 期又拿不到 Nacos 配置
     """
     port = int(os.environ.get(service_name + "_port", default_port))
 
@@ -142,7 +146,7 @@ def create_app(service_name: str,
             namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
             log_level=Config.nacos_log_level,
         )
-        await nacos_client.register_service()
+        # await nacos_client.register_service()
         yml_config = await nacos_client.get_config_content(service_name)
 
         # 暴露给业务扩展（如检索参数、向量化配置），保持 app.state.config 全服务可用
@@ -167,7 +171,7 @@ def create_app(service_name: str,
                 CustomRedisSettings.yml = await nacos_client.get_config_content(ARQ_WORKFLOW)
                 await get_arq_redis()
                 log.info("Arq workflow Redis initialized")
-            if enable_arq_rag_redis:
+            if enable_arq_ragflow_redis:
                 # 与 rag worker 同一段配置（arq_ragflow）：两个流水线可以不是同一个 Redis 实例
                 CustomRedisSettings.yml_rag = await nacos_client.get_config_content(ARQ_RAGFLOW)
                 await get_arq_redis(PIPELINE_RAG)
@@ -179,6 +183,9 @@ def create_app(service_name: str,
             if enable_neo4j:
                 await _init_neo4j(yml_config.get("neo4j", {}))
                 log.info("Neo4j initialized")
+            if on_ready is not None:
+                # 仍在 try 内：业务侧配置装配失败等于服务不可用，按下面的口径注销并阻断启动
+                await on_ready(yml_config)
 
         except Exception as e:
             # 初始化失败时回滚 Nacos 注册，避免注册了不可用实例
@@ -211,7 +218,7 @@ def create_app(service_name: str,
             if enable_es or enable_neo4j:
                 # 两个向量/图后端都是异步连接池，不关会在进程退出时报未关闭告警
                 await _close_vector_backends(enable_es, enable_neo4j)
-            if enbale_arq_workflow_redis or enable_arq_rag_redis:
+            if enbale_arq_workflow_redis or enable_arq_ragflow_redis:
                 # 按已建的池全部释放（未建过的流水线是空操作）
                 from common.common_arq.queue import close_arq_redis
 

@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """知识库检索存储（Elasticsearch）统一入口。
 
-对外只暴露三样东西：
+对外只暴露两样东西：
 - es_client：全局异步单例（init/close/ensure_index/读写检索）
 - init_es/close_es：服务与 worker 启动、退出钩子（读 Nacos 的 es 段）
-- run_sync：无事件循环上下文时的同步退化执行
 
 用法（FastAPI 服务在 lifespan 内、arq worker 在 bootstrap 内）：
     from common.common_es import init_es, es_client
@@ -16,22 +15,27 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from common.common_es.client import (AsyncEsClient, CustomError, es_client,
-                                     from_json, run_sync, to_json)
+                                     from_json, to_json)
 from common.common_es.index_mapping import INDEX_NAME, build_mapping
 
 __all__ = [
-    "AsyncEsClient", "CustomError", "es_client", "init_es", "close_es",
-    "run_sync", "to_json", "from_json", "INDEX_NAME", "build_mapping",
+    "AsyncEsClient", "CustomError", "es_client", "init_es", "close_es", "es_health",
+    "current_index", "chunk_source", "to_json", "from_json", "INDEX_NAME", "build_mapping",
 ]
 
 
 async def init_es(es_cfg: dict | None = None, *, ensure: bool = True) -> bool:
-    """初始化 ES 单例，并按需确认索引存在（幂等，返回本次是否新建了索引）。"""
+    """初始化 ES 单例，并按需确认索引存在（幂等，返回本次是否新建了索引）。
+
+    es 段必填项只有 url；认证没填就不认证（内网未开 security 的集群）。
+    """
     if not es_cfg:
         raise CustomError("缺少 es 配置段（Nacos service_rag.es / arq_ragflow.es）")
     await es_client.init(es_cfg)
+    # 建索引不再从配置取维度：dims 在建索引时固定 1024（与 rag_constant.RAG_VECTOR_DIM 同源），
+    # 配置里再给一个 vector_dim 只会和已建索引打架，且报的是 ES 写不进去而不是启动错
     if ensure:
-        return await es_client.ensure_index(int(es_cfg.get("vector_dim") or 0) or None)
+        return await es_client.ensure_index()
     return False
 
 
@@ -59,6 +63,5 @@ def chunk_source(hit: dict) -> dict[str, Any]:
     src["score"] = hit.get("score")
     src["vector_score"] = hit.get("vector_score")
     src["keyword_score"] = hit.get("keyword_score")
-    src["highlight"] = hit.get("highlight") or {}
     src["source"] = from_json(src.get("source"))
     return src
