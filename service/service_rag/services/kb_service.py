@@ -15,7 +15,8 @@
    落库前 normalize（只认白名单键，非法值回落默认），读出后再 normalize 一遍补齐缺键，
    下游（解析器 / 分块器 / 检索）拿到的永远是一份字段齐全的字典，不必各自 if key in cfg。
 4. **version 只随「会让已有切片作废」的改动 +1**：解析引擎、预处理开关、分块配置变了才 +1，
-   文档行的 parse_version 落后于它即代表需要重解析（列表页 needReparse）；
+   文档行的 parse_version 落后于它即代表上一轮的解析产物已经过期（解析任务据此决定
+   要不要复用 sidecar，不再往列表页返一个「需重解析」标记）；
    改名称、描述、检索配置不动 version——检索配置对已落库的向量毫无影响，下次检索即时生效。
 """
 from __future__ import annotations
@@ -218,6 +219,8 @@ class KnowledgeBaseService:
             kb_type, embed_model_id=req.embed_model_id,
             rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
             extract_model_id=req.extract_model_id or 0, image_model_id=req.image_model_id or 0,
+            audio_model_id=int(parse_config.get("audio_model_id") or 0),
+            video_model_id=int(parse_config.get("video_model_id") or 0),
             enable_graph=bool(req.enable_graph),
             image_understand=bool(parse_config.get("image_understand")))
         dim = RagModelService.embedding_dim(checked["embed"])
@@ -293,11 +296,15 @@ class KnowledgeBaseService:
             # 开关没开时不参与校验：库里存着一个已被删掉的模型不该拖住一次无关的保存
             extract_model_id = int(req.extract_model_id or 0) or kb.extract_model_id
             image_model_id = int(req.image_model_id or 0) or kb.image_model_id
+            # 音频/视频解析模型没有列，只存在于 parse_config：选了才验（不选不拦）
+            audio_model_id = int(parse_config.get("audio_model_id") or 0)
+            video_model_id = int(parse_config.get("video_model_id") or 0)
             checked = await RagModelService.validate_kb_models(
                 kb.kb_type, embed_model_id=kb.embedding_model_id,
                 rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
                 extract_model_id=extract_model_id if graph_enabled else 0,
                 image_model_id=image_model_id if image_understand else 0,
+                audio_model_id=audio_model_id, video_model_id=video_model_id,
                 enable_graph=bool(graph_enabled), image_understand=image_understand)
             if checked["dim"] != kb.embedding_dim:
                 raise ValueError(f"向量模型维度与知识库不一致（知识库 {kb.embedding_dim} 维）")

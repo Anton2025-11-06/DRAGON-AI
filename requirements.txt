@@ -62,8 +62,9 @@ markdown>=3.6
 #   可选依赖：未安装时 parse_engine=docling 会明确报错并提示，不影响 native/minerU
 docling>=2.15.0
 # minerU 引擎走私有化 HTTP API（用已有 httpx，无需额外 pip 依赖）
-# 分块策略：语义分块 / 递归字符分块（标题层级、正则、Excel 等自实现，仅这两类用 LangChain）
-langchain-text-splitters>=0.2.0
+# 分块策略全部自实现（固定长度/自定义分隔符/标题层级/每页/语义/Excel/正则），不再依赖 LangChain：
+#   原 langchain-text-splitters 只服务「递归字符分块」，它与自定义分隔符分块断开点同源，已合并下线
+#   （分隔符优先级 + 按长度合并 + overlap 都在 chunkers/text_strategies.py 里自实现）
 # 老格式 .doc/.ppt 解析依赖系统中安装的 LibreOffice（soffice），非 pip 依赖
 # 智能体自主规划框架（依赖 langgraph/smolagents）
 deepagents

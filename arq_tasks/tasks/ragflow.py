@@ -76,7 +76,7 @@ _BOOTSTRAPPED = False
 
 
 async def _ainit_business_redis(redis_cfg: dict, arq_setting) -> None:
-    """初始化业务 Redis（文档进度/取消/流水线锁键用），与 arq 队列连接池分开。
+    """初始化业务 Redis（文档进度/流水线锁键用），与 arq 队列连接池分开。
 
     配置里给了 host/port 就按 host/port 连；只给了 arq 的 dsn（url）就从 dsn 反推——
     两条流水线现在共用同一实例，逼运维再填写一遍 host/port 只会多出一次对不上的机会。
@@ -209,7 +209,6 @@ async def parse_document(ctx: dict, doc_id: int, options: Optional[dict] = None)
     任务体只做「驱动 + 兜异常」：状态机流转、进度写 Redis、失败落 error_msg 都在
     parse_service 里（API 侧的手工重跑走同一个方法，两条路径不可能跑出两种结果）。
     ``options`` 是投递时带上的任务选项（目前只有 sidecar 复用策略）。
-    取消在阶段边界生效（rag_constant.RAG_CANCEL_PREFIX），被取消的文档回到 PENDING 等重试。
     """
     from service.service_rag.services.parse_service import RagParseService
 

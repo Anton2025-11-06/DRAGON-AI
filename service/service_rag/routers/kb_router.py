@@ -26,6 +26,7 @@ from fastapi import APIRouter, File, Query, Request, UploadFile
 
 from common.common_constants import rag_constant as RC
 from common.common_entity.response_schema import ApiResponse
+from common.common_file_parser.engines import engine_formats
 from common.common_file_parser.entry import config_summary
 from common.common_permission.permission import get_login_user, has_permission
 from common.common_storage import MAX_FILE_SIZE
@@ -94,6 +95,14 @@ async def runtime_config(request: Request,
         "titlePathEnabled": summary["title_path_enabled"],
         "kbTypes": [{"value": t, "label": RC.KB_TYPE_LABELS.get(t, t)} for t in RC.KB_TYPES_ALL],
         "allowedExts": {t: list(e) for t, e in RC.KB_TYPE_ALLOWED_EXTS.items()},
+        # 各引擎真读得动的文档格式（解析层声明的唯一数据源）：配置页要按它写清
+        # native/docling/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移
+        "engineFormats": {e: engine_formats(e) for e in RC.PARSE_ENGINES_ALL},
+        # 媒体后缀按种类分组下发：三个「解析增强」开关的 hint 要说清各自管哪一类文件
+        "mediaExts": {RC.MEDIA_KIND_IMAGE: list(RC.RAG_IMAGE_EXTS),
+                      RC.MEDIA_KIND_AUDIO: list(RC.RAG_AUDIO_EXTS),
+                      RC.MEDIA_KIND_VIDEO: list(RC.RAG_VIDEO_EXTS)},
+        "mediaKindLabels": dict(RC.MEDIA_KIND_LABELS),
         "chunkTypes": list(RC.CHUNK_TYPES_ALL),
         "docStatuses": list(RC.DOC_STATUS_ALL),
         "graphEntityTypes": list(RC.KG_ENTITY_TYPES),

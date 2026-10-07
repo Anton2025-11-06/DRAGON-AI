@@ -133,7 +133,7 @@ class Document(Base):
     media_summary: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="音视频理解摘要（audio_video 型被检索命中的正文）")
     task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True,
-                                                   comment="最近一次 ARQ 任务号（进度轮询与取消用）")
+                                                   comment="最近一次 ARQ 任务号（进度轮询回查用）")
     error_msg: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     is_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0,

@@ -11,5 +11,6 @@ class ZhipuTextEmbedding(TextEmbeddingBase):
     provider = PROVIDER_ZHIPU
     default_model = "embedding-3"
     # 官方规定：embedding-3 的输入数组最大 64 条（单条请求总量还有个 3072 token 上限）。
-    # 比它小的调用基类仍是一次一发，只有超限才拆。
+    # 比它小的调用基类仍是一次一发，只有超限才拆；单条超长基类削成 3072 字符前缀。
     max_batch_size = 64
+    max_item_chars = 3072

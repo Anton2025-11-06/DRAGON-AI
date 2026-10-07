@@ -8,9 +8,10 @@
 - 高性能：AsyncOpenAI 与 httpx 均按 (base_url, api_key) 复用连接池客户端，避免每次
   重建 TLS 连接；原生非 OpenAI 端点(rerank / 异步视频 / multimodal-embedding)复用
   全局 common_httpx.httpx_pool。
-- 厂商的「单次请求条数/长度上限」属于协议约束，一律放在能力层拆批兜住
-  （见 text_embedding 的 max_batch_size、text_rerank 的 max_documents、
-  MultimodalContentsMixin 的 contents 配额），不让业务层为某一家改自己的批量策略。
+- 厂商的「单次请求条数/长度上限」属于协议约束，一律放在能力层拆批或削前缀兜住
+  （见 text_embedding 的 max_batch_size/max_item_chars、text_rerank 的
+  max_documents/max_item_chars、MultimodalContentsMixin 的 contents 配额），
+  不让业务层为某一家改自己的批量策略。
 """
 from __future__ import annotations
 

@@ -8,6 +8,7 @@
  *   业务组件禁止散落魔法字符串。
  */
 import {
+  MT_AUDIO_TO_TEXT,
   MT_IMAGE_UNDERSTAND,
   MT_MULTIMODAL_EMBEDDING,
   MT_TEXT_EMBEDDING,
@@ -38,7 +39,13 @@ export const KB_TYPE_LABELS: Record<string, string> = {
   audio_video: '音视频搜索',
 };
 
-/** 各类型允许后缀兜底（正常由 /runtime-config.allowedExts 下发，此为请求失败时的回退） */
+/**
+ * 各类型允许后缀兜底（正常由 /runtime-config.allowedExts 下发，此为请求失败时的回退）。
+ *
+ * doc 型也收图片/音频/视频：这类文件解析引擎抽不出正文，由解析配置里的
+ * 音频/视频解析模型先转写成文字，之后的分块与向量化和普通文档同一条链路。
+ * 真值在 rag_constant.KB_TYPE_ALLOWED_EXTS（静态对账脚本比对两处）。
+ */
 export const KB_TYPE_ALLOWED_EXTS_FALLBACK: Record<string, string[]> = {
   doc: [
     'pdf',
@@ -55,6 +62,22 @@ export const KB_TYPE_ALLOWED_EXTS_FALLBACK: Record<string, string[]> = {
     'htm',
     'json',
     'txt',
+    'jpg',
+    'jpeg',
+    'png',
+    'webp',
+    'bmp',
+    'gif',
+    'mp3',
+    'wav',
+    'm4a',
+    'aac',
+    'flac',
+    'mp4',
+    'mov',
+    'avi',
+    'mkv',
+    'webm',
   ],
   image: ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif'],
   audio_video: [
@@ -85,14 +108,19 @@ export const PARSE_ENGINE_LABELS: Record<string, string> = {
   auto: '自动选择',
 };
 
-/** 分块策略 */
+/**
+ * 分块策略
+ *
+ * 原「LangChain 递归分块」（recursive）与「自定义分隔符分块」断开点同源、只差一个重叠长度，
+ * 已合并到 delimiter（与后端 CHUNK_STRATEGIES_ALL 同清单）。存量库仍可能存着 recursive，
+ * 后端会自动按 delimiter 切分，表单回显时也归一成 delimiter。
+ */
 export const CHUNK_STRATEGIES_ALL = [
   'fixed',
   'delimiter',
   'title',
   'page',
   'semantic',
-  'recursive',
   'excel',
   'regex',
 ] as const;
@@ -102,9 +130,12 @@ export const CHUNK_STRATEGY_LABELS: Record<string, string> = {
   title: '标题层级分块',
   page: '按页分块',
   semantic: '语义分块',
-  recursive: 'LangChain 递归分块',
   excel: 'Excel 表头分块',
   regex: '正则分块',
+};
+/** 已下线的旧策略名 → 合并后的策略名（只为存量库回显，不提供选择入口） */
+export const CHUNK_STRATEGY_LEGACY: Record<string, string> = {
+  recursive: 'delimiter',
 };
 /** 只对特定扩展名有意义的策略（页面据此提示） */
 export const CHUNK_STRATEGY_EXCLUSIVE_EXT: Record<string, string[]> = {
@@ -159,6 +190,14 @@ export const CHUNK_TYPE_LABELS: Record<string, string> = {
   image: '图片',
   audio_video: '音视频',
 };
+
+/**
+ * 音频后缀（与后端 rag_constant.RAG_AUDIO_EXTS 同清单，静态对账脚本比对两处）。
+ *
+ * 对外模态只有 audio_video 一位（文档内嵌音频与独立视频文件合流在同一位上）：检索页
+ * 一律用 <video> 渲染会把音频显示成一块黑屏，只能按媒体地址的后缀挑播放器。
+ */
+export const RAG_AUDIO_EXTS = ['mp3', 'wav', 'm4a', 'aac', 'flac'];
 
 /** 检索模式 */
 export const RETRIEVE_MODES_ALL = ['HYBRID', 'KEYWORD', 'VECTOR'] as const;
@@ -361,6 +400,14 @@ export interface RuntimeConfig {
   titlePathEnabled?: boolean;
   kbTypes?: Array<{ label: string; value: string }>;
   allowedExts?: Record<string, string[]>;
+  /**
+   * 各解析引擎真读得动的文档格式（数据源是解析层引擎类的 formats 声明）。
+   * 面板要按它写清 native/docling/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移。
+   */
+  engineFormats?: Record<string, string[]>;
+  /** 媒体后缀按种类分组（image/audio/video）：三个解析增强开关的提示按它说各自管哪一类文件 */
+  mediaExts?: Record<string, string[]>;
+  mediaKindLabels?: Record<string, string>;
   chunkTypes?: string[];
   docStatuses?: string[];
   graphEntityTypes?: string[];
@@ -400,7 +447,6 @@ export interface DocumentResp {
   mediaType?: 'audio_video' | 'image' | 'text';
   parserEngine?: string;
   parseVersion: number;
-  needReparse: boolean;
   status?: string;
   statusLabel?: string;
   vectorized: boolean;
@@ -499,11 +545,6 @@ export const GetDocOriginal = (docId: number) =>
 
 export const RenameDoc = (docId: number, title: string) =>
   defHttp.put<boolean>(`${BASE}/documents/${docId}/title`, { title });
-
-export const CancelDoc = (docId: number, reason = '用户取消') =>
-  defHttp.post<{ message?: string }>(
-    `${BASE}/documents/${docId}/cancel?reason=${encodeURIComponent(reason)}`,
-  );
 
 export const RetryDocs = (data: DocActionReq) =>
   defHttp.post<{ accepted: number; rejected: number }>(
@@ -763,3 +804,12 @@ export const fetchImageModels = () => optionsOf(MT_IMAGE_UNDERSTAND);
 
 /** 音视频理解模型（audio_video 型生成摘要用） */
 export const fetchUnderstandModels = () => optionsOf(MT_VIDEO_UNDERSTAND);
+
+/**
+ * 音频解析模型（doc 型库收到音频文件时转写成正文）。
+ * 与上面的 fetchUnderstandModels 是两个能力：一个是音频转文字（ASR），一个是看视频说话。
+ */
+export const fetchAudioModels = () => optionsOf(MT_AUDIO_TO_TEXT);
+
+/** 视频解析模型（doc 型库收到视频文件时描述成正文），与媒体摘要复用同一个能力 */
+export const fetchVideoModels = () => optionsOf(MT_VIDEO_UNDERSTAND);

@@ -17,15 +17,31 @@ class TextEmbeddingBase(BaseModel):
     not be larger than 10.: input.contents``）。这里按子类声明的上限在基类内部顺序拆批，
     送多少条就拿回多少条且顺序不变——上层（rag 解析、工作流节点）不该为了某一家的上限
     改自己的批量策略。0/负数 = 不拆，按部署自己的上限发。
+
+    ``max_item_chars`` 是**单条文本能送多长**（厂商 token 上限，各家不同）：通义
+    text-embedding-v3/v4 每条最长 8192 token、智谱 embedding-3 每条 3072 token，超了厂商
+    直接 400（``InternalError.Algo.InvalidParameter: Range of input length should be
+    [1, 8192]``）。它与条数上限一样归本层兜：一条超长不是它自己失败，是**同一批里其余
+    切片陪着一起失败**（上层拿不到等长向量就整篇文档 FAILED）。0/负数 = 不削。
+
+    口径沿用 text_rerank：拿「字符」当最严口径而不是真算 token（中文一字一 token 时等价，
+    英文场景只会更保守），不为此引一个分词器。
+
+    一个必须知道的取舍：这里只削「送去向量化的文本」，ES/MySQL 里的切片正文一个字不动
+    （展示与溯源仍完整）；代价是被削掉的那半截内容不再有任何向量语义——长块「命不中后半
+    句」是这个设计的固有结果，想根治得把块切小（知识库的分块配置），不是在这里放宽上限。
     """
 
     category = MT_TEXT_EMBEDDING
-    # 单次请求文本条数上限：由各供应商子类按自家协议声明，基类不猜
+    # 单次请求文本条数 / 单条长度上限：由各供应商子类按自家协议声明，基类不猜
     max_batch_size: int = 0
+    max_item_chars: int = 0
 
     async def ainvoke(self, input: Union[str, list] = None, **kwargs) -> ModelResult:
         if input is None:
             raise ValueError("文本向量需提供 input")
+        # 先削单条长度再拆批：一条对一条，削完条数与下标都不变，对齐不受影响
+        input = self._fit(input) if isinstance(input, str) else [self._fit(t) for t in input]
         params = {k: v for k, v in {**self.extra, **kwargs}.items() if v is not None}
         size = int(self.max_batch_size or 0)
         if isinstance(input, str) or size < 1 or len(input) <= size:
@@ -36,6 +52,18 @@ class TextEmbeddingBase(BaseModel):
         responses = [await self._request(items[i:i + size], params)
                      for i in range(0, len(items), size)]
         return self._to_result(responses)
+
+    def _fit(self, text: Any) -> Any:
+        """按厂商单条长度上限取前缀（与 text_rerank._fit 同一个口径）。
+
+        非字符串原样交出——长度不是这里能算的，也不该由这里猜。
+        不记日志：一个宽表可能几十块全超长，逐条 warning 会把 worker 日志冲干净，
+        而这件事的排查入口本来就应该是「这块内容为什么召不回」而不是「它被削过」。
+        """
+        limit = int(self.max_item_chars or 0)
+        if not isinstance(text, str) or not limit or len(text) <= limit:
+            return text
+        return text[:limit]
 
     async def _request(self, input: Union[str, list], params: dict):
         """发一次 /embeddings 请求（拆批后每批一次）。"""
