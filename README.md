@@ -52,7 +52,19 @@
 
 
 
-### 4. 执行引擎与基础设施
+### 4. 知识库与 RAG（含检索评测）
+
+- **三类知识库**：文档库 / 图文库 / 音视频库分型配置，库级选择默认检索参数与生成模型；库表 + ES 双索引 + Neo4j 图谱三份状态由服务层统一维护
+- **文档解析与切片**：`common_file_parser` 双引擎（native：pypdf/docx/xlsx… · minerU 私有化 HTTP）+ auto 调度、8 种分块策略，切片经向量模型入 ES `rag_knowledge_chunk`
+- **混合检索**：BM25 + 1024 维 dense_vector kNN 按请求动态加权融合 · 重排模型按请求选（不选则不重排）· 可叠加 LightRAG 式图谱检索一路（实体/关系投影入 `rag_kg_vector`）
+- **知识图谱流水线**：文档抽取实体/关系写 Neo4j，并可做图谱向量投影作为检索增强（纯 CPU，走 ragflow worker）
+- **资源级 ACL 授权**：知识库按动作粒度（查看 / 使用 / 编辑 / 文档 / 评测 …）授权到用户 / 部门 / 用户组，上层路由只校验一次、底层按 `kb_id` 白名单裸查
+- **RAGAS 知识评测**：指定知识库、用户配置问答对（手工录入多条，或下载 Excel 模板批量填写后上传导入），并发生成答案并对 5 大指标（faithfulness / answer_relevancy / context_precision / context_recall / answer_correctness）+ 三段耗时（召回 / 生成 / 打分）打分，结果落库存历史，评测走 ARQ 后台异步执行
+- **开放 API**：对外提供知识库检索端点（API Key 鉴权 + 限流），单次最多 100 文件
+
+
+
+### 5. 执行引擎与基础设施
 
 - **异步执行**：arq + Redis 分片队列（`workflow_queue:split_{N}`），按 `crc32(executionId)` 稳定路由，多 worker 横向扩展
 - **统一存储抽象**：`StorageBackend` 本地目录 / 阿里云 OSS（官方 SDK V2 异步客户端）两种实现，按 Nacos `storage:` 段或环境变量切换；**无盘化**——后端只搬字节，文档解析在内存里做
@@ -72,7 +84,9 @@
 | 业务网关 | `service_gateway` :18000 | 服务路由转发（Nacos 发现）、JWT 鉴权、模块限流、操作日志、trace-id、API Key 鉴权翻译 |
 | AI 模型网关 | `service_gateway` | `/api/model` OpenAI 兼容入口、12 类能力分发、流式透传、双层限流 |
 | 工作流编排 | `service_workflow` :9003 | 画布、21 类节点、submit 契约、审批与嵌套、SSE/WS、快照恢复、超时与看门狗、记忆、工具/MCP/技能/沙箱、模板、API Key 开放 |
-| 异步执行 | `arq_tasks` | 分片队列、多进程 worker、健康上报、幂等投递 |
+| 知识库 / RAG | `service_rag` :9002 | 三类库配置、文档上传与摄取进度、混合检索（BM25+dense+重排+图谱增强）、Neo4j 图谱流水线、资源级 ACL 授权、RAGAS 知识评测、开放检索 API |
+| 知识检索节点 | `service_workflow` | `KNOWLEDGE_RETRIEVAL` 节点已接通（HTTP 调 `service_rag` 检索），画布节点表单可选可配 |
+| 异步执行 | `arq_tasks` | 分片队列、多进程 worker（workflow 与 ragflow 两条流水线）、健康上报、幂等投递 |
 | 统一存储 | `common_storage` | 本地 / 阿里云 OSS 双实现、预签名 URL、无盘化读写 |
 | 前端 | `ui-ai` :5666 | vben v5 单页应用：以上全部模块的界面 |
 
@@ -80,8 +94,6 @@
 
 | 模块 | 现状 |
 |---|---|
-| 知识库 `service_rag` :9002 | 库表与 kb / 检索接口的骨架已建，但依赖的 `common_rag`（切块/关键词/RRF）与 `arq_tasks.tasks.vectorize` 尚未落地，**服务当前 import 即失败**；Milvus 客户端层已备 |
-| 知识检索节点 | 工作流 `KNOWLEDGE_RETRIEVAL` 执行器已实现，表单里标灰不可选，等知识库就绪 |
 | harness 智能体 | 技能中心、工具中心、MCP 中心的接口与界面在工作流服务内已可用；独立的自主规划 agent 循环未落地，端口 :9005 / :9006 与常量已预留 |
 
 ### 📋 规划中（只有空包骨架）
@@ -106,7 +118,7 @@
 
 ### 3.2 新环境初始化（四步）
 
-**1) 建库建表灌种子** —— 一份文件搞定：24 张业务表 + 角色 / 管理员 / 部门 / 菜单 / 按钮权限点。
+**1) 建库建表灌种子** —— 一份文件搞定：28 张业务表 + 角色 / 管理员 / 部门 / 菜单 / 按钮权限点。
 
 ```bash
 # 换库名只改文件 PART 0 的两处（CREATE DATABASE + USE）
@@ -130,8 +142,8 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 
 初始账号 `admin / Admin@123`，**首次登录后立刻改密码**。
 
-存量老库要跟上最新的列与权限点，用 `sql/old/` 下的增量脚本逐条执行（每个脚本头部写清了改哪张表）；
-`sql/old/new_init_.sql` 与 `sql/old/workflow_schema.sql` 已被 `v2_init.sql` 取代，只作为来源参考保留。
+存量老库要跟上最新的列与权限点，按版本跑根目录下的增量脚本（`sql/v2_2_kb_upgrade.sql` 知识库升级、`sql/v2_3_rag_eval_upgrade.sql` 知识评测）；
+更早的历史增量在 `sql/old/` 下逐条执行（每个脚本头部写清了改哪张表）；`sql/old/new_init_.sql` 与 `sql/old/workflow_schema.sql` 已被 `v2_init.sql` 取代，只作为来源参考保留。
 
 ### 3.3 本机开发启动
 
@@ -232,6 +244,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 | 智能体 | MCP 官方 Python SDK · 沙箱进程隔离（psutil）· 代码节点走同一沙箱；自主规划框架 deepagents 仅声明了依赖，循环未落地 |
 | 向量与检索 | ES 双索引 `rag_knowledge_chunk`（切片）+ `rag_kg_vector`（图谱实体/关系投影）：BM25 + 1024 维 dense_vector kNN 按请求动态加权融合 · 重排模型按请求选（不选就不重排）· 可叠加 LightRAG 式图谱检索一路 · 文本/图片/音视频共用一个向量空间 |
 | 文档解析 | `common_file_parser`：native（pypdf/docx/xlsx…）· minerU（私有化 HTTP）双引擎 + auto 调度，8 种分块策略（单块上限 20000 字） |
+| 知识评测 | RAGAS（SingleTurnSample + EvaluationDataset）5 大指标，自写 langchain-core 适配器（`RagasChatModel`/`RagasEmbeddings`）将本仓模型服务接入 ragas 裁判，评测走 ragflow 队列并发与后台异步 |
 | 可观测 | loguru + 自研 `x-trace-id` 链路（OpenTelemetry 依赖已声明，尚未接入代码） |
 | 前端 | Vue 3.5 · TypeScript · Vite · vben v5（pnpm + turbo monorepo）· ant-design-vue · Vue Flow 画布 · CodeMirror/Monaco |
 | 鉴权 | JWT + Redis 会话 · API Key 双通道 · RBAC 权限点 |
@@ -260,9 +273,9 @@ docker compose -f docker/docker-compose.yml up -d --build
 │   │   ├── execution/            #     执行域：轮次请求 / 暂停状态 / 审批投影 / 执行树 / submit 解析
 │   │   ├── workflow_engine/      #     图执行引擎（nodes / 上下文 / 校验 / 快照）
 │   │   ├── routers|services|models|schemas|utils/
-│   ├── service_rag/              #   :9002  知识库：三类库配置/文档/摄取进度/混合检索/图谱/开放 API
-│   │   ├── services/             #     kb·doc·task(入队与状态机)·ingest·graph·retrieval·rag_settings
-│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / open
+│   ├── service_rag/              #   :9002  知识库：三类库配置/文档/摄取进度/混合检索/图谱/评测/开放 API
+│   │   ├── services/             #     kb·doc·task·parse·graph·retrieval·rag_eval·ragas_adapter·kg_search/kg_vector·rag_settings
+│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / eval / open
 │   └── service_datasets|train|inference|eval_model|notebook/   # 规划中，空包
 ├── arq_tasks/                    # 两条流水线的 worker 配置 + 任务函数 + 多进程启动入口（run_workers -t）
 ├── ui-ai/                        # 前端 vben v5 monorepo（apps/web-antd 是实际使用的 app）
@@ -292,7 +305,7 @@ docker compose -f docker/docker-compose.yml up -d --build
        ▼              ▼               ▼               ▼
   system :9001    login :9004    workflow :9003    rag :9002
   RBAC/模型广场    JWT+会话       画布/submit/审批    知识库(三类库)
-  审计/监控/限流                 工具/MCP/技能       配置/文档/检索/图谱/开放API
+  审计/监控/限流                 工具/MCP/技能       配置/文档/检索/图谱/评测/开放API
        │                             │                   │
        │                             ▼ 异步执行（投 Redis 分片队列）
        │                  ┌────────────────────────┐  ┌────────────────────────┐
@@ -321,11 +334,10 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 ## 七、路线图
 
-1. 知识库前端页面：知识库列表/配置面板/上传/文档列表/检索页（三类库分型展示）与用户组、授权弹窗
-2. 工作流 `KNOWLEDGE_RETRIEVAL` 节点接上 rag 检索链（需 workflow worker 具备 ES 与鉴权上下文）
-3. harness 智能体：在技能 / 工具 / MCP 三个资源中心之上做自主规划循环（`:9005` / `:9006`）
-4. 数据集 / 训练 / 推理 / 评估 / Notebook 模块落地
-5. K8s 清单与 Helm chart
+1. 知识库：图谱向量投影（`rag_kg_vector`）与检索融合策略持续调优；音视频库分型展示深化
+2. harness 智能体：在技能 / 工具 / MCP 三个资源中心之上做自主规划循环（`:9005` / `:9006`）
+3. 数据集 / 训练 / 推理 / 评估 / Notebook 模块落地
+4. K8s 清单与 Helm chart
 
 ## 八、相关文档
 

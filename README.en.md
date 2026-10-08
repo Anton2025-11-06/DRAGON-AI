@@ -55,7 +55,19 @@
 
 ![Workflow canvas](docs/workflow.png)
 
-### 1.4 Execution engine & infrastructure
+### 1.4 Knowledge base & RAG (with retrieval evaluation)
+
+- **Three knowledge-base types**: document / image-text / audio-video, each with per-library default retrieval parameters and generation model; the service keeps the table, the ES indexes and the Neo4j graph in sync
+- **Parsing & chunking**: `common_file_parser` with two engines (native: pypdf/docx/xlsx… · minerU private HTTP) + auto dispatch and 8 chunking strategies; chunks are vectorized into ES `rag_knowledge_chunk`
+- **Hybrid retrieval**: BM25 + 1024-dim dense_vector kNN fused with per-request weights · rerank model chosen per request (no model, no rerank) · an optional LightRAG-style graph retrieval path can be merged (entity/relation projection into `rag_kg_vector`)
+- **Knowledge-graph pipeline**: documents are mined for entities/relations into Neo4j, optionally vector-projected as a retrieval enhancement (pure CPU, runs on the ragflow worker)
+- **Row-level ACL**: a knowledge base is granted per action (view / use / edit / document / evaluate …) to users / departments / user groups; checked once at the route entry, the lower layers query raw by `kb_id` allow-list
+- **RAGAS evaluation**: pick a knowledge base, configure Q-A pairs (enter several by hand, or fill and upload the downloadable Excel template); answers are generated concurrently and scored on 5 metrics (faithfulness / answer_relevancy / context_precision / context_recall / answer_correctness) + three latency phases (recall / generate / score); results persist as history and the run executes asynchronously on ARQ
+- **Open API**: knowledge-base retrieval endpoints for external callers (API-key auth + rate limit), up to 100 files per call
+
+
+
+### 1.5 Execution engine & infrastructure
 
 - **Async execution**: arq + Redis sharded queues (`workflow_queue:split_{N}`), routed by `crc32(executionId)` so one run always lands on the same shard; horizontally scalable
 - **Storage abstraction**: one `StorageBackend` with a local-directory and an Aliyun OSS implementation (official SDK V2 async client), switched by the Nacos `storage:` section or env vars; **diskless** — the backend only moves bytes, document parsing happens in memory
@@ -75,7 +87,9 @@
 | Business gateway | `service_gateway` :18000 | Route forwarding (Nacos discovery), JWT auth, module rate limiting, audit log, trace-id, API-key translation |
 | AI model gateway | `service_gateway` | `/api/model` OpenAI-compatible entry, 12-type dispatch, streaming passthrough, two-layer quotas |
 | Workflow orchestration | `service_workflow` :9003 | Canvas, 21 node types, submit contract, nested approval, SSE/WS, snapshot recovery, timeouts & watchdog, memory, tool/MCP/skill/sandbox, templates, API-key serving |
-| Async execution | `arq_tasks` | Sharded queues, multi-process workers, health reporting, idempotent enqueue |
+| Knowledge base / RAG | `service_rag` :9002 | Three kb types, upload & ingestion progress, hybrid retrieval (BM25+dense+rerank+graph enhancement), Neo4j graph pipeline, row-level ACL, RAGAS evaluation, open retrieval API |
+| Knowledge retrieval node | `service_workflow` | `KNOWLEDGE_RETRIEVAL` is wired up (calls `service_rag` retrieval over HTTP); selectable and configurable in the node palette |
+| Async execution | `arq_tasks` | Sharded queues, multi-process workers (the workflow and ragflow pipelines), health reporting, idempotent enqueue |
 | Storage abstraction | `common_storage` | Local + Aliyun OSS, presigned URLs, diskless byte transfer |
 | Front end | `ui-ai` :5666 | vben v5 SPA covering every module above |
 
@@ -83,8 +97,6 @@
 
 | Module | Status |
 |---|---|
-| Knowledge base `service_rag` :9002 | Tables and the kb / retrieval skeletons exist, but the `common_rag` helpers (chunking / keywords / RRF) and `arq_tasks.tasks.vectorize` are not implemented — **the service currently fails on import**. The Milvus client layer is ready |
-| Knowledge retrieval node | The `KNOWLEDGE_RETRIEVAL` executor is implemented but greyed out in the node palette until the knowledge base lands |
 | Harness agent | Skill / tool / MCP centres are usable inside the workflow service; the standalone autonomous planning loop is not, ports :9005 / :9006 and constants are reserved |
 
 ### 📋 Planned (empty skeletons only)
@@ -109,7 +121,7 @@ These reserve a package directory, a rate-limit bucket name and a gateway alias 
 
 ### 3.2 Initialising a fresh environment (four steps)
 
-**1) Create the schema and seed data** — one file covers it: 24 business tables plus role / admin / department / menu / button permission seeds.
+**1) Create the schema and seed data** — one file covers it: 28 business tables plus role / admin / department / menu / button permission seeds.
 
 ```bash
 # To use another database name, edit the two lines in PART 0 (CREATE DATABASE + USE)
@@ -141,10 +153,11 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 
 Initial account `admin / Admin@123` — **change the password right after the first login**.
 
-For an existing database that has to catch up on columns and permission points, run the incremental
-scripts under `sql/old/` one by one; each header states which table it alters.
-`sql/old/new_init_.sql` and `sql/old/workflow_schema.sql` have been superseded by `v2_init.sql` and
-are kept only as provenance.
+For an existing database that has to catch up on columns and permission points, run the incremental scripts
+at the `sql/` root by version (`sql/v2_2_kb_upgrade.sql` for the knowledge base, `sql/v2_3_rag_eval_upgrade.sql`
+for RAGAS evaluation); older incrementals live under `sql/old/` and are run one by one, each header states which
+table it alters. `sql/old/new_init_.sql` and `sql/old/workflow_schema.sql` have been superseded by `v2_init.sql`
+and are kept only as provenance.
 
 ### 3.3 Running locally
 
@@ -246,6 +259,7 @@ The `k8s/` directory is reserved; no manifests yet.
 | Agents | Official MCP Python SDK · sandboxed process isolation (psutil) · code nodes share the same sandbox; `deepagents` is declared as a dependency but the planning loop is not implemented |
 | Retrieval | two ES indexes, `rag_knowledge_chunk` (chunks) + `rag_kg_vector` (entity/relation projection): BM25 + 1024-dim dense_vector kNN fused with per-request weights · rerank model chosen per request (no model, no rerank) · an optional LightRAG-style graph retrieval path can be merged in · text / image / audio-video share one vector space |
 | Document parsing | `common_file_parser`: native (pypdf/docx/xlsx…) · minerU (private HTTP API), auto engine selection, 8 chunking strategies (20000 chars per chunk cap) |
+| Evaluation | RAGAS (SingleTurnSample + EvaluationDataset), 5 metrics; a home-grown langchain-core adapter (`RagasChatModel`/`RagasEmbeddings`) wires this repo's model services into the ragas judge; runs concurrently and asynchronously on the ragflow queue |
 | Observability | loguru + home-grown `x-trace-id` (OpenTelemetry dependencies declared, not yet wired into code) |
 | Front end | Vue 3.5 · TypeScript · Vite · vben v5 (pnpm + turbo monorepo) · ant-design-vue · Vue Flow canvas · CodeMirror/Monaco |
 | AuthZ/AuthN | JWT + Redis session · dual-channel API key · RBAC permission points |
@@ -274,9 +288,9 @@ The `k8s/` directory is reserved; no manifests yet.
 │   │   ├── execution/            #     round request / pause state / approval projection / exec tree / submit resolver
 │   │   ├── workflow_engine/      #     graph engine (nodes / context / validation / snapshots)
 │   │   ├── routers|services|models|schemas|utils/
-│   ├── service_rag/              #   :9002  knowledge base: configs / documents / progress / retrieval / graph / open API
-│   │   ├── services/             #     kb·doc·task(queueing + state machine)·ingest·graph·retrieval·rag_settings
-│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / open
+│   ├── service_rag/              #   :9002  knowledge base: configs / documents / progress / retrieval / graph / evaluation / open API
+│   │   ├── services/             #     kb·doc·task·parse·graph·retrieval·rag_eval·ragas_adapter·kg_search/kg_vector·rag_settings
+│   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / eval / open
 │   └── service_datasets|train|inference|eval_model|notebook/   # planned, empty packages
 ├── arq_tasks/                    # worker settings for both pipelines + task functions + multi-process launcher
 ├── ui-ai/                        # front end, vben v5 monorepo (apps/web-antd is the one we ship)
@@ -306,7 +320,7 @@ The `k8s/` directory is reserved; no manifests yet.
        ▼              ▼               ▼               ▼
   system :9001    login :9004    workflow :9003    rag :9002
   RBAC / models   JWT+session    canvas/submit     knowledge base (3 types)
-  audit/monitors                 approval/tools    configs/docs/retrieval/graph/open API
+  audit/monitors                 approval/tools    configs/docs/retrieval/graph/eval/open API
        │                             │                   │
        │                             ▼ async execution (Redis sharded queue)
        │                  ┌────────────────────────┐  ┌────────────────────────┐
@@ -335,11 +349,10 @@ The `k8s/` directory is reserved; no manifests yet.
 
 ## 7. Roadmap
 
-1. Knowledge base front-end pages: list / config panel / upload / document table / retrieval page (one layout per kb type), plus the user-group page and the grant dialog
-2. Wire the workflow `KNOWLEDGE_RETRIEVAL` node to the rag retrieval path (the workflow worker needs ES and an auth context first)
-3. Harness agent: an autonomous planning loop on top of the skill / tool / MCP resource centres (`:9005` / `:9006`)
-4. Datasets / training / inference / evaluation / Notebook
-5. Kubernetes manifests and a Helm chart
+1. Knowledge base: keep tuning the graph vector projection (`rag_kg_vector`) and the retrieval fusion strategy; deepen the audio-video kb layout
+2. Harness agent: an autonomous planning loop on top of the skill / tool / MCP resource centres (`:9005` / `:9006`)
+3. Datasets / training / inference / evaluation / Notebook
+4. Kubernetes manifests and a Helm chart
 
 ## 8. Further reading
 
