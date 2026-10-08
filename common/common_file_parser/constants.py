@@ -10,7 +10,6 @@ from common.common_constants import rag_constant as RC
 
 # ==================== 引擎名（与 kb.parser_engine 同值） ====================
 ENGINE_NATIVE = RC.PARSE_ENGINE_NATIVE
-ENGINE_DOCLING = RC.PARSE_ENGINE_DOCLING
 ENGINE_MINERU = RC.PARSE_ENGINE_MINERU
 ENGINE_AUTO = RC.PARSE_ENGINE_AUTO
 ENGINES_ALL = list(RC.PARSE_ENGINES_ALL)
@@ -32,6 +31,9 @@ DEFAULT_CHUNK_OVERLAP = RC.DEFAULT_CHUNK_OVERLAP
 DEFAULT_SEPARATORS = list(RC.DEFAULT_SEPARATORS)
 # 上下文补齐（孤立图表补前后文）默认与上限：超过上限的补齐会把语义冲淡
 AUGMENT_MAX_CHARS = 2000
+# 媒体/表格切片强制补前后文的兜底窗口：全局开关没开、或页面把窗口配成 0 时按它补，
+# 保证「孤立的[图片]」至少带一段相邻正文（否则正文里没有可召回的字，向量也召不回）
+MEDIA_AUGMENT_DEFAULT = 120
 
 # ==================== 扩展名分组（决定走哪个解析分支） ====================
 EXT_PDF = {"pdf"}
@@ -48,7 +50,7 @@ EXT_NEED_ENHANCED = EXT_PDF | EXT_PPT | EXT_WORD | EXT_EXCEL
 TEXT_FORMATS = EXT_MARKDOWN | EXT_HTML | EXT_JSON | EXT_TEXT
 BINARY_FORMATS = EXT_PDF | EXT_WORD | EXT_PPT | EXT_EXCEL
 
-# 老版 office 二进制格式（.doc/.ppt）：native 与 docling 都读不动，只能靠 minerU/外部转换
+# 老版 office 二进制格式（.doc/.ppt）：native 读不动，只能靠 minerU/外部转换
 LEGACY_OFFICE = {"doc", "ppt"}
 
 # ==================== sidecar（解析产物落存储，重试不再重解析） ====================

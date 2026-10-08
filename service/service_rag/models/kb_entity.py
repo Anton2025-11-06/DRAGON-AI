@@ -15,7 +15,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import (JSON, DateTime, Integer, String, Text,
+from sqlalchemy import (JSON, DateTime, Float, Integer, String, Text,
                         UniqueConstraint, func)
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -60,7 +60,7 @@ class KnowledgeBase(Base):
         comment="图片理解模型 id（仅 doc 型且解析开关 image_understand 打开时必填）")
     parser_engine: Mapped[str] = mapped_column(
         String(16), nullable=False, default=RC.PARSE_ENGINE_NATIVE,
-        comment="native/docling/mineru（仅 doc 型生效）")
+        comment="native/mineru（仅 doc 型生效）")
     parse_config: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True, comment="预处理开关 + 引擎专有参数")
     chunk_config: Mapped[Optional[dict]] = mapped_column(
@@ -182,6 +182,87 @@ class DocumentChunk(Base):
                                                   comment="表头与行区间、图片位置框等，页面按需展开")
     created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                             comment="创建人用户ID（继承所属文档的归属人）")
+    create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    update_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(),
+                                                  onupdate=func.now())
+
+
+class RagEvalRun(Base):
+    """知识评测运行（RAGAS）：一次评测的配置快照 + 状态 + 耗时。
+
+    生成/裁判/相似度三个模型全部评测页自选（不依赖库表的 chat_model_id）：
+    - generation_model_id：召回后拼 prompt 生成答案的对话模型（text_to_text）
+    - judge_model_id：RAGAS 裁判模型（text_to_text）
+    - embed_model_id：answer_relevancy 相似度用的向量模型
+    运行历史是个人资产（仅归属人 + ADMIN 可见）：跨部门不共享，靠的是库的 eval ACL
+    才能对非本人库发起评测，不代表能看别人的评测记录。
+    """
+    __tablename__ = "tb_rag_eval_run"
+
+    run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kb_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True,
+                                       comment="被评测的知识库")
+    kb_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True,
+                                                   comment="知识库名称冗余（列表展示不必回连）")
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment="本次运行名称")
+    # 三个模型全部评测页下拉选定（与库自身配置解耦）
+    generation_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                     comment="生成答案的对话模型 id（text_to_text）")
+    judge_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                comment="RAGAS 裁判模型 id（text_to_text）")
+    embed_model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                comment="answer_relevancy 相似度向量模型 id")
+    # 检索参数快照（决定本次召回的形态，落库后即使库配置改了也不影响历史回看）
+    top_k: Mapped[int] = mapped_column(Integer, nullable=False, default=RC.RETRIEVE_DEFAULTS["top_k"])
+    score_threshold: Mapped[float] = mapped_column(Float, nullable=False,
+                                                   default=RC.RETRIEVE_DEFAULTS["score_threshold"])
+    retrieval_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True,
+                                                          comment="VECTOR/KEYWORD/HYBRID，NULL=库默认")
+    with_graph: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                            comment="是否开启图谱增强召回")
+    graph_source_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                     comment="图谱一路回捞的原文规模（0=默认）")
+    total_pairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="问答对总数")
+    done_pairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="已完成条项数")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=RC.EVAL_STATUS_PENDING,
+                                        index=True, comment="PENDING/RUNNING/DONE/FAILED")
+    avg_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                comment="平均逐对延迟（召回+生成，不含打分）")
+    error: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, comment="整体失败原因")
+    is_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                            comment="创建人用户ID（运行历史归属判定列）")
+    owner_dept_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="归属部门")
+    create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    update_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(),
+                                                  onupdate=func.now())
+
+
+class RagEvalItem(Base):
+    """逐问答对结果（RAGAS）：一次运行里每一对问答的召回/生成/五项得分与三段耗时。
+
+    指标列均 NULL（FLOAT）：NULL = 该项失败（某几个 ragas 指标拿不到分时不影响其余）。
+    """
+    __tablename__ = "tb_rag_eval_item"
+
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False, comment="用户问题")
+    reference: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="参考答案（标准答案）")
+    generated_answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="本次召回后生成的答案")
+    contexts: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="召回片段 [{content,score,recall,...}]（送 ragas 打分的资料）")
+    faithfulness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    answer_relevancy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    context_precision: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    context_recall: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    answer_correctness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    took_recall_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="召回耗时")
+    took_generate_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="生成耗时")
+    took_score_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="打分耗时")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=RC.EVAL_ITEM_PENDING,
+                                        comment="PENDING/DONE/FAILED")
+    error: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, comment="本项失败原因")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     update_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(),
                                                   onupdate=func.now())

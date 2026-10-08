@@ -122,8 +122,16 @@ async def chunk_excel(units: list[Unit], cfg: ChunkConfig, *,
             start = None
         header, rows = table_header(u.text)
         if not rows:
-            pieces.append(Piece(start=i, end=i + 1))
-            continue
+            # D6：table_header 只认 markdown 的 `|...|` 行。table_as_text=False 时表格已被
+            # preprocess 退成「列名=值；…」逐行文本（无竖线），这里拿不到 rows——旧写法把
+            # 整块塞成一块、chunk_size 形同虚设（实测 300 却出 9758 字一块）。按行回退：
+            # kv 文本每行自带列名，无需重贴表头，交给下面的累计逻辑逐行切；只有一行（或空）
+            # 没什么可切的，保持整块。
+            lines = [ln.strip() for ln in (u.text or "").split("\n") if ln.strip()]
+            if len(lines) <= 1:
+                pieces.append(Piece(start=i, end=i + 1))
+                continue
+            header, rows = "", lines
         size = max(200, cfg.size - len(header) - 1)
         chunk: list[str] = []
         first = True
@@ -142,9 +150,11 @@ async def chunk_excel(units: list[Unit], cfg: ChunkConfig, *,
             chunk = []
 
         for row in rows:
-            chunk.append(row)
-            if len("\n".join(chunk)) >= size:
+            # D7：改「先判断后落笔」——现存行再加这一行会超 size 就先 flush，避免一块比
+            # size 多出一整行。单行本身超长的不拆行（保留原文完整，交给 assemble 硬上限兜底）。
+            if chunk and len("\n".join(chunk)) + len(row) + 1 > size:
                 flush()
+            chunk.append(row)
         flush()
     if start is not None:
         text_ranges.append((start, len(units)))

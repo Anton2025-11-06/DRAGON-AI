@@ -37,7 +37,7 @@ RAG_IMAGE_EXTS = ["jpg", "jpeg", "png", "webp", "bmp", "gif"]
 RAG_AUDIO_EXTS = ["mp3", "wav", "m4a", "aac", "flac"]
 RAG_VIDEO_EXTS = ["mp4", "mov", "avi", "mkv", "webm"]
 
-# doc 型库的文档格式：只有这些进解析引擎（native/docling/mineru）
+# doc 型库的文档格式：只有这些进解析引擎（native/mineru，另加 auto 由后端选型）
 DOC_TEXT_EXTS = [
     "pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "csv",
     "md", "markdown", "html", "htm", "json", "txt",
@@ -64,24 +64,22 @@ KB_TYPE_GRAPH_SUPPORTED = {
 
 # 各类型的向量模型能力要求（建库时校验，选错模型等于写入一个检索不出来的向量空间）
 #   embed_any：满足其一即可作为向量模型
-#   chat_required：是否必须有问答/抽取用大模型（图谱抽取、图片描述、媒体摘要）
-#   understand_category：媒体理解模型的类型（image 型不做描述故为 None，audio_video 型必需）
+#   chat_required：是否必须有问答/抽取用大模型（只剩图谱抽取还需要它）
+# 媒体描述不再走库表的 chat_model_id：图片/音视频的「多模态描述增强」改由 parse_config
+# 里的 media_desc_enhance + 各自的模型位决定（未开增强就完全不需要理解模型）。
 KB_TYPE_MODEL_REQ = {
     KB_TYPE_DOC: {
         "embed_any": ["text_embedding", "multimodal_embedding"],
         "chat_required": False,          # 不开图谱与图片增强时可以为空
-        "understand_category": None,
     },
     KB_TYPE_IMAGE: {
         # 文搜图要求文本与图片落在同一向量空间，故只能多模态向量
         "embed_any": ["multimodal_embedding"],
         "chat_required": False,
-        "understand_category": None,      # SPEC §8：不做图片自动描述
     },
     KB_TYPE_AUDIO_VIDEO: {
         "embed_any": ["multimodal_embedding"],
-        "chat_required": True,
-        "understand_category": "video_understand",  # SPEC §9：整条媒体的综合描述
+        "chat_required": False,
     },
 }
 
@@ -226,15 +224,18 @@ MEDIA_KIND_UNDERSTAND_OPTION = {
 
 
 # =====================================================================================
-# 四、解析引擎（SPEC §7.2 三选一 + 自动）
+# 四、解析引擎（SPEC §7.2：native + minerU + 自动）
+#   docling 已下线：它的价值（版面分析/表格还原）与 minerU 重叠，而它要在 worker 里
+#   装几百 MB 的模型，部署成本比收益高。存量库存着 docling 的按 native 跑（见 LEGACY）。
 # =====================================================================================
 PARSE_ENGINE_NATIVE = "native"    # 默认：pypdf/python-docx/openpyxl 等轻量库，无模型依赖
-PARSE_ENGINE_DOCLING = "docling"  # pip 依赖，CPU 版面分析与表格还原
 PARSE_ENGINE_MINERU = "mineru"    # 私有化 HTTP API，扫描件/公文/双栏教材高精度
 PARSE_ENGINE_AUTO = "auto"        # 由文档复杂度自动选引擎（解析时回填实际使用的引擎）
 
-PARSE_ENGINES_ALL = [PARSE_ENGINE_NATIVE, PARSE_ENGINE_DOCLING, PARSE_ENGINE_MINERU,
-                     PARSE_ENGINE_AUTO]
+PARSE_ENGINES_ALL = [PARSE_ENGINE_NATIVE, PARSE_ENGINE_MINERU, PARSE_ENGINE_AUTO]
+# 已下线引擎的兼容映射：存量 tb_knowledge_base.parser_engine 里可能还写着 docling，
+# 不改库而是在归一时映射过去——否则历史库会在建库校验里报「未知引擎」，用户什么都没改就存不进去。
+PARSE_ENGINE_LEGACY = {"docling": PARSE_ENGINE_NATIVE}
 
 # 解析与预处理可配置项默认值（SPEC §7.3 预处理开关 + §7.4 图片智能解析，默认全关）
 PARSE_OPTION_DEFAULTS = {
@@ -247,17 +248,21 @@ PARSE_OPTION_DEFAULTS = {
     "image_understand": False,       # 图片解析增强：关=图片只传存储并回填正文位置，开=再用图片理解模型补一段描述
     "audio_understand": False,       # 音频解析增强：开=文档内嵌音频走音频解析模型转成文字
     "video_understand": False,       # 视频解析增强：开=文档内嵌视频走视频解析模型描述成文字
-    "image_desc_prompt": "",         # 图片描述提示词，留空用内置默认
+    "image_desc_prompt": "",         # 图片描述提示词，留空用内置默认（页面上已撤这一栏，只作存量透传）
     # 文档型知识库收到图片/音频/视频**文件**时的转写模型（tb_model.id，0=未配置）：
     #   图片复用库上的 image_model_id 一位（它与文档内嵌图片增强是同一个模型，公用配置）；
     #   音频与视频没有现成的列，且既服务独立文件转写也服务文档内嵌媒体的解析增强。
     "audio_model_id": 0,             # 音频解析模型（audio_to_text）：整条音频转写成正文
     "video_model_id": 0,             # 视频解析模型（video_understand）：整条视频描述成正文
     "video_desc_prompt": "",         # 视频内容描述提示词，留空用内置默认
+    # 图片型/音视频型知识库的「多模态描述增强」（需求：这两种库的关键词一路要有可检的文字）：
+    #   关掉 = 切片的正文只写文件名，关键词只能按文件名命中，一条媒体只付一次向量调用；
+    #   打开 = 再付模型调用生成综合描述，正文变成「文件名 + 描述」，向量也落在这段合成文本上。
+    "media_desc_enhance": False,
+    "ocr_model_id": 0,               # 图片描述增强可选的 OCR 模型（与 image_model_id 二选一）
     "table_as_text": True,           # 表格渲染成 markdown 文本块（关掉则退成「列名: 值」逐行文本，不丢数据只丢结构）
-    "keep_page_break": False,        # 保留分页标记（供「每页分块」以外的策略也能按页切）
-    # 引擎专有参数（native 无；docling/mineru 各自的开关在 engines 内读取）
-    "docling_table_format": "markdown",    # docling 表格导出形态：markdown | html
+    "keep_page_break": False,        # 插入页码标记（每页前补一个「第 N 页」标题块，供「每页分块」以外的策略也能按页切）
+    # 引擎专有参数（native 无；mineru 的开关在 engines 内读取）
     "mineru_backend": "pipeline",        # minerU 私有化服务的 backend 取值
     "mineru_timeout": 1800,              # 单文档等待上限（秒），与 Nacos mineru.timeout 同源
 }
@@ -344,7 +349,7 @@ RETRIEVE_MODES_ALL = [RETRIEVE_MODE_VECTOR, RETRIEVE_MODE_KEYWORD, RETRIEVE_MODE
 # 六、文档解析状态机（tb_document.status，大写字符串；进度明细在 Redis 见第八节）
 # =====================================================================================
 DOC_STATUS_PENDING = "PENDING"        # 已入队，等待 worker 取走
-DOC_STATUS_PARSING = "PARSING"        # 解析中（native/docling/mineru）
+DOC_STATUS_PARSING = "PARSING"        # 解析中（native/mineru）
 DOC_STATUS_ANALYZING = "ANALYZING"    # 分块 + 图片增强/媒体理解中
 DOC_STATUS_PROCESSING = "PROCESSING"  # 向量化与写 ES 中
 DOC_STATUS_PROCESSED = "PROCESSED"    # 终态：可检索
@@ -394,8 +399,9 @@ RAG_TASK_PARSE = "parse_document"            # doc 型：解析→分块→向�
 RAG_TASK_MEDIA = "parse_media_document"      # image / audio_video 型：媒体向量（+摘要）
 RAG_TASK_GRAPH = "build_document_graph"      # 文档级图谱构建（库开关系 + 手动触发），独立 graphflow 队列
 RAG_TASK_KB_PURGE = "purge_knowledge_base"   # 删库/删文档后的 ES/Neo4j/存储清理
+RAG_TASK_EVAL = "run_eval"                   # 知识评测（RAGAS）：并发召回+生成+打分+回填，ragflow 队列
 
-RAG_TASKS_ALL = [RAG_TASK_PARSE, RAG_TASK_MEDIA, RAG_TASK_GRAPH, RAG_TASK_KB_PURGE]
+RAG_TASKS_ALL = [RAG_TASK_PARSE, RAG_TASK_MEDIA, RAG_TASK_GRAPH, RAG_TASK_KB_PURGE, RAG_TASK_EVAL]
 
 # rag 流水线的任务函数模块（worker_settings_rag 注册与生产端投递共用这一处）
 RAG_TASK_MODULE = "arq_tasks.tasks.ragflow"
@@ -409,6 +415,7 @@ RAG_TASK_MODULES = {
     RAG_TASK_MEDIA: RAG_TASK_MODULE,
     RAG_TASK_KB_PURGE: RAG_TASK_MODULE,
     RAG_TASK_GRAPH: GRAPH_TASK_MODULE,
+    RAG_TASK_EVAL: RAG_TASK_MODULE,
 }
 
 
@@ -536,6 +543,50 @@ RAG_KG_CKPT_RESUME = "resume"
 RAG_KG_CKPT_RESTART = "restart"
 RAG_KG_CKPT_MODES = [RAG_KG_CKPT_RESUME, RAG_KG_CKPT_RESTART]
 
+# ---------- 图谱向量库（LightRAG 式轻量图谱检索的实体/关系两路 kNN） ----------
+# 与切片索引分家：实体/关系的可检索文本是「名字 + 摘要 + 别名」和「三元组描述」，
+# 与 chunk 的段落正文不是一个形态；混在同一索引里，chunk 检索的 size/阈值/chunk_types
+# 语义会全部失真（文档库检索还会捞出一堆实体名）。
+RAG_KG_INDEX = "rag_kg_vector"
+KG_VECTOR_KIND_ENTITY = "entity"
+KG_VECTOR_KIND_RELATION = "relation"
+KG_VECTOR_KINDS_ALL = [KG_VECTOR_KIND_ENTITY, KG_VECTOR_KIND_RELATION]
+KG_VECTOR_KIND_LABELS = {KG_VECTOR_KIND_ENTITY: "实体", KG_VECTOR_KIND_RELATION: "关系"}
+# _id 拼法：{kb_id}_{kind}_{md5(name|src+rel+dst)[:16]}——同一实体重建时按 _id 幂等覆盖，
+# 不给它建 MySQL 表：图谱的真身在 Neo4j，ES 这一份只是它的向量投影，可随时重建
+KG_VECTOR_ID_SEP = "_"
+# 向量文本的字段名（与切片索引的 ES_FIELD_* 分开，两套 mapping 互不干扰）
+KG_FIELD_KB = "kb_id"
+KG_FIELD_ORG = "org_id"
+KG_FIELD_KIND = "kind"
+KG_FIELD_NAME = "name"
+KG_FIELD_ETYPE = "etype"
+KG_FIELD_TEXT = "text"
+KG_FIELD_REFS = "refs"          # 溯源：实体名或关系串，回 Neo4j 反查 chunk 用
+KG_FIELD_EMBED = "embedding"
+KG_FIELD_CREATE_TIME = "create_time"
+
+# 图谱增强检索的默认规模与硬上限（页面可传，越界按上限截）
+#   depth：从命中实体出发沿 RELATED_TO 扩散几跳（与 kg_store 子图逐跳上限一致，别超）
+#   scale：实体/关系每一路向量召回的条数（也是进上下文的实体数上限）
+KG_RETRIEVE_DEFAULT_DEPTH = 2
+KG_RETRIEVE_DEFAULT_SCALE = 10
+KG_RETRIEVE_MAX_DEPTH = 3
+KG_RETRIEVE_MAX_SCALE = 50
+
+# 投影重建的规模与匹配阈值（写侧一个硬上限，读侧三个口径）
+#   SCAN_LIMIT：一次从 Neo4j 拉多少条源数据。投影是增量算差集的，
+#     文本没变的不再调向量模型，所以这个上限只是防「一个库几百万实体」把内存打爆
+#   MATCH_MIN_SCORE：问句向量对实体/关系向量的最低余弦分。低于它认为问句里
+#     根本没提这个实体——图谱一路的噪声全在这一层卡，不靠切片侧的 score_threshold
+#   CHUNKS_PER_ENTITY / MAX_CONTEXT_CHUNKS：实体溯源回捞进上下文的原文规模上限，
+#     图谱一路的价值是把关系说清楚，不是把整库正文塞进 prompt
+KG_VECTOR_SCAN_LIMIT = 20000
+KG_VECTOR_MATCH_MIN_SCORE = 0.5
+KG_CONTEXT_CHUNKS_PER_ENTITY = 3
+KG_CONTEXT_MAX_CHUNKS = 20
+KG_CONTEXT_MAX_TRIPLES = 60
+
 # =====================================================================================
 # 十、开放 API 与批量上传（SPEC §11.2）
 # =====================================================================================
@@ -575,4 +626,50 @@ RAG_SIDECAR_AUTO = "auto"
 RAG_SIDECAR_REUSE = "reuse"
 RAG_SIDECAR_REPARSE = "reparse"
 RAG_SIDECAR_MODES = [RAG_SIDECAR_AUTO, RAG_SIDECAR_REUSE, RAG_SIDECAR_REPARSE]
+
+# =====================================================================================
+# 十一、知识评测（RAGAS）：运行/条项状态、指标名、并发（tb_rag_eval_run / tb_rag_eval_item）
+#   状态与指标名落在 MySQL VARCHAR/DOUBLE 列与前端展示里，业务代码禁止出现字面量。
+# =====================================================================================
+# 运行状态（tb_rag_eval_run.status）
+EVAL_STATUS_PENDING = "PENDING"    # 已建 run 并入队，等待 worker 取走
+EVAL_STATUS_RUNNING = "RUNNING"    # worker 已开始跑（召回/生成/打分）
+EVAL_STATUS_DONE = "DONE"          # 终态：全部条项跑完（个别条项失败不整单 FAILED）
+EVAL_STATUS_FAILED = "FAILED"      # 终态：整体失败（入队前校验外 worker 崩溃不做看门狗，RUNNING 保持可见）
+EVAL_STATUS_ALL = [EVAL_STATUS_PENDING, EVAL_STATUS_RUNNING, EVAL_STATUS_DONE, EVAL_STATUS_FAILED]
+EVAL_STATUS_LABELS = {
+    EVAL_STATUS_PENDING: "排队中",
+    EVAL_STATUS_RUNNING: "评测中",
+    EVAL_STATUS_DONE: "已完成",
+    EVAL_STATUS_FAILED: "失败",
+}
+# 条项状态（tb_rag_eval_item.status）
+EVAL_ITEM_PENDING = "PENDING"      # 建 run 时落库的初始态
+EVAL_ITEM_DONE = "DONE"            # 召回+生成+打分均成功，至少一个指标有值
+EVAL_ITEM_FAILED = "FAILED"        # 本条失败（5 指标全 NULL + error）
+
+# 五大指标（列名与 ragas metric 名一一对应，前端表头按这个序）
+EVAL_METRIC_FAITHFULNESS = "faithfulness"
+EVAL_METRIC_ANSWER_RELEVANCY = "answer_relevancy"
+EVAL_METRIC_CONTEXT_PRECISION = "context_precision"
+EVAL_METRIC_CONTEXT_RECALL = "context_recall"
+EVAL_METRIC_ANSWER_CORRECTNESS = "answer_correctness"
+EVAL_METRICS_ALL = [
+    EVAL_METRIC_FAITHFULNESS, EVAL_METRIC_ANSWER_RELEVANCY,
+    EVAL_METRIC_CONTEXT_PRECISION, EVAL_METRIC_CONTEXT_RECALL,
+    EVAL_METRIC_ANSWER_CORRECTNESS,
+]
+EVAL_METRIC_LABELS = {
+    EVAL_METRIC_FAITHFULNESS: "忠实度",
+    EVAL_METRIC_ANSWER_RELEVANCY: "答案相关性",
+    EVAL_METRIC_CONTEXT_PRECISION: "上下文精确率",
+    EVAL_METRIC_CONTEXT_RECALL: "上下文召回率",
+    EVAL_METRIC_ANSWER_CORRECTNESS: "答案正确性",
+}
+
+# 逐问答对并发（外层 asyncio.Semaphore：每对一次召回+一次生成；
+#   ragas 内部打分另有自己的并发，不在这一层控制）
+EVAL_CONCURRENCY = 4
+# run 的 job_id 幂等标识前缀（与 rag:job:{task}:{identity} 拼法一致，identity=run_id）
+EVAL_RUN_IDENTITY_PREFIX = "eval"
 

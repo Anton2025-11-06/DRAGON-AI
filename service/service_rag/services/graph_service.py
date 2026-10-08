@@ -47,6 +47,7 @@ from service.service_rag.schemas.rag_schema import (
     GraphBuildReq, GraphEdgeResp, GraphNodeResp, GraphQueryReq, GraphResp,
 )
 from service.service_rag.services import kg_ckpt
+from service.service_rag.services import kg_vector
 from service.service_rag.services import rag_settings as settings
 from service.service_rag.services.parse_service import load_pair
 from service.service_rag.services.kb_service import KnowledgeBaseService
@@ -194,6 +195,23 @@ class RagGraphService:
                          "title_path": str(r["title_path"] or "")} for r in rows],
                 org_id=int(kb.org_id or 0), replace=True)
 
+            # 需求 9a：图谱真身落 Neo4j 后同步它的向量投影（rag_kg_vector）。
+            # 按整库算差集而不是只送本篇：实体是库内同名同类合并的，本篇会改写到
+            # 别的文档提过的实体摘要。投影失败不推翻已建好的图（与「图谱是可失败的
+            # 增强」同口径），但必须写进页面说明：检索页开了图谱增强却发现一路空，
+            # 看不到原因比建图失败更难查。
+            try:
+                embed_cfg = await RagModelService.get_config(int(kb.embedding_model_id or 0))
+                vec = await kg_vector.sync_kb_vectors(
+                    kb_id, embed_model_id=int(kb.embedding_model_id or 0),
+                    org_id=int(kb.org_id or 0), embed_config=embed_cfg)
+                if vec.get("truncated"):
+                    notes = notes + [f"实体/关系向量仅投影前 {RC.KG_VECTOR_SCAN_LIMIT} 条"]
+            except Exception as ve:  # noqa: BLE001  投影失败只降级图谱增强检索
+                log.exception(f"图谱向量投影失败（图谱已建好）: doc={doc_id} kb={kb_id}")
+                notes = notes + [f"实体/关系向量未更新（{str(ve)[:120]}），"
+                                f"图谱增强检索需重建后使用"]
+
             await _save_state(doc_id, RC.KG_STATE_DONE)
             # 结果已落 Neo4j，断点再留着没有下一步可用（下一次要么全量重抽、要么内容已变），
             #   当场清掉才不会出现「旧批次的抽取结果在新切片集上假装是新抽的」
@@ -332,19 +350,37 @@ class RagGraphService:
     async def query(login_user: dict, req: GraphQueryReq) -> dict:
         """子图查询（图谱可视化页）。
 
-        起点集合按优先级定：关键词 > 文档限定 > 库内度数最高（kg_store 里兜底）。
-        拿到起点后按 depth 逐跳展开，规模由 limit 硬卡住并如实回 truncated。
+        起点条件按**叠加（AND）**算：关键词与实体类型同时生效，两个都填就必须同时命中。
+        给了关键词却一个实体都没命中时**直接回空图并说明原因**，不退回库内度数最高：
+        退回等于把关键词悄悄丢掉，页面上看着就是「只有实体类型生效」，用户无从判断
+        到底是没搜到还是条件没生效。只有两个条件都没给时才用度数 top 兜底，
+        让页面一进来有图可看。拿到起点后按 depth 逐跳展开，规模由 limit 硬卡住并如实回 truncated。
         """
         ids = await RagGraphService.kb_scope(login_user, req.kb_ids)
         limit = int(req.limit or 0) or settings.graph_viz_default_limit()
         if not ids or not neo4j_client.ready:
-            return GraphResp(truncated=False).dump()
+            return GraphResp(message=(
+                "" if not ids else
+                ("图谱服务（Neo4j）未初始化，本次没有子图可显示"
+                 if not neo4j_client.ready else "所选范围内没有可看的文档型知识库"))).dump()
 
+        kw = (req.keyword or "").strip()
         centers: list[str] = []
-        if req.keyword:
-            centers = [str(e.get("name") or "") for e in await kg_store.search_entities(
-                ids, req.keyword, limit=limit, entity_type=req.entity_type)]
-        if not centers and req.doc_ids:
+        if kw:
+            # 实体类型在这里就带下去：与左栏「实体检索」同一个口径，两处筛出的起点应当一致
+            centers = [str(e.get("name") or "").strip() for e in await kg_store.search_entities(
+                ids, kw, limit=limit, entity_type=req.entity_type)]
+            centers = [c for c in centers if c]
+            if not centers:
+                brief = kw[:30]
+                if req.entity_type:
+                    msg = (f"没有同时匹配关键词「{brief}」与实体类型「{req.entity_type}」的实体："
+                           f"两个条件是叠加过滤，换个关键词或清空实体类型再查")
+                else:
+                    msg = (f"没有匹配关键词「{brief}」的实体：确认所选知识库已完成「构建图谱」，"
+                           f"或换个更接近实体名的关键词")
+                return GraphResp(message=msg).dump()
+        elif req.doc_ids:
             centers = [str(e.get("name") or "") for e in await kg_store.entities_by_docs(
                 ids, req.doc_ids, limit=limit)]
         raw = await kg_store.subgraph(ids, centers=centers, depth=req.depth,

@@ -230,8 +230,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 | 通信 | httpx 全局连接池（HTTP/2）· WebSocket · SSE（sse-starlette） |
 | 模型接入 | 每类能力一个 `openai_impl` / `dashscope_impl` / `zhipu_impl`，统一由 `common_model.entry` 按（能力, 供应商）分发 |
 | 智能体 | MCP 官方 Python SDK · 沙箱进程隔离（psutil）· 代码节点走同一沙箱；自主规划框架 deepagents 仅声明了依赖，循环未落地 |
-| 向量与检索 | ES 单索引 `rag_knowledge_chunk`：BM25 + 1024 维 dense_vector kNN（RRF 融合 + 可选 rerank）· 文本/图片/音视频共用一个向量空间 · rank-bm25 兼容旧链路 |
-| 文档解析 | `common_file_parser`：native（pypdf/docx/xlsx…）· docling（pip CPU）· minerU（私有化 HTTP）三引擎 + auto 调度，8 种分块策略（单块上限 20000 字） |
+| 向量与检索 | ES 双索引 `rag_knowledge_chunk`（切片）+ `rag_kg_vector`（图谱实体/关系投影）：BM25 + 1024 维 dense_vector kNN 按请求动态加权融合 · 重排模型按请求选（不选就不重排）· 可叠加 LightRAG 式图谱检索一路 · 文本/图片/音视频共用一个向量空间 |
+| 文档解析 | `common_file_parser`：native（pypdf/docx/xlsx…）· minerU（私有化 HTTP）双引擎 + auto 调度，8 种分块策略（单块上限 20000 字） |
 | 可观测 | loguru + 自研 `x-trace-id` 链路（OpenTelemetry 依赖已声明，尚未接入代码） |
 | 前端 | Vue 3.5 · TypeScript · Vite · vben v5（pnpm + turbo monorepo）· ant-design-vue · Vue Flow 画布 · CodeMirror/Monaco |
 | 鉴权 | JWT + Redis 会话 · API Key 双通道 · RBAC 权限点 |
@@ -247,7 +247,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 │   ├── common_middleware/        #   RequestLog / TokenCheck / RateLimit / OperateLog / 异常处理
 │   ├── common_permission/        #   @has_permission 权限点校验 + resource_guard 资源级 ACL
 │   ├── common_model/             #   12 类模型能力 × 3 家供应商的调用实现与 entry 分发
-│   ├── common_file_parser/       #   文档解析：三引擎 + 8 分块策略 + 预处理/图片增强
+│   ├── common_file_parser/       #   文档解析：双引擎 + 8 分块策略 + 预处理/媒体描述增强
 │   ├── common_storage/           #   StorageBackend：本地 / 阿里云 OSS，只搬字节
 │   ├── common_mysql|redis|es|neo4j|httpx|arq/  # 连接池与队列封装（es/neo4j 为全局异步单例）
 │   ├── common_entity/            #   统一响应体 ApiResponse / RBAC 实体

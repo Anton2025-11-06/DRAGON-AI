@@ -60,6 +60,16 @@ DEFAULT_GRAPH_EXTRACT_PROMPT = (
     '"relation": "关系描述"}]}\n'
     "chunk_indexes 填该实体真正出现过的切片编号（与下面的 [切片N] 对齐）。\n\n"
     "文档片段：\n{content}")
+# 图谱增强检索的问题解析模板（LightRAG 式：先问大模型「这句话里有谁/在讲什么关系」，
+# 再拿实体与关系分别去两个向量库做 kNN）。与抽取模板分开写：抽取是「从原文里找」，
+# 这里是「从问句里猜」，提示词混用会让模型把问句当成待抽取文档，回一堆原文里没有的实体。
+DEFAULT_KG_QUERY_EXTRACT_PROMPT = (
+    "你是知识图谱检索助手。从下面这个问题里抽取用户真正想查的实体与关系。\n"
+    "实体类型只能从这些里选：{entity_types}；归类不出的统一写成「其他」。\n"
+    "只抽问句里真实出现的词，不要补充你没把握的同义词；问句里没有明确关系时 relations 给空数组。\n"
+    "只输出 JSON，不要任何解释文字，结构严格为：\n"
+    '{"entities": ["实体名"], "relations": ["关系描述"]}\n\n'
+    "问题：{question}")
 
 # 已装载的配置（进程级；空字典表示还没 bootstrap 过，只影响 mineru/es 两段）
 _SECTION: dict[str, Any] = {}
@@ -185,6 +195,43 @@ def graph_extract_prompt() -> str:
     return DEFAULT_GRAPH_EXTRACT_PROMPT
 
 
+def kg_query_extract_prompt() -> str:
+    """图谱增强检索的问题解析模板（不对外开提示词配置，只跟常量走）。"""
+    return DEFAULT_KG_QUERY_EXTRACT_PROMPT
+
+
+def build_kg_query_extract_prompt(question: str) -> str:
+    """拼一次「从问句里抽实体/关系」的完整提示词。"""
+    return (kg_query_extract_prompt()
+            .replace("{entity_types}", "、".join(RC.KG_ENTITY_TYPES))
+            .replace("{question}", str(question or "").strip()))
+
+
+# 检索结果问答模板（需求 9：选了对话模型就多一栏流式回答）。
+# 不开提示词配置口子：与抽取/描述同一口径——页面能改的只有模型与参数，
+# 提示词写坏了会让「同一个问题两次回答差很远」变成无法复现的线上问题。
+DEFAULT_RAG_QA_PROMPT = (
+    "你是知识库问答助手。只依据下面给出的检索资料回答，资料里没有的信息就明说"
+    "「已知资料里没有提到」，绝不用自己的常识补充。\n"
+    "回答用中文，先给结论再分点展开，关键结论后面标〔N〕对应资料序号。\n\n"
+    "检索资料：\n{context}\n\n问题：{question}")
+
+
+def rag_qa_prompt() -> str:
+    """检索结果问答的内置模板（两个占位符按名字替，与抽取模板同一写法）。"""
+    return DEFAULT_RAG_QA_PROMPT
+
+
+def build_rag_qa_prompt(question: str, context: str) -> str:
+    """拼一次「据资料回答」的完整提示词；资料为空时不给模型一句空上下文。"""
+    body = str(context or "").strip()
+    if not body:
+        raise ValueError("没有可用于问答的检索结果（先检查知识库是否已解析出切片）")
+    return (rag_qa_prompt()
+            .replace("{context}", body)
+            .replace("{question}", str(question or "").strip()))
+
+
 def build_extract_prompt(rows: Sequence[Sequence[Any]], *,
                          entity_types: Optional[Sequence[str]] = None) -> str:
     """拼一次图谱抽取的完整提示词。
@@ -230,6 +277,12 @@ def chunk_index() -> str:
     return str((_SECTION.get(SECTION_ES) or {}).get("index") or RC.RAG_CHUNK_INDEX)
 
 
+def kg_vector_index() -> str:
+    """ES 图谱向量索引名（实体/关系两路 kNN）：与切片索引同一套环境隔离口径，
+    Nacos 的 es.kg_index 给了才覆盖常量。"""
+    return str((_SECTION.get(SECTION_ES) or {}).get("kg_index") or RC.RAG_KG_INDEX)
+
+
 # ==================== 类型与开关 ====================
 
 def check_kb_type(kb_type: Optional[str]) -> str:
@@ -250,12 +303,15 @@ def check_parser_engine(kb_type: str, parser_engine: Optional[str]) -> str:
 
     未知引擎名抛错而不是回落默认：回落会让用户以为「minerU 精度提升了」，
     实际跑的却是 native，这类静默降级比报错更难排查。
+    例外是 PARSE_ENGINE_LEGACY 里登记过的已下线引擎（docling）：它不是「填错了」，
+    而是存量库历史上真填过的那个值，按映射走并保留原值供面板回显。
     """
     if kb_type != RC.KB_TYPE_DOC:
         return RC.PARSE_ENGINE_NATIVE
     value = str(parser_engine or "").strip().lower()
     if not value:
         return RC.PARSE_ENGINE_NATIVE
+    value = RC.PARSE_ENGINE_LEGACY.get(value, value)
     if value not in RC.PARSE_ENGINES_ALL:
         raise ValueError(f"不支持的解析引擎：{parser_engine}"
                          f"（可选 {'/'.join(RC.PARSE_ENGINES_ALL)}）")
@@ -298,11 +354,14 @@ def normalize_parse_config(kb_type: Optional[str], parser_engine: Optional[str],
     options["mineru_timeout"] = mineru_options()["timeout"]
     # 媒体转写模型 id 归一成非负整数：面板清空时前端会传 null（已被上面的
     # ``v is not None`` 过滤）或空串，留成字符串会让解析层拿它去查 tb_model 时类型不符。
-    for key in ("audio_model_id", "video_model_id"):
+    for key in ("audio_model_id", "video_model_id", "ocr_model_id"):
         options[key] = _as_int(options.get(key), 0, 2 ** 31 - 1, 0)
+    # 图片/音视频型的「多模态描述增强」：merge_parse_options 只管那四个预处理开关，
+    # 这一位是后加的，不在它的名单里，不串一串就会把 "true" 当假值取反。
+    options["media_desc_enhance"] = _as_bool(options.get("media_desc_enhance"))
     options["engine"] = engine
     if engine != RC.PARSE_ENGINE_MINERU:
-        # 本进程不往解析层递 minerU 地址：选了 native/docling 却还带着 mineru 段，
+        # 本进程不往解析层递 minerU 地址：选了 native 却还带着 mineru 段，
         # 出问题时日志里会同时出现两个引擎的痕迹
         options.pop("mineru", None)
     return engine, options
@@ -367,6 +426,7 @@ def runtime_snapshot() -> dict:
         "open_api_max_files": open_api_max_files(),
         "mineru_configured": mineru_configured(),
         "es_index": chunk_index(),
+        "kg_index": kg_vector_index(),
         "vector_dim": RC.RAG_VECTOR_DIM,
         "max_chunk_chars": RC.MAX_CHUNK_CHARS,
     }
@@ -379,7 +439,9 @@ __all__ = [
     "open_api_max_files", "image_desc_prompt", "media_summary_prompt",
     "video_desc_prompt",
     "graph_extract_prompt", "build_extract_prompt",
-    "mineru_options", "mineru_configured", "chunk_index",
+    "kg_query_extract_prompt", "build_kg_query_extract_prompt",
+    "rag_qa_prompt", "build_rag_qa_prompt",
+    "mineru_options", "mineru_configured", "chunk_index", "kg_vector_index",
     "check_kb_type", "check_parser_engine", "normalize_graph_enabled",
     "normalize_parse_config", "normalize_chunk_config", "normalize_retrieve_config",
 ]

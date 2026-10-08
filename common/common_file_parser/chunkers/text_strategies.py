@@ -21,9 +21,15 @@ from common.common_file_parser.chunkers.config import ChunkConfig
 from common.common_file_parser.chunkers.pieces import Piece, Unit, text_window
 
 
-def _emit(pieces: list[Piece], start: int, end: int, parts: Sequence[str]) -> None:
-    """缓冲落一块（全空白就不落，避免出现 content="" 的切片）。"""
-    text = "\n".join(p for p in parts if p and p.strip())
+def _emit(pieces: list[Piece], start: int, end: int, parts: Sequence[str], *,
+          sep: str = "\n") -> None:
+    """缓冲落一块（全空白就不落，避免出现 content="" 的切片）。
+
+    sep 默认 "\n"（固定长度：buf 里每个元素是一整个解析块，块之间用换行隔开天经地义）；
+    delimiter 传 ""：buf 里是同一块被分隔符切开、且已把分隔符粘回尾部的分段，
+    "".join 才能一字不差还原原文（用 "\n" 会在块内部无中生有插换行，V1.2 就被钉成 V1.\n2）。
+    """
+    text = sep.join(p for p in parts if p and p.strip())
     if text.strip():
         pieces.append(Piece(start=start, end=end, parts=[text]))
 
@@ -36,6 +42,28 @@ def _full_text(units: Sequence[Unit]) -> tuple[str, list[int]]:
         offsets.append(pos)
         pos += len(u.text) + 1                 # +1 是 "\n".join 的分隔符
     return "\n".join(u.text for u in units), offsets
+
+
+def _split_keep(text: str, pattern: str) -> list[str]:
+    """按 pattern 切开但**保留分隔符**（把它粘回前一段的尾部），切片拼起来仍等于原文。
+
+    不用裸 ``re.split(pattern, text)``：不带捕获组时 Python 只回分隔符**之间**的内容，
+    分隔符本身被整个丢掉。对 .md / .txt 这类「段落被拍成单个换行块」的正文，整段文字都
+    挤在一个单元里，切完再拼就只有「句子被抽走标点」的样子（实测简历 10 句只留回 1 句的
+    内容，编号/小数点里的 . 也一起没）。捕获组让分隔符作为独立元素回来，直接续到前一段。
+    """
+    if not text:
+        return []
+    tokens = re.split(f"({pattern})", text)
+    segs: list[str] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        if segs and re.fullmatch(pattern, tok):
+            segs[-1] += tok                     # 分隔符续到前一段，原文一字不差地留着
+        else:
+            segs.append(tok)
+    return segs
 
 
 async def chunk_fixed(units: list[Unit], cfg: ChunkConfig, *,
@@ -83,11 +111,18 @@ async def chunk_delimiter(units: list[Unit], cfg: ChunkConfig, *,
     原「LangChain 递归分块」独有的能力，两个策略合并后必须都留在这里，否则删策略就等于删能力。
     重叠文字不进 block_ids（理由见本文件顶说明），与 chunk_fixed 同一口径：结算时它已经被
     当成新缓冲的第一个元素放好了，不再另拼一遍。
+
+    两点关于「原文保真」的硬约束（改动这两处前务必知道，它们是本轮修复的成果）：
+    * 分隔符要留在切片正文里（见 _split_keep）——早期版本用裸 re.split 把它整个丢了；
+    * 结算缓冲后 `start` 必须回落到**当前单元 i**，而不是 i+1：本单元的剩余分段仍属于 i，
+      推到 i+1 会让紧接的图片单元产出 [i, i) 的空区间，被 covered() 夹回成只含那张图片，
+      结果几百字的正文被判成 image 模态、block_ids 也指向图片块。
     """
     seps = [s for s in cfg.separators if s]
     # 长的分隔符排前面：交替匹配是"先出现先赢"，"。"排在"。\n"前会把换行留给下一段
     pattern = "|".join(re.escape(s) for s in sorted(seps, key=len, reverse=True))
     if not pattern:
+        cfg.warnings.append("分隔符配置为空，已按固定长度分块")
         return await chunk_fixed(units, cfg)
     size, overlap = cfg.size, cfg.overlap
     pieces: list[Piece] = []
@@ -96,27 +131,27 @@ async def chunk_delimiter(units: list[Unit], cfg: ChunkConfig, *,
     start = 0
     for i, u in enumerate(units):
         if u.kind == C.BLOCK_IMAGE:
-            _emit(pieces, start, i, buf)
+            _emit(pieces, start, i, buf, sep="")
             buf, buf_len, start = [], 0, i + 1
             pieces.append(Piece(start=i, end=i + 1))
             continue
-        segs = [s.strip() for s in re.split(pattern, u.text) if s and s.strip()]
+        segs = [s for s in _split_keep(u.text, pattern) if s and s.strip()]
         if not segs:
             continue
         for seg in segs:
             if len(seg) > size:              # 段本身超长：先结算缓冲，再滑窗切它
-                _emit(pieces, start, i + 1, buf)
-                buf, buf_len, start = [], 0, i + 1
+                _emit(pieces, start, i + 1, buf, sep="")
+                buf, buf_len, start = [], 0, i
                 for slot in text_window(seg, size, overlap):
                     pieces.append(Piece(start=i, end=i + 1, parts=[slot]))
                 continue
-            if buf_len + len(seg) + 1 > size and buf:
-                carry = "\n".join(buf)[-overlap:] if overlap else ""
-                _emit(pieces, start, i + 1, buf)
-                buf, buf_len, start = ([carry] if carry else []), len(carry), i + 1
+            if buf_len + len(seg) > size and buf:
+                carry = "".join(buf)[-overlap:] if overlap else ""
+                _emit(pieces, start, i + 1, buf, sep="")
+                buf, buf_len, start = ([carry] if carry else []), len(carry), i
             buf.append(seg)
-            buf_len += len(seg) + 1
-    _emit(pieces, start, len(units), buf)
+            buf_len += len(seg)
+    _emit(pieces, start, len(units), buf, sep="")
     return pieces
 
 
@@ -194,11 +229,19 @@ async def chunk_regex(units: list[Unit], cfg: ChunkConfig, *,
     出现在某段开头，但它要切走的是它之前的整段内容）。正则写错不报错，回落固定长度并留警告。
     """
     pattern = cfg.regex_pattern or ""
+    bad_regex = False
     try:
         rx = re.compile(pattern, re.M) if pattern else None
     except re.error:
         rx = None
+        bad_regex = True
     if rx is None:
+        # 正则写错/为空都降到固定长度，但必须留一句：docstring 承诺过「并留警告」，
+        # 不留就等于用户以为自己按「第X条」切了，实际拿到的是一堆按字数硬切的碎片
+        cfg.warnings.append(
+            f"正则分块的表达式无法编译（{pattern[:40]}），已按固定长度分块"
+            if bad_regex else
+            "正则分块没有填表达式，已按固定长度分块")
         return await chunk_fixed(units, cfg)
 
     full, offsets = _full_text(units)

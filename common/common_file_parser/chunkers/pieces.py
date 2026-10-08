@@ -181,13 +181,17 @@ def _augment_context(units: Sequence[Unit], piece: Piece,
 
     只喂向量、不改展示正文：引用片段必须是原文（用户在文档里要能一字不差地找到它），
     而补齐的价值在于让「只有三行数字的表格」也能被自然语言问句命中——那是向量召回的事。
+
+    媒体/表格类切片一律补齐（不再受全局 context_augment.enabled 约束）：媒体块不必独立成块，
+    但一张只有「[图片]」占位的切片正文里没有任何可召回的字，必须带上前后的正文才召得回；
+    页面没开补齐或把窗口配成 0 时按 MEDIA_AUGMENT_DEFAULT 兜一段。纯正文块不补——它本身就是上下文。
     """
-    before_n, after_n = cfg.augment_window()
-    if not cfg.augment_enabled or (before_n <= 0 and after_n <= 0):
-        return "", ""
     kinds = {u.kind for _, u in piece.covered(units)}
     if kinds <= {C.BLOCK_TEXT, C.BLOCK_TITLE}:
         return "", ""                         # 纯正文块不补：它本身就是上下文
+    before_n, after_n = cfg.augment_window()
+    if before_n <= 0 and after_n <= 0:
+        before_n = after_n = C.MEDIA_AUGMENT_DEFAULT   # 媒体切片没配窗口也兜默认长度补齐
     before = after = ""
     head = min(max(0, int(piece.start)), max(0, len(units) - 1))
     tail = max(head + 1, min(int(piece.end), len(units)))
@@ -246,7 +250,9 @@ def assemble(units: Sequence[Unit], pieces: Sequence[Piece], cfg: ChunkConfig,
             expanded.append(new)
     pieces = expanded
 
-    # 2. 碎块向后合并（图片/表格块不参与合并：它们是独立语义单元，粘到下一段就没法单独召回）
+    # 2. 碎块向后合并（图片/表格块既不主动往外并、也不当被并入的目标：
+    #    把一小段文字塞进图片块，_chunk_type 一见混了文字就把整块退回 text 模态，
+    #    那张图既丢了 image 分桶、block_ids 也指错——媒体不强制单独成块，但不能被文字淹没）
     merged: list[Piece] = []
     for piece in pieces:
         text = piece.text(units)
@@ -254,7 +260,8 @@ def assemble(units: Sequence[Unit], pieces: Sequence[Piece], cfg: ChunkConfig,
             continue
         media = _is_media_piece(units, piece)
         last = merged[-1] if merged else None
-        if last is not None and not media and len(text) < cfg.min_chars:
+        if (last is not None and not media and not _is_media_piece(units, last)
+                and len(text) < cfg.min_chars):
             combined = last.text(units) + "\n" + text
             if len(combined) <= size:
                 last.parts = [combined]
@@ -292,7 +299,9 @@ def assemble(units: Sequence[Unit], pieces: Sequence[Piece], cfg: ChunkConfig,
                          chunk_type=_chunk_type(units, piece), title_path=path,
                          page=page, page_end=page_end, sheet=sheet, block_ids=block_ids,
                          image=image, tokens=count_tokens(embed), meta=meta))
-    if warnings:
+    # 调用方传了列表就要拿得到 cfg 一路攒下的归一/降级告警：早期写成 `if warnings:`，
+    # 空列表（刚 new 出来的收集器）为假直接短路，一句告警也传不出去，页面永远看不到降级
+    if warnings is not None:
         warnings.extend(cfg.warnings)
     return out
 

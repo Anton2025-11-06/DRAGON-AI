@@ -25,7 +25,7 @@ import json
 import re
 import time
 from dataclasses import replace
-from typing import Any, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from common.common_constants import rag_constant as RC
 from common.common_constants.model_constant import (
@@ -194,10 +194,31 @@ class RagModelService:
                 f"图谱抽取模型「{config.name}」的供应商 {config.provider} 不支持实体抽取所需的"
                 f"{_label(MT_TEXT_TO_TEXT)}调用，请改选模型或关闭知识图谱")
 
+    # ==================== 对外能力校验（知识评测页选模型时卡类型）====================
+    @staticmethod
+    def ensure_chat_capable(config: ModelConfig, label: str = "对话模型") -> None:
+        """生成/裁判模型：必须能按 text_to_text 对话调用（评测页选的生成与裁判模型走这颗）。"""
+        if config.category not in _CHAT_CAPABLE:
+            raise ValueError(
+                f"{label}「{config.name}」是{_label(config.category)}，"
+                f"必须是能按对话调用的类型"
+                f"（{'/'.join(_label(c) for c in sorted(_CHAT_CAPABLE))}）")
+        if not RagModelService.supports(MT_TEXT_TO_TEXT, config):
+            raise ValueError(
+                f"{label}「{config.name}」的供应商 {config.provider} 不支持"
+                f"{_label(MT_TEXT_TO_TEXT)}调用，请改选模型")
+
+    @staticmethod
+    def ensure_embed_capable(config: ModelConfig, label: str = "向量模型") -> None:
+        """answer_relevancy 相似度模型：必须是可直接喂文本的向量能力（text/multimodal embedding）。"""
+        if config.category not in _EMBED_INPUT_KWARG:
+            raise ValueError(f"{label}「{config.name}」是{_label(config.category)}，"
+                             f"不能当向量模型使用")
+        RagModelService._ensure_supported(config.category, config, label)
+
     @staticmethod
     def _ensure_image_capable(config: ModelConfig) -> None:
         """图片理解模型：登记类型要能吃图片/视频输入，且该供应商真的实现了 image_understand。
-
         登记成 video_understand / ocr 的模型也算数（qwen-vl 这类厂商本来就是同一个端点），
         调用前由 vision_config 换成 image_understand 的形态；换不出来说明这家没实现，
         建库时就拒——总比解析到每一页图片时静默跳过、最后拿回一堆占位符好。
@@ -223,6 +244,24 @@ class RagModelService:
                              f"必须是{_label(category)}")
         RagModelService._ensure_supported(category, config, label)
 
+    @staticmethod
+    async def _pick_image_model(model_id: Optional[int]) -> Optional[ModelConfig]:
+        """图片理解模型位：选了就必须真的能读图片，没选返回 None（不拦）。"""
+        if not int(model_id or 0):
+            return None
+        image = await RagModelService.require_config(model_id, "图片理解模型")
+        RagModelService._ensure_image_capable(image)
+        return image
+
+    @staticmethod
+    async def _pick_ocr_model(model_id: Optional[int]) -> Optional[ModelConfig]:
+        """OCR 模型位（图片描述增强的另一档）：登记的必须是 ocr 能力。"""
+        if not int(model_id or 0):
+            return None
+        ocr = await RagModelService.require_config(model_id, "OCR 模型")
+        RagModelService._ensure_category(MT_OCR, ocr, "OCR 模型")
+        return ocr
+
     # ==================== 建库/改库校验 ====================
 
     @staticmethod
@@ -230,22 +269,27 @@ class RagModelService:
                                  rerank_model_id: int = 0, chat_model_id: int = 0,
                                  extract_model_id: int = 0, image_model_id: int = 0,
                                  audio_model_id: int = 0, video_model_id: int = 0,
+                                 ocr_model_id: int = 0,
                                  enable_graph: bool = False,
-                                 image_understand: bool = False) -> dict[str, Any]:
-        """校验一套知识库模型配置，返回 {embed,rerank,chat,extract,image,audio,video,dim}。
+                                 image_understand: bool = False,
+                                 audio_understand: bool = False,
+                                 video_understand: bool = False,
+                                 media_desc_enhance: bool = False) -> dict[str, Any]:
+        """校验一套知识库模型配置，返回 {embed,rerank,chat,extract,image,ocr,audio,video,dim}。
 
         校验点与失败后果一一对应（都必须在建库时拦住，等第一篇文档解析才炸，
         文件已落存储、任务已排队，回滚成本高出几个量级）：
-        - 向量模型类型不符 → 写入的向量检索不出来（image 型用文本向量就跨不了模态）；
+        - 向量模型类型不符 → 写入的向量检索不出东西（image 型用文本向量就跨不了模态）；
         - 向量维度不等于索引维度 → ES 直接拒绝写入；
         - 开了图谱却没有可用的抽取模型 → 图谱静默跳过，用户以为功能坏了；
-        - 开了图片智能解析却没有图片理解模型 → 文档里的图片全退化成占位符；
-        - 音视频库的媒体理解模型看不懂媒体 → SPEC §9 的 media_summary 生成不出来；
-        - 文档型库配了音频/视频解析模型但类型或供应商不对 → 传这类文件时才报错，
-          所以选了就得在这里验掉（不选不验：纯文本库不该被强制选一个 ASR 模型）。
+        - 开了某个增强开关却没配对应模型 → 这一路增强没有任何模型可执行，页面勾了
+          开关却什么都没变，比直接报错难查（所以「开关开 + 模型空」必须建库时拒掉）。
 
-        doc 型的大模型职责已拆成两位（extract_model_id 图谱抽取、image_model_id 图片理解），
-        chat_model_id 只作为存量库的抽取模型回退；audio_video 型仍然只有 chat_model_id 一位。
+        模型位与「解析配置」第四行严格对齐（需求 6）：图片理解（image_model_id，有独立列）
+        与 OCR（parse_config.ocr_model_id）二选一，两个都允许同时配，产出描述时图片理解
+        优先；音频转写与视频理解各一位，只存在于 parse_config（无独立列）。
+        音视频库不再有「媒体理解模型」这一位（需求 4）：整条媒体的描述改由视频理解与
+        音频转写两位模型分别产出，chat_model_id 只剩 doc 型图谱抽取的存量回退。
         """
         kb_type = str(kb_type or "").strip().lower()
         if kb_type not in RC.KB_TYPE_MODEL_REQ:
@@ -268,7 +312,7 @@ class RagModelService:
                 f"{RC.RAG_VECTOR_DIM} 维不一致；请在模型参数里把维度改为 "
                 f"{RC.RAG_VECTOR_DIM}，或改选一个 {RC.RAG_VECTOR_DIM} 维模型")
 
-        # ---- 重排模型：可选，但选了就得是 text_rerank ----
+        # ---- 重排模型：可选，但选了就得是 text_rerank（是否真的重排由检索请求决定）----
         rerank: Optional[ModelConfig] = None
         if rerank_model_id:
             rerank = await RagModelService.require_config(rerank_model_id, "重排模型")
@@ -277,52 +321,57 @@ class RagModelService:
                                  f"当前「{rerank.name}」是{_label(rerank.category)}")
             RagModelService._ensure_supported(MT_TEXT_RERANK, rerank, "重排模型")
 
-        # ---- 大模型侧：音视频只有「媒体理解」一位；doc 型拆成「图谱抽取」+「图片理解」两位 ----
-        understand = req.get("understand_category")
-        chat: Optional[ModelConfig] = None
         extract: Optional[ModelConfig] = None
-        image: Optional[ModelConfig] = None
-        # 音频/视频解析模型只在 doc 型的解析配置里出现（无独立列），非 doc 型恒为 None
         audio: Optional[ModelConfig] = None
         video: Optional[ModelConfig] = None
 
-        if understand:
-            # audio_video 型：chat_model_id 就是媒体理解模型，必须能直接读整条媒体
-            if chat_model_id:
-                chat = await RagModelService.require_config(chat_model_id, "媒体理解模型")
-                if chat.category != understand:
-                    raise ValueError(
-                        f"{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}知识库的媒体理解模型必须是"
-                        f"{_label(understand)}（要直接读整条媒体），"
-                        f"当前「{chat.name}」是{_label(chat.category)}")
-                RagModelService._ensure_supported(understand, chat, "媒体理解模型")
-            elif req["chat_required"]:
-                raise ValueError(
-                    f"{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}知识库需要选择"
-                    f"{_label(understand)}模型，用于生成媒体内容摘要")
-        else:
-            # doc 型：存量库只有 chat_model_id 一列，抽取模型按它回退，
-            # 不至于升完级就建不了图谱（新库请在解析配置里直接选抽取模型）
+        # ---- 图片侧两位：图片理解 / OCR 二选一，配了就必须能用（未配不拦）----
+        image = await RagModelService._pick_image_model(image_model_id)
+        ocr = await RagModelService._pick_ocr_model(ocr_model_id)
+        # 需要「能产出图片描述」的两种场合：doc 型的内嵌图片增强、图片型库的描述增强
+        need_image_desc = (kb_type == RC.KB_TYPE_DOC and image_understand) or (
+            kb_type == RC.KB_TYPE_IMAGE and media_desc_enhance)
+        if need_image_desc and not (image or ocr):
+            raise ValueError(
+                f"开启{'图片解析增强' if kb_type == RC.KB_TYPE_DOC else '多模态描述增强'}"
+                f"需要选择{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}"
+                f"的图片理解模型或 OCR 模型（二选一即可），"
+                f"否则关键词一路只能按文件名命中")
+
+        # ---- 音频/视频两位：选了才验类型（不选不拦：纯文本库不该被强制选一个 ASR）----
+        if audio_model_id:
+            audio = await RagModelService.require_config(audio_model_id, "音频转文字模型")
+            RagModelService._ensure_category(MT_AUDIO_TO_TEXT, audio, "音频转文字模型")
+        if video_model_id:
+            video = await RagModelService.require_config(video_model_id, "视频理解模型")
+            RagModelService._ensure_category(MT_VIDEO_UNDERSTAND, video, "视频理解模型")
+        if kb_type == RC.KB_TYPE_DOC:
+            if audio_understand and not audio:
+                raise ValueError("开启音频解析增强需要选择音频转文字模型，"
+                                 "否则文档里的音频只会留下占位符")
+            if video_understand and not video:
+                raise ValueError("开启视频解析增强需要选择视频理解模型，"
+                                 "否则文档里的视频只会留下占位符")
+        elif media_desc_enhance and not (audio or video):
+            # 音视频型：一条库不会同时装满音频和视频，两个都要求填会在纯音频库上误伤，
+            # 所以按「至少一个」卡；缺的那一路在解析时只记警告，不拖垮整篇（见 parse_service）
+            raise ValueError(
+                "开启多模态描述增强需要选择视频理解模型（给视频提描述）"
+                "或音频转文字模型（给音频转写文本），否则关键词一路只能按文件名命中")
+
+        # ---- 大模型：只有 doc 型支持图谱，抽取模型位缺省回退存量 chat_model_id ----
+        chat: Optional[ModelConfig] = None
+        if kb_type == RC.KB_TYPE_DOC:
             extract_id = int(extract_model_id or 0) or int(chat_model_id or 0)
             if enable_graph or extract_id:
                 extract = await RagModelService.require_config(extract_id, "图谱抽取模型")
                 RagModelService._ensure_extract_capable(extract)
-            if image_understand and not image_model_id:
-                raise ValueError("开启图片智能解析需要选择图片理解模型，"
-                                 "否则文档里的图片只会留下占位符")
-            if image_model_id:
-                image = await RagModelService.require_config(image_model_id, "图片理解模型")
-                RagModelService._ensure_image_capable(image)
-            if audio_model_id:
-                audio = await RagModelService.require_config(audio_model_id, "音频解析模型")
-                RagModelService._ensure_category(MT_AUDIO_TO_TEXT, audio, "音频解析模型")
-            if video_model_id:
-                video = await RagModelService.require_config(video_model_id, "视频解析模型")
-                RagModelService._ensure_category(MT_VIDEO_UNDERSTAND, video, "视频解析模型")
+            if enable_graph and not extract:
+                raise ValueError("开启知识图谱需要选择图谱抽取模型，否则构建时会静默跳过")
 
         return {"kb_type": kb_type, "embed": embed, "rerank": rerank, "chat": chat,
-                "extract": extract, "image": image, "audio": audio, "video": video,
-                "dim": dim}
+                "extract": extract, "image": image, "ocr": ocr,
+                "audio": audio, "video": video, "dim": dim}
 
     # ==================== 底层调用 ====================
 
@@ -483,6 +532,18 @@ class RagModelService:
             raise ValueError("多模态向量模型没有返回视频向量")
         return list(vecs[0])
 
+    @staticmethod
+    async def ocr_text(config: ModelConfig, image_url: str,
+                       prompt: Optional[str] = None) -> str:
+        """图片 OCR（需求 4 的「配 OCR 模型生成描述」这一档）：只返图里的文字。
+
+        不给提示词就用 OCR 能力的内置默认（提取全部文字）：把图片理解那句
+        「请客观描述这张图片」递到 OCR 端点，得到的是描述而不是文字，两档能力就调乱了。
+        """
+        result = await RagModelService.call(MT_OCR, config,
+                                            prompt=(prompt or None), image_url=image_url)
+        return (result.content or "").strip()
+
     # ==================== 重排 ====================
 
     @staticmethod
@@ -527,6 +588,41 @@ class RagModelService:
         """
         text = await RagModelService.chat(config, prompt, system=system, **kwargs)
         return _parse_json(text)
+
+    @staticmethod
+    async def chat_stream(config: Optional[ModelConfig], prompt: str, *,
+                         system: Optional[str] = None, thinking: bool = False,
+                         **kwargs) -> AsyncIterator[str]:
+        """流式问答（需求 9c：两路检索结果丢给大模型后逐字回前端）。
+
+        只产出正文增量，思维链不外泄：页面右侧那一栏要的是结论，把 reasoning 混进
+        content 会让「依据资料〔N〕」这种引用被思考过程切断；思维链真要展示得另开一帧。
+        不对模型侧的结束帧负责（调用方自己补），这里挂了只抛一句可读的错。
+        """
+        from common.common_model import instantiate
+
+        if config is None:
+            raise ValueError("未选择对话模型")
+        RagModelService._ensure_supported(MT_TEXT_TO_TEXT, config, _label(MT_TEXT_TO_TEXT))
+        messages: list[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": _clean(prompt)})
+        try:
+            inst = instantiate(MT_TEXT_TO_TEXT, config)
+            async for chunk in inst.astream(messages=messages, thinking=thinking, **kwargs):
+                text = getattr(chunk, "content", "") or ""
+                if text:
+                    yield text
+                if getattr(chunk, "finish_reason", None):
+                    break
+        except ValueError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.error("流式问答失败: model={}({}): {}",
+                      getattr(config, "name", ""), getattr(config, "model_name", ""), e)
+            raise ValueError(f"对话模型「{getattr(config, 'name', '')}」流式回答失败："
+                             f"{str(e)[:300]}") from e
 
     @staticmethod
     def vision_config(config: Optional[ModelConfig], category: str

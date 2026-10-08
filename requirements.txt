@@ -58,16 +58,15 @@ openpyxl>=3.1.2
 python-pptx>=1.0.0
 xlrd>=2.0.1
 markdown>=3.6
-# 文档解析（docling 引擎：版面/表格结构还原，pip 安装即 CPU 推理，首次运行会下载模型）
-#   可选依赖：未安装时 parse_engine=docling 会明确报错并提示，不影响 native/minerU
-docling>=2.15.0
+# docling 引擎已下线（版面/表格还原与 minerU 重叠，而它要在 worker 里装几百 MB 模型），不再作为依赖安装
 # minerU 引擎走私有化 HTTP API（用已有 httpx，无需额外 pip 依赖）
 # 分块策略全部自实现（固定长度/自定义分隔符/标题层级/每页/语义/Excel/正则），不再依赖 LangChain：
 #   原 langchain-text-splitters 只服务「递归字符分块」，它与自定义分隔符分块断开点同源，已合并下线
 #   （分隔符优先级 + 按长度合并 + overlap 都在 chunkers/text_strategies.py 里自实现）
 # 老格式 .doc/.ppt 解析依赖系统中安装的 LibreOffice（soffice），非 pip 依赖
-# 智能体自主规划框架（依赖 langgraph/smolagents）
-deepagents
+
+# 智能体自主规划框架
+agentscopd
 # HTTP 流式输出
 sse-starlette>=2.1.0
 # 沙箱进程管理
@@ -78,6 +77,13 @@ aiofiles>=23.2.1
 openpyxl>=3.1.5
 # 阿里云 OSS 存储（官方 Python SDK V2，唯一对象存储后端）
 alibabacloud-oss-v2
+
+# RAG 知识评测（RAGAS）：只在 ragflow worker 里执行评测，不影响 API 进程启动。
+# 仅用 langchain-core 的 BaseChatModel/Embeddings 抽象写适配器（见 services/ragas_adapter.py），
+# 生成与向量都转调本仓 common_model，**不装任何 langchain provider**。
+# ragas 传递依赖较重（datasets/instructor 等），随 worker 镜像安装。
+ragas
+langchain-core
 # 阿里云 OSS 异步客户端（oss.aio.AsyncClient）依赖，SDK 未声明需显式安装
 aiohttp>=3.9.0
 # 大模型

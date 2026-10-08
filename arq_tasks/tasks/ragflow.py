@@ -8,7 +8,7 @@
 与 workflow 流水线（tasks/workflow.py）的关系与差异：
 - 同一套 arq 机制、同一个 Redis 实例，只靠队列名隔离（rag_queue:* 与 workflow_queue:*），
   两边互不偷任务：知识库解析排队再久也不该把工作流执行卡住，反之亦然（SPEC §4.1）；
-- 本流水线**全 CPU**：解析引擎里 docling 是 pip 依赖、minerU 走私有化 HTTP、embedding 与
+- 本流水线**全 CPU**：解析引擎里 native 是纯 Python 轻量库、minerU 走私有化 HTTP、embedding 与
   视频理解都走 HTTP API，worker 进程内不承载任何模型算力，故不需要 GPU 相关参数（SPEC §4.2）；
 - 任务函数只负责「按 doc_id 驱动一遍流水线」，权威状态在 MySQL（tb_document.status 等）、
   进度在 Redis；API 进程只入队与读进度，不重复实现任何处理逻辑。
@@ -31,6 +31,7 @@ from common.common_constants.rag_constant import (
     RAG_TASK_PARSE,
     RAG_TASK_KB_PURGE,
     RAG_TASK_MEDIA,
+    RAG_TASK_EVAL,
     rag_task_name,
 )
 from common.common_es import close_es, init_es
@@ -47,7 +48,7 @@ from common.common_storage import close_storage, init_storage
 # 图谱构建（build_document_graph）已移到 graphflow 流水线，rag worker 不再注册/消费它，
 # 否则慢图谱任务会把解析 worker 的并发槽位占满（见 tasks/graphflow.py 顶部说明）
 TASK_FUNCTIONS = [rag_task_name(name) for name in (
-    RAG_TASK_PARSE, RAG_TASK_MEDIA, RAG_TASK_KB_PURGE)]
+    RAG_TASK_PARSE, RAG_TASK_MEDIA, RAG_TASK_KB_PURGE, RAG_TASK_EVAL)]
 
 
 async def prepare_config():
@@ -237,3 +238,16 @@ async def purge_knowledge_base(ctx: dict, kb_id: int, doc_ids: Optional[list[int
     from service.service_rag.services.parse_service import RagParseService
 
     await RagParseService.run_purge(kb_id, doc_ids)
+
+
+async def run_eval(ctx: dict, run_id: int) -> None:
+    """知识评测（RAGAS）：驱动一次 run 的召回+生成+打分+回填。
+
+    任务体只做「驱动」：逐问答对的并发、ragas 打分、状态与指标回填全在
+    service.service_rag.services.rag_eval_runner 里（与检索页同源）。与文档解析同队列：
+    评测要 ES + 模型 +（可选）neo4j，与检索完全同源，不必新开一条流水线。
+    运行内的逐对失败已在 runner 里兜成 item 级 error，不整单抛；这里的兜异常交给 arq 记录。
+    """
+    from service.service_rag.services import rag_eval_runner
+
+    await rag_eval_runner.execute(run_id)

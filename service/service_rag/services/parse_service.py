@@ -33,7 +33,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import delete, select, update
 
 from common.common_constants import rag_constant as RC
-from common.common_constants.model_constant import MT_IMAGE_UNDERSTAND
+from common.common_constants.model_constant import MT_IMAGE_UNDERSTAND, MT_OCR
 from common.common_es import es_client, to_json
 from common.common_es.index_mapping import es_doc_id
 from common.common_file_parser import constants as C
@@ -46,6 +46,7 @@ from common.common_neo4j import kg_store, neo4j_client
 from common.common_storage import download as storage_download
 from common.common_storage import get_storage
 from service.service_rag.models.kb_entity import Document, DocumentChunk, KnowledgeBase
+from service.service_rag.services import kg_vector
 from service.service_rag.services import rag_settings as settings
 from service.service_rag.services.rag_model import RagModelService
 from service.service_rag.services.task_service import RagTaskService
@@ -116,7 +117,8 @@ class RagParseService:
                 message=(f"{RC.MEDIA_KIND_LABELS.get(media_kind, media_kind)}转写为正文"
                          if media_kind else f"解析引擎 {engine}"))
             # 图片理解模型是公用配置（库上一位，页面常驻）：文档内嵌图片增强与独立图片文件
-            # 转写都读它。存量库 image_model_id=0 时回退旧的问答列（历史库都靠它看图）
+            # 转写都读它。存量库 image_model_id=0 时回退旧的问答列（历史库都靠它看图）；
+            # 需求 6 的「二选一」还有一档 OCR：只配了 OCR 时同样能抽图里的文字当描述
             image_cfg = await RagModelService.get_config(
                 int(kb.image_model_id or 0) or int(kb.chat_model_id or 0))
             # 音频/视频解析模型没有独立列，只存在解析配置里（选了才有值，未选为 0）：
@@ -128,6 +130,8 @@ class RagParseService:
                     int(parse_config.get("audio_model_id") or 0)),
                 video_cfg=await RagModelService.get_config(
                     int(parse_config.get("video_model_id") or 0)),
+                ocr_cfg=await RagModelService.get_config(
+                    int(parse_config.get("ocr_model_id") or 0)),
                 sidecar=sidecar)
             if parsed.engine != engine and engine == RC.PARSE_ENGINE_AUTO:
                 warnings.append(f"自动选择解析引擎：{parsed.engine}")
@@ -142,7 +146,7 @@ class RagParseService:
                 kb.embedding_model_id, "向量模型")
             chunks = await chunk_parsed_document(
                 parsed, chunk_config, parse_config=parse_config,
-                embed_fn=_embed_fn(embed_cfg))
+                embed_fn=_embed_fn(embed_cfg), warnings=warnings)
             if not chunks:
                 raise ValueError("分块结果为空：文档没有可检索正文（换解析引擎或分块配置后重试）")
             rows = await _replace_chunks(kb, doc_id, chunks, parsed)
@@ -201,9 +205,10 @@ class RagParseService:
         ``options`` 与文档解析同位（doc_id, options），但媒体没有解析产物可复用，
         传了也只当没看见——不开这一位参数就得给两类任务写两个不同的签名。
 
-        与 doc 型的三处差别（SPEC §8/§9）：
+        与 doc 型的三处差别（需求 2/3/4）：
         - 不解析、不分块：一张图 / 一条音视频就是一条切片一条向量；
-        - 图片型不生成描述（SPEC §8-4「不做图片自动描述」），音视频型必须整条理解；
+        - 关键词一路的正文 = 文件名（+ 开了「多模态描述增强」时模型生成的描述），
+          向量一路 = 媒体本身的多模态向量，与描述无关；
         - 不做知识图谱（非 doc 型的支持列恒为 0，收尾时也就不必判开关）。
         """
         token = await RagTaskService.acquire_doc(doc_id)
@@ -228,6 +233,16 @@ class RagParseService:
             embed_cfg = await RagModelService.require_config(
                 kb.embedding_model_id, "向量模型")
 
+            # 需求 2/3/4：媒体型的两路召回各用什么都定在这里
+            #   关键词一路吃 content：一律以文件名为底，开了「多模态描述增强」再把模型
+            #     生成的文字拼在后面（于是能搜到图里的字、视频里说了什么）
+            #   向量一路吃媒体本身的多模态向量：与描述无关，开不开增强都不重算
+            # 音视频型不再强制整条理解：原「基础信息里的媒体理解模型」已按需求 4 删除，
+            # 描述用的模型改从解析配置取（视频理解 + 音频转文字），没开增强就只按文件名匹配。
+            _, pcfg = settings.normalize_parse_config(kb.kb_type, kb.parser_engine,
+                                                      kb.parse_config)
+            enhance = bool(pcfg.get("media_desc_enhance"))
+            title = (doc.doc_name or "").strip()
             summary = ""
             warnings: list[str] = []
             chunk_type = RC.CHUNK_TYPE_IMAGE
@@ -236,18 +251,20 @@ class RagParseService:
                 if not vectors:
                     raise ValueError("多模态向量模型没有返回图片向量")
                 vector = list(vectors[0])
-                summary = (doc.doc_name or "").strip()
+                desc = ""
+                if enhance:
+                    await RagTaskService.set_progress(
+                        doc_id, stage="preprocess", message="生成图片综合描述")
+                    desc = await _describe_image_media(doc, kb, pcfg, media_url, warnings)
+                summary = " ".join(x for x in (title, desc) if x)
             else:
                 chunk_type = RC.CHUNK_TYPE_AUDIO_VIDEO
-                chat_cfg = await RagModelService.get_config(kb.chat_model_id)
-                if chat_cfg is None:
-                    raise ValueError("音视频知识库需要配置视频理解模型（用于生成综合描述）")
-                await RagTaskService.set_progress(
-                    doc_id, stage="preprocess", message="生成整条媒体的综合描述")
-                summary = await RagModelService.understand_media(
-                    chat_cfg, media_url, settings.media_summary_prompt())
-                if not summary.strip():
-                    warnings.append("媒体理解模型没有返回描述，该条媒体只能按向量召回、无摘要文本")
+                desc = ""
+                if enhance:
+                    await RagTaskService.set_progress(
+                        doc_id, stage="preprocess", message="生成整条媒体的综合描述")
+                    desc = await _describe_av_media(doc, pcfg, media_url, warnings)
+                summary = " ".join(x for x in (title, desc) if x)
                 await RagTaskService.set_progress(
                     doc_id, stage="embedding", message="生成整条媒体的全局向量")
                 vector = await RagModelService.embed_video(embed_cfg, media_url)
@@ -332,6 +349,27 @@ class RagParseService:
                     log.exception(f"neo4j purge failed kb={kb_id}")
             else:
                 log.info("Neo4j 未初始化，跳过图谱清理（该库本就没有图谱数据）")
+
+            # ---------- 图谱向量投影（需求 9a：它是 Neo4j 的投影，必须跟着图走） ----------
+            # 图节点已删而投影还在，图谱增强检索就会回一个查不到原文的幽灵实体。
+            #   整库删除直接清掉全部投影；按文档删除跑一次增量同步（差集只会是删除，
+            #   不花模型调用），把因本篇而变孤儿的实体投影一并回收。
+            try:
+                if ids:
+                    # 增量同步要能算「文本变了」的那几条：按库上的向量模型取配置，
+                    # 删文档一般只有回收没有新增（向量模型的调用一次也不发）
+                    embed_id = 0
+                    async with mysql_client.get_session() as session:
+                        embed_id = int((await session.execute(
+                            select(KnowledgeBase.embedding_model_id)
+                            .where(KnowledgeBase.kb_id == int(kb_id))
+                        )).scalar_one_or_none() or 0)
+                    await kg_vector.sync_kb_vectors(kb_id, embed_model_id=embed_id)
+                else:
+                    graph_count += await kg_vector.forget_kb(kb_id)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"图谱向量清理失败: {str(e)[:200]}")
+                log.exception(f"kg vector purge failed kb={kb_id}")
 
             # ---------- 图谱抽取断点（文档都不在了，断点留着就是纯垃圾） ----------
             # drop 内部已把 Redis 异常吞成日志：清理链路不该因为一个旁路键删不掉而报错
@@ -454,6 +492,7 @@ def _sidecar_mode(options: Optional[dict]) -> str:
 async def _parse_or_reuse(doc: Document, kb: KnowledgeBase, raw: bytes, *,
                           engine: str, parse_config: dict, image_cfg: Any,
                           audio_cfg: Any = None, video_cfg: Any = None,
+                          ocr_cfg: Any = None,
                           sidecar: str = RC.RAG_SIDECAR_AUTO
                           ) -> tuple[ParsedDocument, list[str]]:
     """能复用 sidecar 就绝不重解析；返回 (解析结果, 给页面看的降级说明)。
@@ -489,12 +528,13 @@ async def _parse_or_reuse(doc: Document, kb: KnowledgeBase, raw: bytes, *,
         parsed = await _media_to_parsed(
             doc, raw, kind=kind, engine=engine, parse_config=parse_config,
             image_cfg=image_cfg, audio_cfg=audio_cfg, video_cfg=video_cfg,
-            warnings=warnings)
+            ocr_cfg=ocr_cfg, warnings=warnings)
         log.info("阶段[转写]完成: doc={} 媒体={} 结构块={}",
                  doc.doc_id, kind, len(parsed.blocks))
     else:
         hook = _make_image_hook(kb, doc.doc_id, parse_config, image_cfg, warnings,
-                                audio_cfg=audio_cfg, video_cfg=video_cfg)
+                                audio_cfg=audio_cfg, video_cfg=video_cfg,
+                                ocr_cfg=ocr_cfg)
         flags = "/".join(RC.MEDIA_KIND_LABELS[k] for k in
                          (RC.MEDIA_KIND_IMAGE, RC.MEDIA_KIND_AUDIO, RC.MEDIA_KIND_VIDEO)
                          if _understand_on(parse_config, k)) or "无"
@@ -520,7 +560,8 @@ async def _parse_or_reuse(doc: Document, kb: KnowledgeBase, raw: bytes, *,
 
 async def _media_to_parsed(doc: Document, raw: bytes, *, kind: str, engine: str,
                            parse_config: dict, image_cfg: Any, audio_cfg: Any,
-                           video_cfg: Any, warnings: list[str]) -> ParsedDocument:
+                           video_cfg: Any, warnings: list[str],
+                           ocr_cfg: Any = None) -> ParsedDocument:
     """图片/音频/视频 → 结构块（doc 型库的媒体分支：先转成文字，后面当普通文档跑）。
 
     产物只有两类：图片出一个图片块（描述写进 ImageRef.description），音频/视频出一个文本块。
@@ -555,16 +596,23 @@ async def _media_to_parsed(doc: Document, raw: bytes, *, kind: str, engine: str,
                        object_key=str(doc.file_path or ""), url=url)
         vision_cfg = RagModelService.vision_config(image_cfg,
                                                    RC.MEDIA_KIND_CATEGORY[kind])
-        if vision_cfg is None:
+        # 图片理解与 OCR 二选一（需求 6 第四行）：图片理解优先，它不只抽文字还给主体描述；
+        # 只配了 OCR 时退一档，至少图里的字能进正文
+        desc_cfg = vision_cfg if vision_cfg is not None else ocr_cfg
+        if desc_cfg is None:
             # 独立图片文档里描述就是正文（不像 PDF 内嵌图那样周围有文字），
             # 所以只要配了能看图的模型就描述，不看 image_understand 开关
-            warnings.append("没有可用的图片理解模型，图片只登记位置，检索只能命中文件名")
+            warnings.append("没有可用的图片理解/OCR 模型，图片只登记位置，检索只能命中文件名")
         elif not url:
             warnings.append("图片没有可访问地址，跳过图片描述")
         else:
             try:
-                ref.description = await RagModelService.understand_image(
-                    vision_cfg, url, settings.image_desc_prompt(parse_config))
+                if desc_cfg.category == MT_OCR:
+                    # 不递描述提示词：OCR 的内置默认就是「提取全部文字」
+                    ref.description = await RagModelService.ocr_text(desc_cfg, url)
+                else:
+                    ref.description = await RagModelService.understand_image(
+                        desc_cfg, url, settings.image_desc_prompt(parse_config))
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"图片描述失败：{str(e)[:120]}")
                 log.warning(f"图片描述失败 doc={doc.doc_id}: {e}")
@@ -600,6 +648,81 @@ async def _media_to_parsed(doc: Document, raw: bytes, *, kind: str, engine: str,
     return _finalize_media(parsed)
 
 
+async def _describe_image_media(doc: Document, kb: KnowledgeBase, pcfg: dict,
+                                media_url: str, warnings: list[str]) -> str:
+    """图片库的描述增强（需求 4）：图片理解模型出综合描述，没配它才退到 OCR 模型抽文字。
+
+    页面上事无巨细二选一，代码里两个都能填时优先图片理解：它的内置提示词本来就要
+    「主体内容 + 图中文字 + 可用于检索的关键词」，一顶覆盖了 OCR 的产物；而 OCR 只回
+    文字，图里没字就是空。两个都没配只警告不失败：文件名与向量仍在，检索照样跑。
+    """
+    image_cfg = await RagModelService.get_config(
+        int(kb.image_model_id or 0) or int(kb.chat_model_id or 0))
+    vision = RagModelService.vision_config(image_cfg, MT_IMAGE_UNDERSTAND)
+    if image_cfg is not None and vision is None:
+        warnings.append(f"图片理解模型「{image_cfg.name}」不支持图片输入，已改尝试 OCR 一档")
+    if vision is not None:
+        try:
+            return await RagModelService.understand_image(
+                vision, media_url, settings.image_desc_prompt(pcfg))
+        except Exception as e:  # noqa: BLE001  描述只是加一层可检索文本，不是必要条件
+            warnings.append(f"图片理解模型生成描述失败：{str(e)[:120]}")
+            log.warning(f"图片描述失败 doc={doc.doc_id}: {e}")
+            return ""
+    ocr_cfg = await RagModelService.get_config(int(pcfg.get("ocr_model_id") or 0))
+    if ocr_cfg is None:
+        warnings.append("已开启多模态描述增强，但既没有可用的图片理解模型也没配 OCR 模型："
+                        "这条图片只能按文件名与向量召回")
+        return ""
+    try:
+        # 不递提示词：OCR 的内置默认就是「提取全部文字」，拿描述提示词去要反而要不到文字
+        return await RagModelService.ocr_text(ocr_cfg, media_url)
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"OCR 模型提取图片文字失败：{str(e)[:120]}")
+        log.warning(f"图片 OCR 失败 doc={doc.doc_id}: {e}")
+        return ""
+
+
+async def _describe_av_media(doc: Document, pcfg: dict, media_url: str,
+                             warnings: list[str]) -> str:
+    """音视频库的描述增强（需求 4）：视频用多模态模型抽画面描述，音频转文字，两段合起来。
+
+    「综合描述」= 画面描述 + 语音转写：视频理解模型输出往往是镜头层面的概括，
+    而用户要搜的常常是里面说的那句话，所以两个模型各取一路再拼；没抽帧与 ASR 能力
+    的端点会在自己那一路上失败，只降级成少了那一段描述，不影响另一边。
+    音频文件没有画面，只剩转写那一路。
+    """
+    kind = RC.media_kind_of_ext(doc.file_ext or "")
+    pieces: list[str] = []
+    if kind == RC.MEDIA_KIND_VIDEO:
+        video_cfg = await RagModelService.get_config(int(pcfg.get("video_model_id") or 0))
+        if video_cfg is None:
+            warnings.append("已开启多模态描述增强但未配置视频理解模型：这条视频不会生成画面描述")
+        else:
+            try:
+                pieces.append(await RagModelService.understand_media(
+                    video_cfg, media_url, settings.media_summary_prompt()))
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"视频理解模型生成描述失败：{str(e)[:120]}")
+                log.warning(f"视频描述失败 doc={doc.doc_id}: {e}")
+    audio_cfg = await RagModelService.get_config(int(pcfg.get("audio_model_id") or 0))
+    if audio_cfg is None:
+        if kind != RC.MEDIA_KIND_VIDEO:
+            warnings.append("已开启多模态描述增强但未配置音频转文字模型：这条音频只能按"
+                            "文件名与向量召回")
+    else:
+        try:
+            # 视频也递一次转写：能听声音的 ASR 端点会多回一段讲话文本，只认音频容器的
+            # 厂商会报错，上面已按一路失败一处降级接住
+            pieces.append(await RagModelService.transcribe_audio(
+                audio_cfg, audio_url=media_url, audio_bytes=None,
+                filename=doc.file_name or f"{doc.doc_id}_{kind or 'media'}"))
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"音频转文字失败：{str(e)[:120]}")
+            log.warning(f"媒体转写失败 doc={doc.doc_id}: {e}")
+    return "\n".join(p for p in (x.strip() for x in pieces) if p)
+
+
 def _finalize_media(parsed: ParsedDocument) -> ParsedDocument:
     """媒体转写产物的收口：补 meta（与引擎 finalize 同口径，免得页面统计项缺字段）。
 
@@ -623,7 +746,8 @@ def _understand_on(parse_config: Optional[dict], kind: str) -> bool:
 
 def _make_image_hook(kb: KnowledgeBase, doc_id: int, parse_config: dict,
                      image_cfg: Any, warnings: list[str],
-                     audio_cfg: Any = None, video_cfg: Any = None):
+                     audio_cfg: Any = None, video_cfg: Any = None,
+                     ocr_cfg: Any = None):
     """构造解析层的内嵌媒体钩子：无条件传存储 + 回填地址，（开了对应增强时）再调大模型描述。
 
     三种媒体各一个开关（图片/音频/视频解析增强），但口径完全一致：
@@ -642,11 +766,12 @@ def _make_image_hook(kb: KnowledgeBase, doc_id: int, parse_config: dict,
         raw_cfg = {RC.MEDIA_KIND_IMAGE: image_cfg, RC.MEDIA_KIND_AUDIO: audio_cfg,
                    RC.MEDIA_KIND_VIDEO: video_cfg}.get(kind)
         if kind == RC.MEDIA_KIND_IMAGE:
-            # 图片模型必须真能吃图输入：配成一个纯文本模型时 vision_config 会回 None
-            models[kind] = RagModelService.vision_config(raw_cfg, MT_IMAGE_UNDERSTAND)
-            if raw_cfg is not None and models[kind] is None:
-                warnings.append(f"图片解析增强未生效：图片理解模型「{raw_cfg.name}」不支持图片输入，"
-                                f"图片只传存储不生成描述")
+            # 图片这一档两位模型都能用（需求 6 的「图片理解或 OCR 二选一」）：图片理解优先，
+            # 没配或换不出 image_understand 实现时退到 OCR（只回图里的文字）
+            vision = RagModelService.vision_config(raw_cfg, MT_IMAGE_UNDERSTAND)
+            models[kind] = vision if vision is not None else ocr_cfg
+            if vision is None and raw_cfg is not None and ocr_cfg is not None:
+                warnings.append(f"图片理解模型「{raw_cfg.name}」不支持图片输入，已改用 OCR 一档")
         else:
             models[kind] = raw_cfg
         if models[kind] is None:
@@ -657,13 +782,16 @@ def _make_image_hook(kb: KnowledgeBase, doc_id: int, parse_config: dict,
     video_prompt = settings.video_desc_prompt(parse_config)
 
     async def _describe(kind: str, cfg: Any, url: str) -> str:
-        """按媒体种类送对应的模型端点（三个端点不是一个协议，不能一把梭）。"""
+        """按媒体种类送对应的模型端点（四个端点不是一个协议，不能一把梭）。"""
         if kind == RC.MEDIA_KIND_AUDIO:
             return await RagModelService.transcribe_audio(
                 cfg, audio_url=url, audio_bytes=None,
                 filename=f"{doc_id}_{kind}")
         if kind == RC.MEDIA_KIND_VIDEO:
             return await RagModelService.understand_media(cfg, url, video_prompt)
+        if cfg.category == MT_OCR:
+            # OCR 只用它自己的内置默认提示词：拿「描述图片」去要反而要不到文字
+            return await RagModelService.ocr_text(cfg, url)
         return await RagModelService.understand_image(cfg, url, image_prompt)
 
     async def _hook(ref: ImageRef, _parsed: ParsedDocument) -> None:

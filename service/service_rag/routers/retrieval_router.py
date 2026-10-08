@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from common.common_entity.response_schema import ApiResponse
 from common.common_permission.permission import get_login_user, has_permission
@@ -54,6 +55,24 @@ async def search_rows(request: Request, body: RetrieveReq):
         rerank=body.rerank,
     )
     return ApiResponse.success(data=rows)
+
+
+@router.post("/ask", summary="知识库流式问答（SSE：左检索结果 + 右模型回答）")
+@has_permission("ai:kb:search")
+async def ask(request: Request, body: RetrieveReq):
+    """检索与问答一次请求完（需求 9），返的是 SSE，不是 ApiResponse。
+
+    帧形态：``data: {"type":"meta",…检索回执}`` → 多帧 ``{"type":"delta","content":…}``
+    → ``{"type":"done"}``，失败是一帧 ``{"type":"error","message":…}``。前端那个 SSE 封装
+    只交原始文本块，所以帧里的 type 是页面唯一的分发依据，别指望 event: 行。
+
+    选不了模型就别说「只列结果」：不传 ``chatModelId`` 的调用方应当直接调 ``POST /retrieve``，
+    这里把“没选模型”当错误报，而不是默默只回一帧 meta。
+    """
+    return StreamingResponse(
+        RagRetrievalService.ask_stream(await get_login_user(request), body),
+        media_type="text/event-stream",
+        headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
 
 
 @router.get("/health", summary="检索侧存储就绪状态（ES/向量维度/默认参数）")

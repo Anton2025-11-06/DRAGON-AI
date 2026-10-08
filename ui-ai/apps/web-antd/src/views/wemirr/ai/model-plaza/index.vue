@@ -17,7 +17,6 @@ import { resolveApiUrl } from '#/api/helper';
 
 import * as api from './api';
 import CreateModelDialog from './components/CreateModelDialog.vue';
-import KeyBigScreen from './components/KeyBigScreen.vue';
 import ModelCard from './components/ModelCard.vue';
 
 import 'md-editor-v3/lib/style.css';
@@ -135,15 +134,7 @@ const submitApply = async () => {
   }
 };
 
-// ==================== 我的 Key：下载 / 大屏 ====================
-const bigScreenOpen = ref(false);
-const bigScreenKey = ref<api.MyKeyRep | null>(null);
-
-const openBigScreen = (k: api.MyKeyRep) => {
-  bigScreenKey.value = k;
-  bigScreenOpen.value = true;
-};
-
+// ==================== 我的 Key：下载 ====================
 /** 导出单个 Key 接入信息为 Markdown 文件（文件名带模型名） */
 const downloadKey = (k: api.MyKeyRep) => {
   const paramRows = (k.common_params || [])
@@ -365,12 +356,7 @@ onMounted(async () => {
               </a-descriptions-item>
             </a-descriptions>
             <div style="margin-top: 8px; text-align: right">
-              <a-space>
-                <a-button size="small" @click="downloadKey(k)">下载</a-button>
-                <a-button size="small" type="primary" @click="openBigScreen(k)">
-                  大屏查看
-                </a-button>
-              </a-space>
+              <a-button size="small" @click="downloadKey(k)">下载</a-button>
             </div>
             <div v-if="k.tutorial_md" style="margin-top: 8px">
               <MdPreview :model-value="k.tutorial_md" />
@@ -380,9 +366,6 @@ onMounted(async () => {
         <a-empty v-else description="暂无已通过的申请" />
       </a-spin>
     </a-modal>
-
-    <!-- 大屏查看我的 Key -->
-    <KeyBigScreen v-model:open="bigScreenOpen" :key-data="bigScreenKey" />
   </div>
 </template>
 

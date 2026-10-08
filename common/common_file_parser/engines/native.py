@@ -3,7 +3,7 @@
 
 特点（SPEC §7.2 第 1 项）：无模型依赖、速度快、CPU 运行，是默认引擎。
 明确的短板：不做版面分析（双栏 PDF 会按流顺序串行读出）、不做复杂表格还原、扫描件抽不出字。
-这三类文档该用 docling 或 minerU——auto 引擎正是按这些短板做判据的；native 只在 warnings
+这三类文档该用 minerU——auto 引擎正是按这些短板做判据的；native 只在 warnings
 里如实说明，不假装成功（用户看到「解析完成但一个字没有」比看到失败更难排查）。
 """
 from __future__ import annotations
@@ -76,12 +76,12 @@ class NativeEngine(BaseEngine):
     # 只声明「文档格式」：doc 型库也收图片/音频/视频，但那些不进解析引擎（由大模型先转文字，
     # 见 parse_service 的媒体转写分支）。写成 KB_TYPE_ALLOWED_EXTS[doc] 等于声称自己能读 mp4。
     # 剔掉老版 Office：base.guard_legacy_office 对本引擎一律拒收，声明里留着 doc/ppt
-    # 就是让配置页照着一份假清单告诉用户「native 能读 .doc」（与 docling 同一口径）。
+    # 就是让配置页照着一份假清单告诉用户「native 能读 .doc」。
     formats = set(RC.DOC_TEXT_EXTS) - C.LEGACY_OFFICE
 
     async def _parse(self, raw: bytes, filename: str, ext: str) -> ParsedDocument:
         ext = ext or normalize_ext(filename)
-        # 文案收到 base：三处引擎各自写一句，改口径时必有人漏（docling 就是这么漏的）
+        # 文案收到 base：各处引擎各自写一句，改口径时必有人漏
         guard_legacy_office(ext)
         if not raw:
             raise ParseError("文件内容为空")
@@ -141,7 +141,7 @@ class NativeEngine(BaseEngine):
         if scanned:
             doc.warnings.append(
                 "每页可提取文字极少，判断为扫描件/图片型 PDF："
-                "native 识别不了其中的图形文字，建议改用 docling 或 minerU 重新解析")
+                "native 识别不了其中的图形文字，建议改用 minerU 重新解析")
         if not blocks:
             raise ParseError("PDF 没有可提取的文本（扫描件或纯图片文档）")
         return blocks, meta

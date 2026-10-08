@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """多模态检索服务：按知识库类型切换召回逻辑，ES 单索引一次混排返回（SPEC §8/§9/§10.2/§11.2-5）。
 
-三条不可让的口径
+四条不可让的口径
 ----------------
 1. **上层鉴权、底层裸查**（§13.4）：可见库白名单由 ``KnowledgeBaseService.visible_ids``
    （资源 ACL + DataScope）算好后传下来，common_es 里没有权限概念，白名单为空就是空结果。
@@ -10,10 +10,14 @@
    空间相同**——文本向量模型与多模态向量模型的输出不能交叉比距离。所以按
    ``(向量模型, 库类型, 生效检索参数)`` 分组：同组合成一条 ES 请求（省往返），
    不同组各查各的，最后统一按分数排序。分组键里绝不放 kb_id，否则 20 个库就是 20 次往返。
-3. **按库类型自动切召回路**（§11.2-5）：doc 走 BM25+kNN 混合；image/audio_video 只走 kNN
-   ——跨模态空间里 BM25 命中的是文件名/摘要文本，和「以文搜图」不是一回事，
-   混进融合分会让 score_threshold 失去可解释性。以图搜图只有 image 型支持（§8-3），
-   音视频型只有文本查询（§9-3）。
+3. **三型都能走「关键词 + 向量」两路**（需求 2/3）：doc 型的关键词一路命中切片正文；
+   image / audio_video 型每个媒体只有一条切片，它的 ``content`` 就是「文件名（+ 开了
+   多模态描述增强时模型写的综合描述）」，所以 BM25 在媒体库上命中的正是用户要的
+   「按文件名搜」。以图搜图只有 image 型支持（§8-3），且此时没有可匹配的关键词，
+   强制只走向量一路。
+4. **检索参数是这一次请求的事**（需求 5/7/8）：模式、两路权重、重排模型、图谱增强
+   都从请求来，库上的 retrieve_config 只是「没传时的后台默认值」；
+   重排不再是代码里写死的必经环节——没选重排模型就不发那次调用。
 
 分数与阈值
 ----------
@@ -32,8 +36,9 @@ media_url 的出口口径
 """
 from __future__ import annotations
 
+import json
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from sqlalchemy import select
 
@@ -48,7 +53,7 @@ from service.service_rag.schemas.rag_schema import (
     RetrieveHit, RetrieveReq, RetrieveResp,
 )
 from service.service_rag.services import rag_settings as settings
-from service.service_rag.services.graph_service import RagGraphService
+from service.service_rag.services import kg_search
 from service.service_rag.services.kb_service import KnowledgeBaseService
 from service.service_rag.services.rag_model import RagModelService
 
@@ -96,8 +101,17 @@ _META_FIELDS = {
 _META_OPS = ("EQUALS", "NOT_EQUALS", "CONTAINS", "IN", "NOT_IN",
              "GREATER_THAN", "GREATER_OR_EQUAL", "LESS_THAN", "LESS_OR_EQUAL")
 
-# 图谱附加的实体条数上限（检索页只做「顺带看一眼有哪些实体」，图谱页才有完整交互）
-GRAPH_HIT_LIMIT = 5
+# 图谱那一路叠加进结果的行数上限（与 scale 取小：上下文堆太多等于没堆，模型只用得上开头那段）
+GRAPH_ROW_LIMIT = 10
+
+# 召回来源标记（RetrieveHit.recall）：页面要能说清这一条是被哪一路拉上来的
+RECALL_CHUNK = "CHUNK"
+RECALL_GRAPH = "GRAPH"
+
+# 丢给大模型的资料规模（需求 9：两路数据叠加后整体递进去）
+#   只卡上下文长度，不卡召回条数：页面左栏该列多少条还是多少条，模型那一栏拿开头几篇
+QA_MAX_HITS = 12
+QA_CONTEXT_MAX_CHARS = 12000
 
 
 # ==================== 入参归一（公共边界，越界一律报错而不是悄悄改值） ====================
@@ -212,7 +226,9 @@ class _SearchRunner:
                  top_k: int = 0, score_threshold: Optional[float] = None,
                  rerank: Optional[bool] = None, vector_weight: Optional[float] = None,
                  with_graph: bool = False, metadata_filters: Optional[Sequence[dict]] = None,
-                 total_limit: int = 0):
+                 total_limit: int = 0, rerank_model_id: int = 0, chat_model_id: int = 0,
+                 graph_depth: Any = None, graph_scale: Any = None,
+                 graph_source_chunks: bool = False):
         self.login_user = login_user or {}
         self.query = str(query or "").strip()
         self.image_url = str(image_url or "").strip()
@@ -221,8 +237,17 @@ class _SearchRunner:
         self.top_k = int(top_k or 0)
         self.score_threshold = score_threshold
         self.rerank = rerank
+        # 需求 8：重排模型由这一次请求选，选了就重排、没选就不重排（库配置只在未传时兜底）
+        self.rerank_model_id = int(rerank_model_id or 0)
         self.vector_weight = vector_weight
         self.with_graph = bool(with_graph)
+        # 需求 9：图谱那一路要对话模型抽词，深度/规模是页面可传参数（越界夹到区间内）
+        self.chat_model_id = int(chat_model_id or 0)
+        self.graph_depth = kg_search.clamp_depth(graph_depth)
+        self.graph_scale = kg_search.clamp_scale(graph_scale)
+        # 需求 9（选 A）：图谱那一路默认只出精炼的实体+关系，不反查原文 chunk
+        # （反查会把上下文撑大、让模型失焦）；只有显式开了才顺 MENTIONED_IN 把切片叠成 GRAPH 行
+        self.graph_source_chunks = bool(graph_source_chunks)
         self.total_limit = int(total_limit or 0)
         self.requested_ids = [int(i) for i in (kb_ids or []) if i]
 
@@ -230,7 +255,8 @@ class _SearchRunner:
         self.warnings: list[str] = []
         self.vectors: dict[tuple, list[float]] = {}
         self.targets: list[dict] = []
-        self.entities: list[dict] = []
+        # 图谱那一路的过程信息（实体/三元组/抽词结果），没开图谱时是空 dict
+        self.graph: dict = {}
         self.extra: list[dict] = []
         self.mode_label = RC.RETRIEVE_MODE_HYBRID
         self.took_ms = 0
@@ -240,7 +266,7 @@ class _SearchRunner:
 
     # ---------- 主流程 ----------
     async def execute(self) -> list[dict]:
-        """鉴权 → 分组 → 各组召回 → 库级裁剪 → 重排 → 补全出口字段。"""
+        """鉴权 → 分组 → 各组召回 → 库级裁剪 → 图谱叠加 → 重排 → 补全出口字段。"""
         if not es_client.ready:
             # 存储没连上时报一句可执行的提示，而不是返回一个空结果集让用户去猜：
             # 「搜不到」和「服务没配好」在页面上长得一模一样，但只有后者能修
@@ -257,17 +283,17 @@ class _SearchRunner:
         for group in self._plan():
             rows.extend(await self._recall(group))
         rows = self._per_kb_cut(rows)
+        # 需求 9：关键词+向量权重分配后的一路召回，与图谱检索的一路召回**叠加**后才是结果
+        rows = await self._merge_graph(rows)
         rows = await self._rerank(rows)
         rows.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
         if self.total_limit:
             rows = rows[:self.total_limit]
         rows = await self._attach(rows)
-        if self.with_graph:
-            await self._graph(rows)
         self.took_ms = self._elapsed()
-        log.info("检索完成: kb={} mode={} 候选={} 返回={} 耗时={}ms",
-                 [t["kb_id"] for t in self.targets], self.mode_label, len(rows),
-                 len(rows), self.took_ms)
+        log.info("检索完成: kb={} mode={} 图谱={} 候选={} 返回={} 耗时={}ms",
+                 [t["kb_id"] for t in self.targets], self.mode_label,
+                 bool(self.graph.get("applied")), len(rows), len(rows), self.took_ms)
         return rows
 
     def _elapsed(self) -> int:
@@ -306,44 +332,62 @@ class _SearchRunner:
         cfg = KnowledgeBaseService.retrieve_of(kb)
         kb_type = str(kb.kb_type or RC.KB_TYPE_DOC)
         is_doc = kb_type == RC.KB_TYPE_DOC
+        label = RC.KB_TYPE_LABELS.get(kb_type, kb_type)
 
         # 图搜图只有 image 型能做（§8-3）：doc 型的向量模型可能是纯文本的，
-        # audio_video 型的 §9-3 只写了文本查询——拿图片去搜这两种库都是没有意义的召回。
+        # 拿图片去搜这两种库都是没有意义的召回。
         if self.image_url:
             if kb_type != RC.KB_TYPE_IMAGE:
                 self.warnings.append(
-                    f"{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}知识库不支持以图搜图，"
-                    f"已跳过「{kb.kb_name}」")
+                    f"{label}知识库不支持以图搜图，已跳过「{kb.kb_name}」")
                 return None
         elif not self.query:
             self.warnings.append(f"知识库「{kb.kb_name}」没有可用的查询方式，已跳过")
             return None
 
-        if is_doc:
-            mode = self.mode or RC.RETRIEVE_MODE_HYBRID
-            if mode == RC.RETRIEVE_MODE_KEYWORD and not self.query:
-                mode = RC.RETRIEVE_MODE_VECTOR
-        else:
-            if self.mode in (RC.RETRIEVE_MODE_KEYWORD, RC.RETRIEVE_MODE_HYBRID):
-                self.warnings.append(
-                    f"{RC.KB_TYPE_LABELS.get(kb_type, kb_type)}知识库只走向量召回"
-                    f"（BM25 命中的是文件名与摘要文本，不参与跨模态融合）")
+        # 需求 2/3：三型都能走关键词+向量，不再拿库类型硬卡住一路。
+        #   以图搜图没有可匹配的关键词，只能走向量一路；
+        #   没查询文本时（图搜图）选了 KEYWORD 也无意义，回到向量一路。
+        mode = self.mode or RC.RETRIEVE_MODE_HYBRID
+        if self.image_url or not self.query:
             mode = RC.RETRIEVE_MODE_VECTOR
 
         top_k = int(self.top_k or cfg["top_k"])
         threshold = float(cfg["score_threshold"] if self.score_threshold is None
                           else self.score_threshold)
-        weight = float(cfg["vector_similarity_weight"] if self.vector_weight is None
-                       else self.vector_weight)
+        # 需求 7：单选一路就是那一路 100%；只有同时选了两路才谈百分比分配
+        #   （ES 层单路为空时还会自己重归一，这里先把语义定对，不让库里的 0.7 漏到一个
+        #   「只要关键词」的请求里）
+        if mode == RC.RETRIEVE_MODE_VECTOR:
+            weight = 1.0
+        elif mode == RC.RETRIEVE_MODE_KEYWORD:
+            weight = 0.0
+        else:
+            weight = float(cfg["vector_similarity_weight"] if self.vector_weight is None
+                           else self.vector_weight)
+
+        # 需求 8：重排不写死。请求显式关了→不重排；请求选了模型→一定用这个模型重排；
+        # 两个都没给才回到库配置（勾了重排才用库上的重排模型）。
+        if self.rerank is False:
+            rerank_model, do_rerank = 0, False
+        elif self.rerank_model_id:
+            rerank_model, do_rerank = self.rerank_model_id, True
+        elif self.rerank is True or cfg["rerank"]:
+            rerank_model = int(kb.rerank_model_id or 0)
+            do_rerank = bool(rerank_model)
+        else:
+            rerank_model, do_rerank = 0, False
+
         return {
             "kb_id": int(kb.kb_id), "kb_name": kb.kb_name, "kb_type": kb_type,
             "embed_model_id": int(kb.embedding_model_id or 0),
-            "rerank_model_id": int(kb.rerank_model_id or 0),
             "mode": mode, "top_k": max(1, top_k), "threshold": threshold,
             "vector_weight": weight, "keyword_boost": float(cfg["keyword_boost"]),
             "recall_size": max(int(cfg["recall_size"]), max(1, top_k)),
-            "rerank": bool(cfg["rerank"]) if self.rerank is None else bool(self.rerank),
+            "rerank": do_rerank, "rerank_model_id": rerank_model,
             "chunk_types": [self.chunk_type] if self.chunk_type else None,
+            # 图谱增强只对 doc 型且真建过图的库生效（非 doc 型的支持列恒为 0）
+            "graph_enabled": bool(is_doc and kb.graph_enabled),
             # 查询向量走哪条路：与解析侧的 embed_* 严格对应，选错等于换了个向量空间
             "kind": ("image" if self.image_url else
                      ("text_doc" if is_doc else "text_media")),
@@ -462,6 +506,8 @@ class _SearchRunner:
             "sheet_name": src.get(RC.ES_FIELD_SHEET) or None,
             "media_ref": str(src.get(RC.ES_FIELD_MEDIA_URL) or ""),
             "es_id": src.get("es_id"),
+            "recall": RECALL_CHUNK,
+            "graph_entity": None,
             "extra": extra if isinstance(extra, dict) else {},
         }
 
@@ -562,24 +608,89 @@ class _SearchRunner:
             row["block_id"] = _join_block_ids(block_ids)
         return rows
 
-    async def _graph(self, rows: list[dict]) -> None:
-        """图谱附加信息（with_graph=true）：按查询词找相关实体，失败只记说明。
+    async def _merge_graph(self, rows: list[dict]) -> list[dict]:
+        """图谱检索那一路叠进结果（需求 9：两路召回结果叠加组成最终检索结果）。
 
-        只覆盖本次真正参与检索的 doc 型库——检索已经鉴过权，这里复用同一份白名单，
-        不再按用户请求里的 kb_ids 去 Neo4j 里捞没授权的东西。
+        叠在库级阈值之后：图谱行的分数是被命中实体的向量分，跟切片那一路的融合分不是
+        一把尺子，拿切片的阈值去筛它只会把整一路筛空。同一个切片两路都召回时保留
+        切片那一行（它的 vector/keyword 分与来源信息更完整），不重复占坑。
+
+        鉴权不重做：只拿本次已参与检索的库去查图谱投影，用户请求里写了但没授权的库
+        在 ``_load_targets`` 就被剔掉了，这里自然拿不到它。
         """
-        hit_ids = {int(r["kb_id"]) for r in rows if int(r.get("kb_id") or 0)}
-        doc_ids = [t["kb_id"] for t in self.targets
-                   if t["kb_type"] == RC.KB_TYPE_DOC
-                   and (not hit_ids or t["kb_id"] in hit_ids)]
-        if not doc_ids or not self.query:
-            return
+        self.graph = {"applied": False, "depth": self.graph_depth, "scale": self.graph_scale,
+                      "entities": [], "triples": [], "terms": {}, "truncated": False}
+        targets = [t for t in self.targets if t["graph_enabled"]]
+        if not self.with_graph:
+            return rows
+        if not targets:
+            self.warnings.append("开启图谱增强但这些知识库都没建过图谱（只有文档型知识库"
+                                 "支持构建），本次只有关键词+向量一路")
+            return rows
+        if not self.chat_model_id:
+            self.warnings.append("开启图谱增强必须选对话模型，本次未做图谱召回")
+            return rows
+        if not self.query:
+            self.warnings.append("图谱那一路要先从问句里抽实体和关系，以图搜图不做图谱增强")
+            return rows
+
+        # 按向量模型分组：实体/关系投影与切片共用知识库自己的向量空间
+        buckets: dict[int, list[int]] = {}
+        for t in targets:
+            buckets.setdefault(int(t["embed_model_id"] or 0), []).append(int(t["kb_id"]))
+        payload = [{"kb_ids": ids, "embed_model_id": mid} for mid, ids in buckets.items()]
         try:
-            self.entities = await RagGraphService.search(
-                self.login_user, self.query, doc_ids, limit=GRAPH_HIT_LIMIT)
-        except Exception as e:  # noqa: BLE001  图谱是附加信息，不该拖累主结果
-            log.warning(f"图谱实体检索失败: {e}")
-            self.warnings.append(f"图谱实体获取失败：{str(e)[:120]}")
+            got = await kg_search.recall(payload, question=self.query,
+                                         chat_model_id=self.chat_model_id,
+                                         depth=self.graph_depth, scale=self.graph_scale,
+                                         with_context=self.graph_source_chunks)
+        except Exception as e:  # noqa: BLE001  图谱是叠加项，挂了不影响切片那一路
+            log.warning(f"图谱增强检索失败: {e}")
+            self.warnings.append(f"图谱增强检索失败：{str(e)[:150]}")
+            return rows
+        self.graph.update({"applied": True,
+                           "entities": got.get("entities") or [],
+                           "triples": got.get("triples") or [],
+                           "terms": got.get("terms") or {},
+                           "truncated": bool(got.get("truncated"))})
+        self.warnings.extend(got.get("warnings") or [])
+        if not self.graph["entities"]:
+            self.warnings.append("图谱那一路没命中任何实体（问句里没出现图谱里存过的名词）")
+        sources = got.get("sources") or []
+        if not sources:
+            return rows
+
+        by_es = {str(s.get("es_id") or ""): s for s in sources if s.get("es_id")}
+        try:
+            hits = await es_client.get_chunks(list(by_es))
+        except Exception as e:  # noqa: BLE001  原文取不到只是这一路不叠加，实体与三元组仍在
+            log.warning(f"图谱原文切片读取失败: {e}")
+            self.warnings.append(f"图谱原文切片读取失败：{str(e)[:120]}")
+            return rows
+        allowed = {int(t["kb_id"]) for t in self.targets if t["graph_enabled"]}
+        seen = {str(r.get("es_id") or "") for r in rows}
+        extra: list[dict] = []
+        for hit in hits:
+            es_id = str(hit.get("es_id") or "")
+            if not es_id or es_id in seen:
+                continue
+            src = chunk_source(hit)
+            if int(src.get(RC.ES_FIELD_KB) or 0) not in allowed:
+                continue
+            # 切片被停用/软删后图谱里的实体还在，不能靠图谱把它重新召回来
+            if not bool(src.get(RC.ES_FIELD_AVAILABLE, True)):
+                continue
+            if int(src.get(RC.ES_FIELD_DELETED) or 0):
+                continue
+            one = by_es.get(es_id) or {}
+            row = self._row(hit)
+            row["recall"] = RECALL_GRAPH
+            row["graph_entity"] = str(one.get("entity") or "") or None
+            row["score"] = float(one.get("score") or 0.0)
+            extra.append(row)
+            seen.add(es_id)
+        limit = max(1, min(GRAPH_ROW_LIMIT, self.graph_scale))
+        return rows + extra[:limit]
 
 
 async def _sign_or_keep(name: str) -> Optional[str]:
@@ -607,6 +718,61 @@ def _join_block_ids(value: Any) -> Optional[str]:
     return None
 
 
+def qa_context(rows: Sequence[dict], graph: Optional[dict] = None) -> str:
+    """检索行 + 图谱三元组 → 递进问答 prompt 的资料段（〔N〕序号与左栏展示同序）。
+
+    带来源标识而不是只堆正文：模型要说「依据资料〔2〕」，页面才能把这句话链回具体切片；
+    图谱那一路单独附一段三元组（它们不在 rows 里，是「谁与谁有什么关系」这一层信息，
+    拿切片正文去回答「A 和 B 是什么关系」本就答不准）。
+    总长度卡住：超了从末尾丢，丢的是「多一条参考」，而不是让一个长 prompt 直接报错。
+    """
+    parts: list[str] = []
+    used = 0
+    for i, row in enumerate(rows[:QA_MAX_HITS], start=1):
+        head = " / ".join(x for x in (str(row.get("kb_name") or ""),
+                                       str(row.get("doc_name") or ""),
+                                       str(row.get("title_path") or "")) if x)
+        body = str(row.get("content") or "").strip()
+        if not body:
+            continue
+        where = f"〔{i}〕"
+        if head:
+            where = f"{where}（{head}）"
+        if str(row.get("recall") or "") == RECALL_GRAPH:
+            where = f"{where} 图谱命中实体：{row.get('graph_entity') or ''}"
+        block = f"{where}\n{body}"
+        if used + len(block) > QA_CONTEXT_MAX_CHARS:
+            break
+        parts.append(block)
+        used += len(block)
+    triples = [str(t) for t in ((graph or {}).get("triples") or []) if t]
+    if triples and parts:
+        # 三元组只补到剩下的那点空间里（上限四十条）：它是「谁与谁有什么关系」的索引，
+        # 不该把切片的资料空间全占了
+        room = max(0, QA_CONTEXT_MAX_CHARS - used)
+        acc = 0
+        picked: list[str] = []
+        for one in triples[:40]:
+            acc += len(one) + 1
+            if acc > room:
+                break
+            picked.append(one)
+        if picked:
+            parts.append("〔图谱关系〕" + "；".join(picked))
+    return "\n\n".join(parts)
+
+
+def _sse_frame(frame_type: str, **payload: Any) -> str:
+    """一帧 SSE（自定义 JSON 帧，不走 OpenAI 协议）。
+
+    前端那个 SSE 封装只把解码后的**原始文本块**交给回调（见 request-client/sse.ts），
+    不拆 event/data，所以每帧自带 type，由页面自己分发；ensure_ascii=False 否则
+    中文会被转成一堆 unicode 转义序列，排查时谁也看不懂。
+    """
+    body = {"type": frame_type, **payload}
+    return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+
+
 # ==================== 对外服务 ====================
 
 class RagRetrievalService:
@@ -621,12 +787,28 @@ class RagRetrievalService:
         """
         if not str(req.query or "").strip() and not str(req.image_url or "").strip():
             raise ValueError("请输入查询文本，或上传图片以图搜图")
-        runner = _SearchRunner(
+        RagRetrievalService._check_graph(req)
+        runner = RagRetrievalService._runner(login_user, req)
+        return RagRetrievalService._resp(runner, await runner.execute(), req)
+
+    @staticmethod
+    def _check_graph(req: RetrieveReq) -> None:
+        """需求 9：开了图谱增强就必须选对话模型，不能空着（图谱那一路靠它抽实体和关系）。"""
+        if req.with_graph and not int(req.chat_model_id or 0):
+            raise ValueError("开启知识图谱增强必须选择对话模型："
+                             "图谱那一路要先让大模型从问题里抽出实体和关系")
+
+    @staticmethod
+    def _runner(login_user: dict, req: RetrieveReq) -> _SearchRunner:
+        """请求 → 执行体（检索页与流式问答共用，避免两处传参传漏一个字段）。"""
+        return _SearchRunner(
             login_user, kb_ids=req.kb_ids, query=req.query, image_url=req.image_url,
             chunk_type=req.chunk_type, mode=req.mode, top_k=req.top_k or 0,
             score_threshold=req.score_threshold, rerank=req.rerank,
-            vector_weight=req.vector_weight, with_graph=req.with_graph)
-        return RagRetrievalService._resp(runner, await runner.execute(), req)
+            rerank_model_id=req.rerank_model_id or 0, vector_weight=req.vector_weight,
+            with_graph=req.with_graph, chat_model_id=req.chat_model_id or 0,
+            graph_depth=req.graph_depth, graph_scale=req.graph_scale,
+            graph_source_chunks=req.graph_source_chunks)
 
     @staticmethod
     async def search_rows(login_user: dict, *, kb_ids: Sequence[int], query: str = "",
@@ -670,7 +852,9 @@ class RagRetrievalService:
             title_path=row.get("title_path"), page_num=int(row.get("page_num") or 0),
             sheet_name=row.get("sheet_name"), media_url=row.get("media_url"),
             media_duration=int(row.get("media_duration") or 0),
-            block_id=row.get("block_id"))
+            block_id=row.get("block_id"),
+            recall=str(row.get("recall") or RECALL_CHUNK),
+            graph_entity=row.get("graph_entity"))
 
     @staticmethod
     def _resp(runner: _SearchRunner, rows: list[dict], req: RetrieveReq) -> dict:
@@ -682,8 +866,47 @@ class RagRetrievalService:
             query=runner.query or None, mode=runner.mode_label, total=len(hits),
             took_ms=runner.took_ms, kb_ids=searched, hits=hits,
             warnings=runner.warnings,
-            graph={"entities": runner.entities} if req.with_graph else {})
+            graph=dict(runner.graph) if req.with_graph else {})
         return resp.dump()
+
+    @staticmethod
+    def ask_stream(login_user: dict, req: RetrieveReq) -> AsyncIterator[str]:
+        """检索 + 大模型问答的流式输出（需求 9：两路数据丢给大模型，流式回）。
+
+        一条连接到底：先出一帧 meta（左栏的检索结果），再逐字出 delta（右栏的回答）。
+        分两次请求（先检索再问答）会跑两套召回集，左右两栏对不上时谁也说不清哪边错。
+        不做记忆：每次都是一句带资料的独立提问，不读也不写任何会话历史。
+
+        失败不往外抛：校验与检索都在首帧之前，而首帧一发状态码就定在 200 了，
+        此时抛 ValueError 只会得到一个断流，前端只能显示「连接断开」——所以一律
+        翻译成一帧 error，把原因写在页面上。
+        """
+        async def _stream() -> AsyncIterator[str]:
+            try:
+                if not str(req.query or "").strip():
+                    raise ValueError("知识库问答需要输入问题文本")
+                if not int(req.chat_model_id or 0):
+                    raise ValueError("请先选择对话模型再问知识库")
+                RagRetrievalService._check_graph(req)
+                runner = RagRetrievalService._runner(login_user, req)
+                rows = await runner.execute()
+                yield _sse_frame("meta", **RagRetrievalService._resp(runner, rows, req))
+                context = qa_context(rows, runner.graph)
+                if not context:
+                    # 没资料就不让模型开口：无依据的自由发挥在知识库页面上看起来像「答对了」，
+                    # 但它与这个库没有任何关系，比拒答危险得多
+                    raise ValueError("没有检索到可用资料，无法依据知识库回答"
+                                     "（请换个说法、放宽阈值或确认开启的库已解析完成）")
+                cfg = await RagModelService.require_config(req.chat_model_id, "对话模型")
+                prompt = settings.build_rag_qa_prompt(runner.query, context)
+                async for piece in RagModelService.chat_stream(cfg, prompt):
+                    yield _sse_frame("delta", content=piece)
+                yield _sse_frame("done", took_ms=runner.took_ms, citations=len(rows))
+            except Exception as e:  # noqa: BLE001  流里只能有一帧 error，然后收场
+                log.warning(f"知识库流式问答失败: {e}")
+                yield _sse_frame("error", message=str(e)[:300])
+
+        return _stream()
 
     @staticmethod
     async def health() -> dict:
@@ -697,4 +920,5 @@ class RagRetrievalService:
         return status
 
 
-__all__ = ["RagRetrievalService", "build_meta_filters", "parse_mode", "parse_chunk_type"]
+__all__ = ["RagRetrievalService", "build_meta_filters", "parse_mode", "parse_chunk_type",
+           "qa_context", "RECALL_CHUNK", "RECALL_GRAPH"]

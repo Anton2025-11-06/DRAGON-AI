@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""把「标记语言」（markdown / HTML）转成结构块：native 直读 md/html，docling 与 minerU
-的返回值本身也是 markdown，三者共用这一套块构造，保证「换引擎不换切片形态」。
+"""把「标记语言」（markdown / HTML）转成结构块：native 直读 md/html，minerU
+的返回值本身也是 markdown，两者共用这一套块构造，保证「换引擎不换切片形态」。
 
 为什么不走 langchain 的 markdown loader：它按语法树产出 Document，标题层级与表格结构
 都会在中途被摊平成纯文本，而分块策略要看的就是「这块属于哪个标题」「这张表的表头是哪行」。
@@ -64,7 +64,7 @@ def _image_from_src(src: str, alt: str, *, page: int = 0, bid: str = "") -> Imag
 def html_table_to_markdown(table_text: str) -> str:
     """HTML 表格 → markdown 表格（第一行作表头）。
 
-    docling 配 `tables_as_html` 或用户上传 .html 时会给出 HTML 表格；分块的 excel/table
+    minerU 导出 HTML 表格或用户上传 .html 时会给出 HTML 表格；分块的 excel/table
     判定与页面渲染都按 markdown 表格走，所以在这里一次性收敛成同一形态。
     """
     rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_text, re.S | re.I)

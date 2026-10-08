@@ -31,6 +31,7 @@ from typing import Any, Iterable, Optional, Sequence
 from common.common_constants import rag_constant as RC
 from common.common_es.index_mapping import (DEFAULT_DIM, DEFAULT_REPLICAS, DEFAULT_SHARDS,
                                            INDEX_NAME, build_mapping, check_dim)
+from common.common_es.kg_index_mapping import KG_INDEX_NAME, build_kg_mapping
 from common.common_log.log_init import log
 
 # 客户端依赖可缺：workflow / login 等服务不需要 ES，没装包时本模块仍应可 import（
@@ -185,6 +186,8 @@ class AsyncEsClient:
         self._es: Optional[AsyncElasticsearch] = None
         self._cfg: dict[str, Any] = {}
         self._index: str = INDEX_NAME
+        # 图谱向量投影索引（需求 9）：与切片索引共用一个客户端连接，两个索引名
+        self._kg_index: str = KG_INDEX_NAME
         self._dim: int = DEFAULT_DIM
         self._loop_id: Optional[int] = None
 
@@ -196,6 +199,10 @@ class AsyncEsClient:
     @property
     def index(self) -> str:
         return self._index
+
+    @property
+    def kg_index(self) -> str:
+        return self._kg_index
 
     @property
     def dim(self) -> int:
@@ -215,6 +222,7 @@ class AsyncEsClient:
         self._es = AsyncElasticsearch(**kw)
         self._cfg = cfg
         self._index = _text(cfg, "index") or INDEX_NAME
+        self._kg_index = _text(cfg, "kg_index") or KG_INDEX_NAME
         self._loop_id = _running_loop_id()
         if self._index != INDEX_NAME:
             # 允许配置写别的名字，但常量口径要一致，否则写入与检索分两个索引
@@ -292,7 +300,7 @@ class AsyncEsClient:
         want = check_dim(dim or DEFAULT_DIM)
         es = self._client()
         if await es.indices.exists(index=self._index):
-            got = await self._vector_dim()
+            got = await self._vector_dim(self._index)
             if got and got != want:
                 raise CustomError(f"索引 {self._index} 的向量维度是 {got}，与要求的 {want} 不符："
                                   f"ES 不支持改 dims，需要迁移数据重建索引")
@@ -306,19 +314,42 @@ class AsyncEsClient:
         log.info(f"ES 索引已创建: {self._index} dim={want}")
         return True
 
-    async def _vector_dim(self) -> int:
+    async def ensure_kg_index(self, dim: Optional[int] = None) -> bool:
+        """幂等建图谱向量投影索引；返回本次是否新建（维度必须与切片索引同空间）。
+
+        与 ensure_index 一样只在启动钩子里调一次。投影索引可以空着（没建过图谱的库
+        本来就没有向量），检索侧对「索引不存在」报的 CustomError 由上层按「未启用」降级。
+        """
+        want = check_dim(dim or DEFAULT_DIM)
+        es = self._client()
+        if await es.indices.exists(index=self._kg_index):
+            got = await self._vector_dim(self._kg_index)
+            if got and got != want:
+                raise CustomError(f"索引 {self._kg_index} 的向量维度是 {got}，与要求的 {want} 不符："
+                                  f"与切片不同维等于换向量空间，问句向量查不动实体")
+            self._dim = got or want
+            return False
+        body = build_kg_mapping(want, shards=_num(self._cfg, "shards", DEFAULT_SHARDS),
+                                replicas=_num(self._cfg, "replicas", DEFAULT_REPLICAS),
+                                analyzer=_text(self._cfg, "analyzer") or None)
+        await es.indices.create(index=self._kg_index, body=body)
+        self._dim = want
+        log.info(f"ES 图谱向量索引已创建: {self._kg_index} dim={want}")
+        return True
+
+    async def _vector_dim(self, index: Optional[str] = None) -> int:
         try:
-            mapping = await self._client().indices.get_mapping(index=self._index)
+            mapping = await self._client().indices.get_mapping(index=index or self._index)
         except (NotFoundError, ApiError):
             return 0
         props = _mapping_props(mapping)
-        spec = props.get(RC.ES_FIELD_EMBED) or {}
+        spec = props.get(RC.ES_FIELD_EMBED) or props.get(RC.KG_FIELD_EMBED) or {}
         return int(spec.get("dims") or 0)
 
     async def health(self) -> dict:
         """集群 + 索引状态（供 /health 聚合与页面「存储未就绪」提示）。"""
         out: dict[str, Any] = {"ok": False, "index": self._index, "dim": self._dim,
-                               "cluster": None, "docs": 0}
+                               "kg_index": self._kg_index, "cluster": None, "docs": 0}
         if not self.ready:
             out["error"] = "ES 未初始化"
             return out
@@ -340,6 +371,14 @@ class AsyncEsClient:
                 out["error"] = f"索引不存在: {self._index}"
         except ApiError as e:
             out["error"] = _reason(e)
+        # 图谱投影是可选件：没建过就不报 error，只给 kg_docs=0（不影响切片检索的 ok）
+        try:
+            if await es.indices.exists(index=self._kg_index):
+                out["kg_docs"] = int((await es.count(index=self._kg_index)).get("count") or 0)
+            else:
+                out["kg_docs"] = 0
+        except ApiError:
+            out["kg_docs"] = 0
         return out
 
     # ---------- 写入 ----------
@@ -427,8 +466,8 @@ class AsyncEsClient:
         return int(resp.get("updated") or 0)
 
     async def _delete_by_query(self, query: dict, *, refresh: bool = True,
-                               batched: bool = True) -> int:
-        """delete_by_query 统一入口。
+                               batched: bool = True, index: Optional[str] = None) -> int:
+        """delete_by_query 统一入口（index 缺省为切片索引，图谱投影传 self._kg_index）。
 
         refresh 默认开：写入用 ``wait_for``、可用性翻转用 ``refresh=True``，删除却是慢一拍，
         会留下一个「文档已删、检索还能命中」的窗口（refresh_interval 到点前），
@@ -436,11 +475,12 @@ class AsyncEsClient:
         多一次 refresh 换语义一致，值得。
         """
         es = self._client()
+        target = index or self._index
         kwargs: dict[str, Any] = {"conflicts": "proceed", "refresh": refresh}
         if batched:
             kwargs["scroll_size"] = BULK_SLICE
         try:
-            resp = await es.delete_by_query(index=self._index, query=query, **kwargs)
+            resp = await es.delete_by_query(index=target, query=query, **kwargs)
         except NotFoundError:
             return 0
         except ApiError as e:
@@ -527,10 +567,11 @@ class AsyncEsClient:
         return _hits_of(resp)
 
     async def _search(self, kwargs: dict) -> dict:
+        index = str(kwargs.get("index") or self._index)
         try:
             return await self._client().search(**kwargs)
         except NotFoundError as e:
-            raise CustomError(f"索引不存在（{self._index}），先执行 ensure_index") from e
+            raise CustomError(f"索引不存在（{index}），先执行 ensure_index") from e
         except ApiError as e:
             raise CustomError(f"检索失败: {_reason(e)}") from e
 
@@ -611,6 +652,103 @@ class AsyncEsClient:
             out.append(item)
         out.sort(key=lambda x: x["score"], reverse=True)
         return out[:size]
+
+    # ---------- 图谱向量投影（rag_kg_vector，需求 9 的实体/关系两路 kNN） ----------
+    # 与切片侧同一套口径：只认调用方传下来的 kb_ids 白名单，空名单就是空结果。
+    # 没有 available/deleted 位：实体/关系的生死由 Neo4j 说了算，投影跟它走（prune 链路）。
+
+    async def kg_put(self, docs: Sequence[dict], *, refresh: str = "wait_for") -> int:
+        """按 `_id` 覆盖写入实体/关系向量（`[{"_id": ..., **kg_fields}]`）。
+
+        _id 由 kg_index_mapping.kg_vector_id 生成，所以同一实体重建 N 次也只有一条向量。
+        写入失败报 CustomError：投影写不进去不能静默跳过，否则页面「已建图谱」而检索
+        一路永远是空，那种不一致比直接失败难查得多。
+        """
+        if not docs:
+            return 0
+        async_bulk = _helpers_bulk()
+
+        actions = []
+        for d in docs:
+            doc = dict(d)
+            kg_id = str(doc.pop("_id", "") or doc.pop("kg_id", "") or "")
+            if not kg_id:
+                raise CustomError("写入图谱向量缺少 _id（用 kg_index_mapping.kg_vector_id 生成）")
+            actions.append({"_op_type": "index", "_index": self._kg_index, "_id": kg_id,
+                            "_source": doc})
+        try:
+            await async_bulk(self._client(), actions, raise_on_error=True,
+                             chunk_size=BULK_SLICE, refresh=refresh)
+        except ApiError as e:
+            raise CustomError(f"图谱向量写入失败: {_reason(e)}") from e
+        except Exception as e:  # noqa: BLE001  helpers 的 BulkIndexError 等按文本透出
+            raise CustomError(f"图谱向量写入失败: {e}") from e
+        return len(actions)
+
+    async def kg_search_vector(self, kb_ids: Sequence[int], query_vector: Sequence[float], *,
+                               kind: Optional[str] = None, size: int = 10,
+                               min_score: Optional[float] = None) -> list[dict]:
+        """实体或关系一路的 kNN：返回 [{es_id, score, _source}]（score 是余弦归一分）。
+
+        :param kind: entity / relation；不给就是两路混查（同一索引里 kind 只是分类位）。
+        :param min_score: 实体名匹配阀值，由上层给（图谱召回不跟着切片的 score_threshold 走）。
+        """
+        if not kb_ids or not (list(query_vector or [])):
+            return []
+        k = max(1, int(size))
+        conds: list[dict] = [kb_filter(kb_ids)]
+        if kind:
+            conds.append({"term": {RC.KG_FIELD_KIND: str(kind)}})
+        knn = {"field": RC.KG_FIELD_EMBED, "query_vector": [float(x) for x in query_vector],
+               "k": k, "num_candidates": max(k, int(RC.KG_RETRIEVE_MAX_SCALE)), "filter": conds}
+        resp = await self._search({"index": self._kg_index, "knn": knn, "size": k,
+                                   "_source": True})
+        hits = _hits_of(resp)
+        if min_score is not None:
+            hits = [h for h in hits if _clamp(h.get("score")) >= float(min_score)]
+        return hits
+
+    async def kg_scan_texts(self, kb_id: int, *, size: int = 10000) -> dict[str, str]:
+        """列出本库已有的全部投影 `{_id: 向量文本}`（增量重建与 prune 算差集用）。
+
+        只拉 text 不拉 embedding：一份干条实体的向量拉回来是几十 MB，而判定「文本变没变」
+        只需要文本。冷路径（仅在图谱构建完成后跑一次）。
+        """
+        resp = await self._search({
+            "index": self._kg_index, "size": min(max(1, int(size)), 10000),
+            "query": {"term": {RC.KG_FIELD_KB: int(kb_id)}},
+            "_source": [RC.KG_FIELD_TEXT]})
+        return {str(h.get("es_id") or ""): str((h.get("_source") or {}).get(RC.KG_FIELD_TEXT) or "")
+                for h in _hits_of(resp) if h.get("es_id")}
+
+    async def kg_get(self, kg_ids: Iterable[str]) -> list[dict]:
+        """按 _id 批量取回投影文档（关系命中后要拿两端的实体文本拼上下文）。"""
+        ids = [str(i) for i in kg_ids or [] if i]
+        if not ids:
+            return []
+        resp = await self._client().mget(index=self._kg_index, ids=ids)
+        return [{"es_id": d.get("_id"), "score": None, "_source": d.get("_source") or {}}
+                for d in resp.get("docs") or [] if d.get("found")]
+
+    async def kg_count(self, kb_ids: Sequence[int]) -> int:
+        if not kb_ids:
+            return 0
+        try:
+            resp = await self._client().count(index=self._kg_index,
+                                              query={"bool": {"filter": [kb_filter(kb_ids)]}})
+        except (NotFoundError, ApiError):
+            return 0
+        return int(resp.get("count") or 0)
+
+    async def kg_delete_by_kb(self, kb_id: int, *, batched: bool = True) -> int:
+        return await self._delete_by_query(
+            {"term": {RC.KG_FIELD_KB: int(kb_id)}}, batched=batched, index=self._kg_index)
+
+    async def kg_delete_by_ids(self, kg_ids: Iterable[str]) -> int:
+        ids = [str(i) for i in kg_ids or [] if i]
+        if not ids:
+            return 0
+        return await self._delete_by_query({"ids": {"values": ids}}, index=self._kg_index)
 
 
 # ==================== 分数与结构小工具 ====================

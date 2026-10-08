@@ -21,6 +21,7 @@ import { useAccess } from '@vben/access';
 
 import {
   AimOutlined,
+  QuestionCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
   ZoomInOutlined,
@@ -71,6 +72,8 @@ const edges = ref<any[]>([]);
 const totalNodes = ref(0);
 const totalEdges = ref(0);
 const truncated = ref(false);
+/** 后端给的空白原因（关键词与类型筛空起点时用），空态拿它替掉「库里没图」那句通用文案 */
+const emptyMessage = ref('');
 
 const stats = ref<Record<string, any>>({});
 const loading = ref(false);
@@ -84,8 +87,23 @@ const selectedNode = ref<null | GraphNodeResp>(null);
 const sourceDocs = ref<Record<string, any>[]>([]);
 const sourceLoading = ref(false);
 
+/**
+ * 点中的实体在画布上浮一张小卡。
+ *
+ * 详情栏在最右栏，点上实体之后画布上没有任何当场反馈，读者就读成「点了没反应」——
+ * 尤其窄窗口下右栏要被横向滚动推出去时更是如此。
+ */
+const cardNode = ref<null | GraphNodeResp>(null);
+const cardPos = ref({ left: 0, top: 0 });
+const nodeCardStyle = computed(() => ({
+  left: `${cardPos.value.left}px`,
+  top: `${cardPos.value.top}px`,
+}));
+
 const container = ref<HTMLDivElement | null>(null);
 let graph: any = null;
+/** 一次「按下 → 松手」的记账（详情不能挂 G6 的 click，原因见 finishGesture） */
+let gesture: null | { id?: string; x: number; y: number } = null;
 
 // 实体类型取自后端 rag_constant.KG_ENTITY_TYPES（中文），按原值着色，未命中落 DEFAULT
 const ENTITY_COLORS: Record<string, string> = {
@@ -129,6 +147,18 @@ const topEntities = computed<Record<string, any>[]>(
   () => stats.value?.topEntities || [],
 );
 
+/**
+ * 空态文案：后端给了原因就用它。
+ *
+ * 「没匹配到起点」与「这个范围内根本没图」在画布上是一块同样的白，不把两者分开，
+ * 用户只会反复换关键词、或怀疑上面两个过滤条件没生效。
+ */
+const emptyText = computed(
+  () =>
+    emptyMessage.value ||
+    '当前范围内没有图谱数据：确认所选知识库已开启图谱，且文档已完成「构建图谱」',
+);
+
 async function loadOptions() {
   try {
     options.value = await KbOptions();
@@ -169,12 +199,15 @@ async function load() {
     totalNodes.value = res.totalNodes ?? nodes.value.length;
     totalEdges.value = res.totalEdges ?? edges.value.length;
     truncated.value = !!res.truncated;
+    emptyMessage.value = String(res.message || '');
     selectedNode.value = null;
+    cardNode.value = null;
     sourceDocs.value = [];
     await nextTick();
     await render();
   } catch (e: any) {
     message.error(e?.message || '加载图谱失败');
+    emptyMessage.value = '';
   } finally {
     loading.value = false;
   }
@@ -194,6 +227,17 @@ const MIN_CANVAS = 60;
  */
 const MIN_FIT_ZOOM = 0.08;
 const MAX_FIT_ZOOM = 2;
+
+/**
+ * 判定「点一下」的位移容差（px）。drag-canvas 自己累计到 10px 才认平移
+ * （g6-pc/lib/behavior/drag-canvas.js 的 DRAG_OFFSET），这里留出 2px 余量，
+ * 免得一次手抖既平移了画布又弹出详情。
+ */
+const CLICK_MOVE_TOLERANCE = 8;
+/** 浮在节点下方的详情小卡：宽度、与节点的间距、给卡片留出的竖向高度 */
+const CARD_WIDTH = 260;
+const CARD_GAP = 10;
+const CARD_MAX_HEIGHT = 132;
 
 /** 页面当前缩放（百分比）：下次再出现「有数据但没画面」，一眼能看出是被顶到了哪一端 */
 const zoomPct = ref(100);
@@ -317,6 +361,80 @@ async function fitToView(g: any) {
   zoomPct.value = Math.round(ratio * 100);
 }
 
+/**
+ * 让「按在任意形状上」都能起手平移。
+ *
+ * allowDragOnItem 只打开了行为层，事件层还有一道闸：g-base 只在按下的那个形状
+ * `draggable` 为真时才把这次操作判成拖拽并派发 drag 事件
+ * （@antv/g-base/lib/event/event-contoller.js:361），另一条分支要求按下的是**纯空白**
+ * （:372）。而 G6 只给节点的 keyShape 补了 draggable（g6-core/item/item.js:158），
+ * 标签文字、边的路径与边标签一个都没有。结果就是：按在圆上能拖、按在名字上整张图纹丝
+ * 不动，而对视之后圆和名字几乎连成一片铺满画布 —— 用户看到的就是「子图拖不动」。
+ * 这里把节点/边容器里的每个子形状都补上 draggable，让平移从哪儿都能起手。
+ */
+function enableDragOnAllShapes(g: any) {
+  const mark = (shape: any) => {
+    if (!shape?.set) return;
+    shape.set('draggable', true);
+    const children = shape.get?.('children');
+    if (children) children.forEach((child: any) => mark(child));
+  };
+  [...(g.getNodes() || []), ...(g.getEdges() || [])].forEach((item: any) =>
+    mark(item?.getContainer?.()),
+  );
+}
+
+/**
+ * 把详情浮卡贴到它那个节点下方。
+ *
+ * 用画布包围盒而不是模型坐标：平移缩放之后只有前者和容器内的 CSS 坐标一一对应，
+ * 卡片才跟得住节点。左右各夹住半个卡宽、下方留出卡片的高度，别让卡片探出画布。
+ */
+function placeCard() {
+  const g = graph;
+  const el = container.value;
+  const node = cardNode.value;
+  if (!g || g.destroyed || !el || !node) return;
+  const item = g.findById(node.id);
+  if (!item) return;
+  const box = item.getContainer().getCanvasBBox();
+  if (!box || !Number.isFinite(box.minX) || !Number.isFinite(box.maxY)) return;
+  const size = canvasSize(el);
+  const half = CARD_WIDTH / 2;
+  const cx = (box.minX + box.maxX) / 2;
+  const left = Math.min(
+    Math.max(cx, half + 4),
+    Math.max(size.width - half - 4, half + 4),
+  );
+  const top = Math.min(
+    box.maxY + CARD_GAP,
+    Math.max(size.height - CARD_MAX_HEIGHT, 4),
+  );
+  cardPos.value = { left: Math.round(left), top: Math.round(top) };
+}
+
+/**
+ * 松手（mouseup）与拖拽结束（dragend）的统一收口：位移没超容差就算这次是「点」。
+ *
+ * 为什么不用 node:click：g-base 的 _onmouseup 只在「这次没进拖拽」时才派发 mouseup/click
+ * （event-contoller.js:310-322），而它进拖拽的门槛是**按下超过 120ms 且动过一下**
+ * （:360 的 `timeWindow > 120 || dist > CLICK_OFFSET`，CLICK_OFFSET=40 只在 120ms 内生效）。
+ * 人正常点一下鼠标常常就是 150ms 上下、还夹着一两个像素的抖动，于是 click 被吞成
+ * dragend —— 表现就是「点了实体什么详情都不出」。按下与松手自己记账才不受这套判定影响。
+ */
+function finishGesture(ev: any) {
+  const rec = gesture;
+  gesture = null;
+  if (!rec?.id) return;
+  if (
+    Math.abs(Number(ev.clientX) - rec.x) > CLICK_MOVE_TOLERANCE ||
+    Math.abs(Number(ev.clientY) - rec.y) > CLICK_MOVE_TOLERANCE
+  ) {
+    return; // 拖过容差 = 平移画布 / Shift 摆节点，不弹详情
+  }
+  void selectNode(nodes.value.find((n) => n.id === rec.id) || null);
+}
+
 async function render() {
   let el = container.value;
   if (!el) {
@@ -329,6 +447,8 @@ async function render() {
     graph.destroy();
     graph = null;
   }
+  // 旧图的按下记账对新图没有意义（节点集已经换了一批），带过来只会认错实体
+  gesture = null;
   if (nodes.value.length === 0) return;
 
   const G6 = await import('@antv/g6');
@@ -345,14 +465,14 @@ async function render() {
     fitView: false,
     fitViewPadding: FIT_VIEW_PADDING,
     animate: true,
-    // 交互分工。原先写成 ['drag-canvas', 'zoom-canvas', 'drag-node'] 全用默认值，两处不合手：
+    // 交互分工。原先写成 ['drag-canvas', 'zoom-canvas', 'drag-node'] 全用默认值，三处不合手：
     // ① drag-canvas 的 allowDragOnItem 默认 false（g6-pc/lib/behavior/drag-canvas.js:25），
     //    allowDrag() 里鼠标按在节点/边/标签上就直接 return false 不平移。而这张图对视后
     //    节点圆加底部标签几乎铺满画布，很难落到纯空白 —— 反馈就是「子图拖不动」。
+    //    打开它只过了行为层这一道闸，事件层还得按在可拖的形状上（见 enableDragOnAllShapes）。
     // ② ①一开，节点上按下就同时「平移整张画布」+「drag-node 拖走这个节点」，图跟着乱跑。
     //    所以把 drag-node 收起来：普通拖动只看视图，按住 Shift 才摆单个节点。
-    // ③ 点击查看详情走 render 末尾的 node:click，和拖动不冲突 —— G6 的 click 判定本身带
-    //    位移门槛（drag-canvas 里也是 DRAG_OFFSET=10 才算拖），拖过一下就当平移、不弹详情。
+    // ③ 详情不挂 node:click，改走 render 末尾的按下/松手记账自判（见 finishGesture）。
     modes: {
       default: [
         {
@@ -439,6 +559,8 @@ async function render() {
     if (graph && !graph.destroyed) void fitToView(graph);
   });
   graph.render();
+  // 子形状是 render 里才建出来的，draggable 只能补在这一步之后
+  enableDragOnAllShapes(graph);
 
   // 上面可能拿还没长开的实测尺寸建了图：建完再量一次，只要与建图尺寸不一致就改画布，
   // 让 G6 记录的尺寸与 DOM 始终一致（不一致 = 定心点落在裁剪区外）
@@ -455,21 +577,39 @@ async function render() {
   graph.on('viewportchange', () => {
     if (graph && !graph.destroyed) {
       zoomPct.value = Math.round(Number(graph.getZoom() || 1) * 100);
+      placeCard();
     }
   });
+  // 平移是 drag-canvas 逐帧 translate 出来的，不一定回 viewportchange；听它自己发出去的
+  // canvas:drag，让浮卡跟着节点走（卡片钉在原地会被当成另一个实体）
+  graph.on('canvas:drag', () => placeCard());
   graph.on('node:mouseenter', (ev: any) => graph?.setItemState(ev.item, 'hover', true));
   graph.on('node:mouseleave', (ev: any) => graph?.setItemState(ev.item, 'hover', false));
-  graph.on('node:click', async (ev: any) => {
-    const id = ev.item.getModel().id;
-    await selectNode(nodes.value.find((n) => n.id === id) || null);
+  graph.on('node:mousedown', (ev: any) => {
+    gesture = {
+      id: ev.item?.getModel?.().id,
+      x: Number(ev.clientX),
+      y: Number(ev.clientY),
+    };
   });
+  // 同一次操作里 g-base 只走 mouseup 与 dragend 其中一条，两个都接上、收口只有一个
+  graph.on('node:mouseup', finishGesture);
+  graph.on('node:dragend', finishGesture);
 }
 
 /** 选中一个实体：右侧详情 + 溯源一起换，图上把它描边高亮 */
 async function selectNode(node: null | GraphNodeResp) {
   selectedNode.value = node;
   sourceDocs.value = [];
-  if (!node) return;
+  if (!node) {
+    cardNode.value = null;
+    return;
+  }
+  // 浮卡只贴在画布上真有的节点旁边：左栏搜来的实体可能被 depth 截断而没进图，
+  // 那种情况右侧详情照常打开，画布上不浮卡（贴在旧位置反而误导）
+  cardNode.value =
+    graph && !graph.destroyed && graph.findById(node.id) ? node : null;
+  placeCard();
   if (graph) {
     graph.findAll('node', (m: any) => m.id === node.id).forEach((it: any) => {
       graph.setItemState(it, 'selected', true);
@@ -717,6 +857,11 @@ bootstrap();
             allow-clear
             style="width: 150px"
           />
+          <Tooltip
+            title="这两个条件是叠加过滤（AND）：都填了就以「名字命中关键词且类型相符」的实体当起点，其中一个把起点筛空就是空图（空态会写明原因，不会悄悄丢掉关键词只按类型给图）。两者都只决定起点，展开出来的邻居不按类型筛——只留同类型的节点会把关系链凭空切断。"
+          >
+            <QuestionCircleOutlined class="param-label" />
+          </Tooltip>
           <span class="param-label">深度</span>
           <!-- 上限 3 与后端 GraphQueryReq.depth(le=3) 对齐，填 4 会被 422 打回 -->
           <InputNumber v-model:value="depth" :min="1" :max="3" style="width: 70px" />
@@ -728,7 +873,7 @@ bootstrap();
           <Tag v-if="nodes.length > 0" color="default">缩放 {{ zoomPct }}%</Tag>
           <!-- 摆节点被收进了 Shift，不写在脸上没人知道还能这么用 -->
           <span v-if="nodes.length > 0" class="param-label">
-            拖动平移 · 滚轮缩放 · 点节点看详情 · Shift+拖动摆节点
+            任意处按住拖动即可平移 · 滚轮缩放 · 点实体出详情 · Shift+拖动摆节点
           </span>
         </Space>
 
@@ -742,10 +887,28 @@ bootstrap();
 
         <Spin :spinning="loading" wrapper-class-name="graph-canvas-spin">
           <div ref="container" class="graph-canvas"></div>
+          <!-- 点实体的当场反馈：名字+类型+摘要贴在节点下方，原文溯源仍在右栏 -->
+          <div v-if="cardNode" class="node-card" :style="nodeCardStyle">
+            <div class="node-card-head">
+              <span class="node-card-name ellipsis">{{ cardNode.name }}</span>
+              <Tag
+                v-if="cardNode.entityType"
+                :color="colorOf(cardNode.entityType)"
+              >
+                {{ cardNode.entityType }}
+              </Tag>
+            </div>
+            <div v-if="cardNode.summary" class="node-card-summary">
+              {{ cardNode.summary }}
+            </div>
+            <div class="node-card-tip">
+              权重 {{ cardNode.weight }} · 原文溯源见右侧「实体详情」
+            </div>
+          </div>
           <Empty
             v-if="!loading && nodes.length === 0"
             class="graph-empty"
-            description="当前范围内没有图谱数据：确认所选知识库已开启图谱，且文档已完成「构建图谱」"
+            :description="emptyText"
           />
         </Spin>
       </Card>
@@ -905,6 +1068,8 @@ bootstrap();
    （实测 可视533 / 内容617 / 纵溢84）。min-height:0 是必需的：flex 子项默认
    min-height:auto，不加就会被内容顶高、又变成溢出。 */
 :deep(.graph-canvas-spin) {
+  /* 浮卡与空态都按这块画布区域定位，得先把它变成定位上下文 */
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -934,6 +1099,51 @@ bootstrap();
   top: 40%;
   right: 0;
   left: 0;
+}
+
+/* 点中实体浮在节点下方的小卡。pointer-events:none 是必需的：卡片压在画布上，
+   留着它就会挡住下面节点的按下记账，等于自己把「点节点」的判定吃掉一半。 */
+.node-card {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 260px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  pointer-events: none;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+  transform: translateX(-50%);
+}
+
+.node-card-head {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
+.node-card-name {
+  max-width: 150px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.node-card-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  color: #555;
+}
+
+.node-card-tip {
+  color: var(--text-color-secondary, #999);
 }
 
 .detail-title {

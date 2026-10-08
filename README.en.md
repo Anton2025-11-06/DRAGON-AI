@@ -244,8 +244,8 @@ The `k8s/` directory is reserved; no manifests yet.
 | Communication | httpx global connection pool (HTTP/2) · WebSocket · SSE (sse-starlette) |
 | Model access | One `openai_impl` / `dashscope_impl` / `zhipu_impl` per capability, dispatched by `common_model.entry` on (capability, provider) |
 | Agents | Official MCP Python SDK · sandboxed process isolation (psutil) · code nodes share the same sandbox; `deepagents` is declared as a dependency but the planning loop is not implemented |
-| Retrieval | single ES index `rag_knowledge_chunk`: BM25 + 1024-dim dense_vector kNN (RRF fusion, optional rerank) · text / image / audio-video share one vector space · rank-bm25 keyword scoring kept for the legacy path |
-| Document parsing | `common_file_parser`: native (pypdf/docx/xlsx…) · docling (pip, CPU) · minerU (private HTTP API), auto engine selection, 8 chunking strategies (20000 chars per chunk cap) |
+| Retrieval | two ES indexes, `rag_knowledge_chunk` (chunks) + `rag_kg_vector` (entity/relation projection): BM25 + 1024-dim dense_vector kNN fused with per-request weights · rerank model chosen per request (no model, no rerank) · an optional LightRAG-style graph retrieval path can be merged in · text / image / audio-video share one vector space |
+| Document parsing | `common_file_parser`: native (pypdf/docx/xlsx…) · minerU (private HTTP API), auto engine selection, 8 chunking strategies (20000 chars per chunk cap) |
 | Observability | loguru + home-grown `x-trace-id` (OpenTelemetry dependencies declared, not yet wired into code) |
 | Front end | Vue 3.5 · TypeScript · Vite · vben v5 (pnpm + turbo monorepo) · ant-design-vue · Vue Flow canvas · CodeMirror/Monaco |
 | AuthZ/AuthN | JWT + Redis session · dual-channel API key · RBAC permission points |
@@ -261,7 +261,7 @@ The `k8s/` directory is reserved; no manifests yet.
 │   ├── common_middleware/        #   RequestLog / TokenCheck / RateLimit / OperateLog / exception handlers
 │   ├── common_permission/        #   @has_permission checks + resource_guard row-level ACL
 │   ├── common_model/             #   12 capabilities × 3 providers + entry dispatch
-│   ├── common_file_parser/       #   parsing: 3 engines + 8 chunkers + preprocessing/image enrichment
+│   ├── common_file_parser/       #   parsing: 2 engines + 8 chunkers + preprocessing/media description
 │   ├── common_storage/           #   StorageBackend: local / Aliyun OSS, bytes only
 │   ├── common_mysql|redis|es|neo4j|httpx|arq/   # pools and queue wrappers (es/neo4j are global async singletons)
 │   ├── common_entity/            #   ApiResponse / RBAC entities

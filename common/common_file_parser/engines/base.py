@@ -3,7 +3,7 @@
 
 三条硬规则
 ----------
-1. **解析是 CPU 密集活，绝不占事件循环**。native/docling 全部在 thread_pool 里跑
+1. **解析是 CPU 密集活，绝不占事件循环**。native 全部在 thread_pool 里跑
    （worker 与 API 共用同一个进程内线程池），minerU 是纯 HTTP 等待，天然异步。
    SPEC §12 明确 ragflow 队列纯 CPU：单文档解析几秒到几十秒，直接 await 会把同进程
    的其它协程（进度回写、心跳）全部拖住。
@@ -11,7 +11,7 @@
    换引擎或补部署就能好，文档本身没动过），后者抛 ParseError（文档进 FAILED，页面
    显示 error_msg）。混成一个异常，页面就只能告诉用户「解析失败」，运维无从下手。
 3. **引擎只产结构块，不做分块、不做清洗**。页眉页脚/目录/标题层级属于「预处理」，
-   受知识库配置开关控制，且对三个引擎应当表现一致——所以统一放在 finalize/preprocess
+   受知识库配置开关控制，且对各引擎应当表现一致——所以统一放在 finalize/preprocess
    里做，任何引擎私自做都会导致「换个引擎切片内容变了」。
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ class ParseError(Exception):
 
 
 class EngineNotAvailable(Exception):
-    """引擎不可用：pip 依赖缺失（docling）或私有化服务未配置（minerU 的 base_url）。"""
+    """引擎不可用：私有化服务未配置（minerU 的 base_url）。"""
 
 
 def normalize_ext(filename: str, ext: str = "") -> str:
@@ -47,20 +47,17 @@ def normalize_ext(filename: str, ext: str = "") -> str:
 
 
 def guard_legacy_office(ext: str) -> None:
-    """老版 Office 二进制格式（.doc/.ppt）的统一拦截：三个引擎只留一份文案。
+    """老版 Office 二进制格式（.doc/.ppt）的统一拦截：各引擎只留一份文案。
 
-    python-docx / python-pptx 与 docling 都只认 Office Open XML（zip 包），读不动 OLE2
-    复合文档。原本只有 native 拦了，docling 漏拦：它的 formats 并了 EXT_WORD（含 doc），
-    于是 .doc 一路放行进 docling，最后从它内部冒出一句
-    ``An unexpected error occurred while opening the document xxx.doc`` ——
-    用户看不出那是格式问题，也不知道该改哪一处（文档没坏，是格式读不了）。
+    python-docx / python-pptx 只认 Office Open XML（zip 包），读不动 OLE2
+    复合文档，native 一律拒收。
 
     拦截必须在「引擎不支持该格式」那道闸门**之前**：只有这句带得上「转成什么」。
     """
     key = normalize_ext("", ext)
     if key in C.LEGACY_OFFICE:
         raise ParseError(
-            f".{key} 是老版 Office 二进制格式，native/docling 都读不了；"
+            f".{key} 是老版 Office 二进制格式，native 读不了；"
             f"请另存为 .{'docx' if key == 'doc' else 'pptx'}，"
             f"或把解析引擎换成 minerU（这一类能不能吃取决于部署的 minerU 版本）")
 
@@ -92,7 +89,7 @@ class BaseEngine(ABC):
 
     @abstractmethod
     async def _parse(self, raw: bytes, filename: str, ext: str) -> ParsedDocument:
-        """子类实现：原生解析并返回未收尾的 ParsedDocument（四个内置引擎都实现了）"""
+        """子类实现：原生解析并返回未收尾的 ParsedDocument（内置引擎都实现了）"""
         raise NotImplementedError
 
     # ---------- 通用能力 ----------
@@ -138,7 +135,7 @@ class BaseEngine(ABC):
         for idx, b in enumerate(doc.blocks or []):
             ref = b.image
             if ref is not None and not ref.data and not ref.url:
-                # 图片引用配不到字节也配不到地址（docling 导出的本地路径、md 里的相对引用）：
+                # 图片引用配不到字节也配不到地址（md 里的相对引用）：
                 # 留着一个既传不上去又显示不出来的块，只会产出一句 [图片] 空切片
                 alt = (ref.alt or "").strip()
                 if not alt:
@@ -173,7 +170,6 @@ def join_text(parts: Sequence[str], *, sep: str = "\n") -> str:
 
 _ENGINE_PATHS: dict[str, tuple[str, str]] = {
     C.ENGINE_NATIVE: ("common.common_file_parser.engines.native", "NativeEngine"),
-    C.ENGINE_DOCLING: ("common.common_file_parser.engines.docling_engine", "DoclingEngine"),
     C.ENGINE_MINERU: ("common.common_file_parser.engines.mineru", "MineruEngine"),
     C.ENGINE_AUTO: ("common.common_file_parser.engines.auto", "AutoEngine"),
 }
@@ -182,7 +178,7 @@ _ENGINE_PATHS: dict[str, tuple[str, str]] = {
 def build_engine(name: Optional[str], options: Optional[dict] = None) -> BaseEngine:
     """引擎名 → 实例（未登记的名称直接报错，绝不静默退回默认引擎）。
 
-    静默退回是最坏的行为：用户选了 docling 却因为依赖没装跑成 native，切片质量下降却
+    静默退回是最坏的行为：用户选了 minerU 却因为没配地址跑成 native，切片质量下降却
     页面上看不出来。缺依赖由 ``BaseEngine.ensure_available`` 抛 EngineNotAvailable。
     """
     key = (name or C.ENGINE_NATIVE).strip().lower()

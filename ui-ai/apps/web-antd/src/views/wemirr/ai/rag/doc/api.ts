@@ -11,6 +11,7 @@ import {
   MT_AUDIO_TO_TEXT,
   MT_IMAGE_UNDERSTAND,
   MT_MULTIMODAL_EMBEDDING,
+  MT_OCR,
   MT_TEXT_EMBEDDING,
   MT_TEXT_RERANK,
   MT_TEXT_TO_TEXT,
@@ -94,16 +95,10 @@ export const KB_TYPE_ALLOWED_EXTS_FALLBACK: Record<string, string[]> = {
   ],
 };
 
-/** 解析引擎 */
-export const PARSE_ENGINES_ALL = [
-  'auto',
-  'docling',
-  'mineru',
-  'native',
-] as const;
+/** 解析引擎（docling 已下线，存量库由后端 PARSE_ENGINE_LEGACY 映射给 native） */
+export const PARSE_ENGINES_ALL = ['auto', 'mineru', 'native'] as const;
 export const PARSE_ENGINE_LABELS: Record<string, string> = {
   native: '原生解析',
-  docling: 'Docling 增强解析',
   mineru: 'MinerU 增强解析',
   auto: '自动选择',
 };
@@ -208,6 +203,25 @@ export const RETRIEVE_MODE_LABELS: Record<string, string> = {
 };
 
 /**
+ * 命中来自哪一路（后端 retrieval_service 的 RECALL_CHUNK / RECALL_GRAPH）。
+ *
+ * 开了图谱增强之后，一个列表里会同时存在「关键词+向量这一路」与「图谱那一路叠进来的」
+ * 两类行，不标出来用户看不出为什么这一条会出现在这里。
+ */
+export const RECALL_CHUNK = 'CHUNK';
+export const RECALL_GRAPH = 'GRAPH';
+export const RECALL_LABELS: Record<string, string> = {
+  CHUNK: '文档切片',
+  GRAPH: '图谱关联',
+};
+
+/** 图谱增强那一路的两个参数区间（与后端 kg_search.clamp_depth / clamp_scale 同口径） */
+export const KG_DEPTH_MIN = 1;
+export const KG_DEPTH_MAX = 3;
+export const KG_SCALE_MIN = 1;
+export const KG_SCALE_MAX = 50;
+
+/**
  * 向量维度：建库即永久锁定，页面只读展示，不提供任何修改入口。
  *
  * 锁定不是前端规矩而是物理限制：ES 索引的 dense_vector dims 建成之后不可改，
@@ -236,7 +250,7 @@ export interface KbPageReq extends PageReq {
   name?: string;
   description?: string;
   /** 留空或 'all' = 不做类型筛选（后端同样容忍 all，不再拿 status 筛库） */
-  kbType?: KbType | 'all' | '';
+  kbType?: '' | 'all' | KbType;
 }
 
 export interface KbSaveReq {
@@ -244,9 +258,9 @@ export interface KbSaveReq {
   name: string;
   description?: string;
   embedModelId: number;
-  /** 重排模型：配置面板已撤下（需求 15），字段只为接口透传存量值，新建不传 */
+  /** 重排模型：配置面板已撤下（需求 5），检索页按本次请求选 */
   rerankModelId?: number;
-  /** 问答/媒体理解模型：doc 型不再用它（已拆成 extract/image 两位），audio_video 型仍是这一位 */
+  /** 对话模型：只剩存量透传（需求 4 已删音视频型的媒体理解模型位） */
   chatModelId?: number;
   /** 图谱实体抽取模型：doc 型且开了图谱必填 */
   extractModelId?: number;
@@ -402,7 +416,7 @@ export interface RuntimeConfig {
   allowedExts?: Record<string, string[]>;
   /**
    * 各解析引擎真读得动的文档格式（数据源是解析层引擎类的 formats 声明）。
-   * 面板要按它写清 native/docling/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移。
+   * 面板要按它写清 native/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移。
    */
   engineFormats?: Record<string, string[]>;
   /** 媒体后缀按种类分组（image/audio/video）：三个解析增强开关的提示按它说各自管哪一类文件 */
@@ -612,8 +626,21 @@ export interface RetrieveReq {
   topK?: number;
   scoreThreshold?: number;
   rerank?: boolean;
+  /** 本次检索用哪个重排模型（需求 8：选了就重排，没选就不重排；空=沿库配置） */
+  rerankModelId?: number;
   vectorWeight?: number;
   withGraph?: boolean;
+  /** 对话模型：图谱增强的问句抽词 + 流式问答都靠它（需求 9，开图谱时必填） */
+  chatModelId?: number;
+  /** 图谱邻域从命中实体向外扩几跳（空=默认 2） */
+  graphDepth?: number;
+  /** 实体/关系各一路的向量召回条数（空=默认 10） */
+  graphScale?: number;
+  /**
+   * 图谱那一路是否顺命中实体反查原文切片（把它们当 GRAPH 行叠进结果）。
+   * 默认 false：图谱只出精炼的实体+关系，原文交给关键词+向量那一路，避免上下文撑大、模型失焦。
+   */
+  graphSourceChunks?: boolean;
 }
 
 export interface RetrieveHit {
@@ -634,6 +661,10 @@ export interface RetrieveHit {
   mediaUrl?: string;
   mediaDuration: number;
   blockId?: string;
+  /** CHUNK=关键词+向量这一路，GRAPH=图谱增强叠进来的 */
+  recall?: string;
+  /** 图谱那一路把它带出来的实体名 */
+  graphEntity?: string;
 }
 
 export interface RetrieveResp {
@@ -652,6 +683,88 @@ export const Retrieve = (data: RetrieveReq) =>
 
 export const RetrieveRows = (data: RetrieveReq) =>
   defHttp.post<RetrieveHit[]>(`${BASE}/retrieve/rows`, data);
+
+/**
+ * 流式问答帧回调（需求 9：选了对话模型就多一栏逐字回答）。
+ *
+ * 后端发的是一帧一个 JSON 的自定义帧（{type: meta|delta|done|error}），不用 SSE 的
+ * event 名：前端的 postSSE 封装只把解码后的原始文本块交给 onMessage，不拆 event/data，
+ * 拿 event 名驱动要么改公共封装、要么每页自己解一遍，都不如把类型写在 body 里。
+ */
+export interface AskStreamHandlers {
+  onDelta?: (content: string) => void;
+  onDone?: (info: { citations?: number; tookMs?: number }) => void;
+  onError?: (message: string) => void;
+  onMeta?: (resp: RetrieveResp) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * POST /api/rag/retrieve/ask：一次连接里先回检索结果（meta），再逐字回模型回答。
+ * 失败也是一帧 error（不把非 200 丢给前端成「连接断开」），所以调用方只需处理回调。
+ */
+export async function RetrieveAsk(
+  data: RetrieveReq,
+  handlers: AskStreamHandlers,
+): Promise<void> {
+  let buffer = '';
+  const dispatch = (frame: string) => {
+    // 一帧可能是多行 data: 拼起来的（后端不会这么做，但中间件改写时得容得下）
+    const payload = frame
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .join('');
+    if (!payload) return;
+    let one: any;
+    try {
+      one = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    switch (one?.type) {
+      case 'delta': {
+        handlers.onDelta?.(String(one.content ?? ''));
+        break;
+      }
+      case 'done': {
+        // done/error/delta 是服务里手拼的帧（键名沿用内部 snake），meta 才是 CamelModel 的驼峰
+        handlers.onDone?.({
+          citations: one.citations,
+          tookMs: one.tookMs ?? one.took_ms,
+        });
+        break;
+      }
+      case 'error': {
+        handlers.onError?.(String(one.message || '问答失败'));
+        break;
+      }
+      case 'meta': {
+        handlers.onMeta?.(one as RetrieveResp);
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+  };
+  const push = (text: string) => {
+    buffer += text.replaceAll('\r\n', '\n');
+    let idx = buffer.indexOf('\n\n');
+    while (idx >= 0) {
+      dispatch(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 2);
+      idx = buffer.indexOf('\n\n');
+    }
+  };
+  await defHttp.postSSE(`${BASE}/retrieve/ask`, data, {
+    headers: { 'content-type': 'application/json' },
+    onMessage: (chunk: any) => push(String(chunk ?? '')),
+    signal: handlers.signal,
+  });
+  // 收流结束后残留的半帧（没拿到尾随空行）补处理一次，免得最后一句回答丢了
+  if (buffer.trim()) dispatch(buffer);
+}
 
 /**
  * 图搜图：把本地查询图片上传到公共存储，换取匿名可访问 URL 再喂给 /retrieve。
@@ -717,6 +830,8 @@ export interface GraphResp {
   totalNodes: number;
   totalEdges: number;
   truncated: boolean;
+  /** 空图的原因（后端给话）：「条件筛空」与「库里没图」是两件事，页面空态要说清是哪个 */
+  message?: string;
 }
 
 export const GraphQuery = (data: GraphQueryReq) =>
@@ -796,20 +911,21 @@ export const fetchRerankModels = () => optionsOf(MT_TEXT_RERANK);
 
 export const fetchChatModels = () => optionsOf(MT_TEXT_TO_TEXT);
 
+/** OCR 模型（需求 4/6：图片描述可以用它，与图片理解模型二选一） */
+export const fetchOcrModels = () => optionsOf(MT_OCR);
+
 /** 图谱实体抽取模型：能力形态与问答模型同族（文生文），但配置页上独立一位 */
 export const fetchExtractModels = () => optionsOf(MT_TEXT_TO_TEXT);
 
-/** 图片理解模型（解析开关 image_understand 打开后必填） */
+/** 图片理解模型（开图片解析增强 / 图片库描述增强的两位之一） */
 export const fetchImageModels = () => optionsOf(MT_IMAGE_UNDERSTAND);
 
-/** 音视频理解模型（audio_video 型生成摘要用） */
-export const fetchUnderstandModels = () => optionsOf(MT_VIDEO_UNDERSTAND);
-
 /**
- * 音频解析模型（doc 型库收到音频文件时转写成正文）。
- * 与上面的 fetchUnderstandModels 是两个能力：一个是音频转文字（ASR），一个是看视频说话。
+ * 音频转文字模型（上传音频文件时整条转写成正文，也是音视频库的描述增强依赖项）。
+ *
+ * 与下面的视频理解模型是两个能力：一个把音频转成文字，一个看懂视频画面在说什么。
  */
 export const fetchAudioModels = () => optionsOf(MT_AUDIO_TO_TEXT);
 
-/** 视频解析模型（doc 型库收到视频文件时描述成正文），与媒体摘要复用同一个能力 */
+/** 视频理解模型（上传视频文件时描述成正文 / 开描述增强时抽画面描述） */
 export const fetchVideoModels = () => optionsOf(MT_VIDEO_UNDERSTAND);

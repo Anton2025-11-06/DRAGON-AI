@@ -81,6 +81,10 @@ ACTION_CHUNK = "chunk"      # 切片管理（看/改/删单条切片，比「编
 # 复用就会让「删除知识库」和「删库里一篇文档」变成同一个勾选项，那是越权而不是省事。
 ACTION_CONTENT = "content"        # 查看解析后内容（解析产物与切片正文，不是原件）
 ACTION_DOC_DELETE = "doc_delete"  # 删除知识（删库内单篇文档，不动知识库本身）
+# 知识评测族：在「知识库-知识评测」页看到这个库并对它跑 RAGAS 评测。
+# 只进 actions 与独立 group，绝不进 scope——同部门数据范围不自动放开评测可见性，
+# 只有归属人/ADMIN/被显式授了 eval 才可见（需求：授权了评测 ACL 才能看到非本人创建的库）。
+ACTION_EVAL = "eval"      # 知识评测（≤16 字符，符合 action 列约束）
 
 # 授权主体类型（tb_resource_acl.grantee_type）
 GRANTEE_USER = 1
@@ -127,7 +131,7 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
         # 三组：知识库本身的操作（页面上那四个同名按钮）/ 库内文件 / 引用
         "actions": [ACTION_VIEW, ACTION_EDIT, ACTION_UPLOAD, ACTION_DELETE, ACTION_SHARE,
                     ACTION_PREVIEW, ACTION_CONTENT, ACTION_CHUNK, ACTION_REPARSE,
-                    ACTION_GRAPH, ACTION_DOC_DELETE, ACTION_USE],
+                    ACTION_GRAPH, ACTION_DOC_DELETE, ACTION_USE, ACTION_EVAL],
         "scope": [ACTION_VIEW, ACTION_USE],
         "groups": [
             {"key": "kb", "name": "知识库操作",
@@ -142,6 +146,10 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
             {"key": "ref", "name": "知识库引用",
              "hint": "页面上没有按钮：决定这个库能不能被检索命中、被智能体挂上引用",
              "actions": [ACTION_USE]},
+            {"key": "eval", "name": "知识评测",
+             "hint": "决定是否能在「知识库-知识评测」页看到这个库并对它跑评测"
+                     "（同部门不自动放开，必须显式授权）",
+             "actions": [ACTION_EVAL]},
         ],
     },
     "document": {
@@ -285,6 +293,7 @@ ACTION_LABELS = {
     ACTION_REPLACE: "替换文件", ACTION_UPLOAD: "上传", ACTION_REPARSE: "构建向量",
     ACTION_GRAPH: "构建图谱", ACTION_PREVIEW: "预览原文件", ACTION_CHUNK: "切片管理",
     ACTION_CONTENT: "查看解析后内容", ACTION_DOC_DELETE: "删除知识",
+    ACTION_EVAL: "评测",
 }
 
 # 知识库「库内文件」组的码 → 文档侧的等价码。文档级鉴权在自身 ACL 判不过时按这一份
@@ -812,7 +821,7 @@ __all__ = [
     "ACTION_CHAT", "ACTION_COPY", "ACTION_APIKEY", "ACTION_TEMPLATE", "ACTION_HISTORY",
     "ACTION_EXPORT", "ACTION_TEST", "ACTION_TOOLS", "ACTION_RENAME", "ACTION_REPLACE",
     "ACTION_TOGGLE", "ACTION_UPLOAD", "ACTION_REPARSE", "ACTION_GRAPH", "ACTION_PREVIEW",
-    "ACTION_CHUNK", "ACTION_CONTENT", "ACTION_DOC_DELETE", "ACTION_LABELS",
+    "ACTION_CHUNK", "ACTION_CONTENT", "ACTION_DOC_DELETE", "ACTION_EVAL", "ACTION_LABELS",
     "GRANTEE_USER", "GRANTEE_ROLE", "GRANTEE_DEPT", "GRANTEE_GROUP", "GRANTEE_ALL",
     "GRANTEE_LABELS", "RESOURCE_SPECS", "RESOURCE_TABLES",
     "KB_FILE_TO_DOC", "DOC_TO_KB_FILE",

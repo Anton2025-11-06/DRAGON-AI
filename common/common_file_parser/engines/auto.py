@@ -10,8 +10,8 @@
 * DOCX/PPTX：解压包里数 `media/` 条目即图片数，读 XML 里 slide/paragraph 数即规模（零解析）；
 * 其余格式：按字符量判断，本来 native 就够好，不值得动用增强引擎。
 
-偏好顺序：扫描件/大页量/多图 → minerU > docling；表格类与纯文本 → native。
-增强引擎不可用（没 pip 装 docling、没配 minerU 地址）时回落 native，并把「回落原因」写进
+偏好顺序：扫描件/大页量/多图 → minerU；表格类与纯文本 → native。
+增强引擎不可用（没配 minerU 地址）时回落 native，并把「回落原因」写进
 warnings——页面上看得到，用户才知道自己拿到的是降级结果。
 """
 from __future__ import annotations
@@ -93,12 +93,12 @@ def rank_candidates(ext: str, probe: dict) -> list[str]:
         or int(probe.get("images") or 0) >= C.AUTO_MIN_IMAGES \
         or int(probe.get("size") or 0) >= BIG_FILE_BYTES
     if ext in C.LEGACY_OFFICE:
-        # 老版 Office 只有 minerU 能吃（docling 新版对 .doc 支持也不完整），顺序不能变
-        return [C.ENGINE_MINERU, C.ENGINE_DOCLING, C.ENGINE_NATIVE]
+        # 老版 Office 只有 minerU 能吃（native 一律拒收 OLE2 复合文档），顺序不能变
+        return [C.ENGINE_MINERU, C.ENGINE_NATIVE]
     if ext in C.TEXT_FORMATS and not complex_doc:
         return [C.ENGINE_NATIVE]
     if complex_doc:
-        return [C.ENGINE_MINERU, C.ENGINE_DOCLING, C.ENGINE_NATIVE]
+        return [C.ENGINE_MINERU, C.ENGINE_NATIVE]
     return [C.ENGINE_NATIVE]
 
 
@@ -107,8 +107,8 @@ class AutoEngine(BaseEngine):
 
     name = C.ENGINE_AUTO
     # 与 native 同口径：只按文档格式探测与路由，媒体文件走服务层的转写分支，不进本引擎。
-    # doc/ppt 不剔（与 native/docling 不同）：auto 自己读不动，但 rank_candidates 把它们优先
-    # 路由给 minerU。配置页只列 native/docling/mineru 三个真引擎，不把这种「看部署脸色」的
+    # doc/ppt 不剔（与 native 不同）：auto 自己读不动，但 rank_candidates 把它们优先
+    # 路由给 minerU。配置页只列 native/mineru 两个真引擎，不把这种「看部署脸色」的
     # 条件支持面投给用户。
     formats = set(RC.DOC_TEXT_EXTS)
 

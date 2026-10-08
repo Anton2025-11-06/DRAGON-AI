@@ -110,13 +110,15 @@ class KbSaveReq(CamelModel):
 
     embed_model_id: int = Field(..., ge=1, description="向量模型 id（创建后锁定）")
     rerank_model_id: Optional[int] = Field(0, ge=0, description="重排模型 id，0=不启用（配置面板已撤，仅接口透传）")
-    chat_model_id: Optional[int] = Field(0, ge=0, description="音视频型的媒体理解模型 id（doc 型不再用这一列）")
+    chat_model_id: Optional[int] = Field(0, ge=0,
+                                         description="对话模型 id（存量字段：只做图谱抽取与图片理解的"
+                                                     "兜底回退；媒体描述增强已改走 parse_config 里的模型位）")
     extract_model_id: Optional[int] = Field(
         0, ge=0, description="图谱实体抽取模型 id：doc 型且开图谱时必填，0=沿用 chat_model_id")
     image_model_id: Optional[int] = Field(
         0, ge=0, description="图片理解模型 id：doc 型且解析开关 image_understand 打开时必填")
 
-    parser_engine: Optional[str] = Field(None, description="native/docling/mineru/auto")
+    parser_engine: Optional[str] = Field(None, description="native/mineru/auto")
     parse_config: Optional[dict] = Field(None, description="预处理开关 + 引擎专有参数")
     chunk_config: Optional[dict] = Field(None, description="分块策略与参数")
     retrieve_config: Optional[dict] = Field(None, description="检索参数")
@@ -363,9 +365,22 @@ class RetrieveReq(CamelModel):
     mode: Optional[str] = Field(None, description="VECTOR/KEYWORD/HYBRID，空=按库配置")
     top_k: Optional[int] = Field(None, ge=1, le=100, description="每个库的召回条数")
     score_threshold: Optional[float] = Field(None, ge=0, le=1, description="相似度阈值")
-    rerank: Optional[bool] = Field(None, description="是否重排（库未配重排模型时忽略）")
+    rerank: Optional[bool] = Field(None, description="是否重排（没选重排模型时此项无效）")
+    rerank_model_id: Optional[int] = Field(
+        None, description="本次检索用哪个重排模型（需求 8：选了就重排，没选就不重排；"
+                        "空=沿知识库自己的配置）")
     vector_weight: Optional[float] = Field(None, ge=0, le=1, description="混合检索里向量路权重")
-    with_graph: bool = Field(False, description="是否附带图谱实体（仅 doc 型生效）")
+    with_graph: bool = Field(False, description="是否开启知识图谱增强那一路召回（仅 doc 型生效）")
+    chat_model_id: Optional[int] = Field(
+        None, description="图谱增强的问句抽词模型 / 流式问答的对话模型；开图谱增强时必填")
+    graph_depth: Optional[int] = Field(
+        None, ge=1, le=3, description="图谱邻域从命中实体向外扩几跳（空=默认 2）")
+    graph_scale: Optional[int] = Field(
+        None, ge=1, le=50, description="图谱实体/关系各一路的向量召回条数（空=默认 10）")
+    graph_source_chunks: bool = Field(
+        False, description="图谱那一路是否顺命中实体反查原文切片、把它们当 GRAPH 行叠进结果集。"
+                           "默认关：图谱只贡献精炼的实体+关系（进向量召回与问答的「图谱关系」段），"
+                           "原文交给关键词+向量那一路——反查 chunk 会把上下文撑大、容易让模型失焦。")
 
 
 class RetrieveHit(CamelModel):
@@ -388,6 +403,9 @@ class RetrieveHit(CamelModel):
     media_url: Optional[str] = None
     media_duration: int = 0
     block_id: Optional[str] = None
+    recall: str = Field("CHUNK", description="这一条从哪一路来：CHUNK=关键词+向量，"
+                                           "GRAPH=图谱增强叠加")
+    graph_entity: Optional[str] = Field(None, description="图谱那一路把它带出来的实体名")
 
 
 class RetrieveResp(CamelModel):
@@ -401,7 +419,8 @@ class RetrieveResp(CamelModel):
     hits: list[RetrieveHit] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     graph: dict = Field(default_factory=dict,
-                        description="withGraph=true 时的图谱实体（{entities: [...]}）")
+                        description="withGraph=true 时的图谱那一路过程信息："
+                                    "{entities, triples, terms, truncated, applied}")
 
 
 # ==================== 知识图谱 ====================
@@ -410,8 +429,10 @@ class RetrieveResp(CamelModel):
 class GraphQueryReq(CamelModel):
     """图谱可视化查询（SPEC §10.3：底层裸查，kb_id 白名单由上层算好后强制带上）。
 
-    doc_ids 与 keyword 都只用来定**起点**（中心实体），起点之外的邻域仍按知识库
-    展开全部——把图硬卡在几篇文档里会让关系链断开，看上去像图谱没数据。
+    keyword 与 entity_type 是**叠加**关系（AND）：两个都填时，起点必须是「名字/别名
+    命中关键词且类型相符」的实体；其中一个条件把起点筛空就是空图，不会拿另一个
+    条件的结果冒充命中。doc_ids 与 keyword 都只用来定**起点**（中心实体），起点之外的
+    邻域仍按知识库展开全部——把图硬卡在几篇文档里会让关系链断开，看上去像图谱没数据。
     entity_type 同样只筛起点：限定中心实体类型，不限制展开出来的邻居。
     """
 
@@ -468,6 +489,100 @@ class GraphResp(CamelModel):
     total_nodes: int = 0
     total_edges: int = 0
     truncated: bool = Field(False, description="命中数超过 limit，图被截断（页面提示用户缩小范围）")
+    message: str = Field("", description="空图的原因（页面空态直接显示它）："
+                                        "「筛子筛空」与「库里没图」是两件事，"
+                                        "不给这句话用户只能猜哪个条件没生效")
+
+
+# ==================== 知识评测（RAGAS） ====================
+
+
+class EvalPairReq(CamelModel):
+    """一个问答对（评测数据集的一行）：问题 + 参考答案（标准答案）。"""
+
+    question: str = Field(..., min_length=1, max_length=2000, description="问题")
+    reference: Optional[str] = Field(None, max_length=2000, description="参考答案（标准答案）")
+
+
+class EvalRunCreateReq(CamelModel):
+    """发起一次评测（POST /api/rag/eval/runs）。
+
+    生成/裁判/相似度三个模型全部页自选（不依赖库自身 chat_model_id）：
+    - generation_model_id：召回后拼 prompt 生成答案的对话模型（text_to_text）；
+    - judge_model_id：RAGAS 裁判模型（text_to_text）；
+    - embed_model_id：answer_relevancy 相似度向量模型。
+    检索参数不传则取被评测库的 retrieve_config 默认。
+    """
+
+    kb_id: int = Field(..., ge=1, description="被评测的知识库")
+    name: Optional[str] = Field(None, max_length=255, description="本次运行名称")
+    generation_model_id: int = Field(..., ge=1, description="生成答案的对话模型 id")
+    judge_model_id: int = Field(..., ge=1, description="RAGAS 裁判模型 id")
+    embed_model_id: int = Field(..., ge=1, description="相似度向量模型 id")
+    pairs: list[EvalPairReq] = Field(default_factory=list, description="问答对列表")
+    top_k: Optional[int] = Field(None, ge=1, le=100, description="召回条数，空=库默认")
+    score_threshold: Optional[float] = Field(None, ge=0, le=1, description="相似度阈值，空=库默认")
+    retrieval_mode: Optional[str] = Field(None, description="VECTOR/KEYWORD/HYBRID，空=库默认")
+    with_graph: Optional[bool] = Field(False, description="是否开启图谱增强召回（仅 doc 型）")
+    graph_source_chunks: Optional[bool] = Field(False, description="图谱一路是否回捞原文切片")
+
+
+class EvalRunPageReq(PageReq):
+    """评测运行历史分页（POST /api/rag/eval/page）：只看自己创建的（+ ADMIN 全见）。"""
+
+    kb_id: Optional[int] = Field(None, ge=1, description="按知识库筛选")
+    status: Optional[str] = Field(None, description="PENDING/RUNNING/DONE/FAILED")
+
+
+class EvalItemResp(CamelModel):
+    """逐问答对结果（指标为 None 表示该项失败）。"""
+
+    item_id: int = 0
+    run_id: int = 0
+    question: str = ""
+    reference: Optional[str] = None
+    generated_answer: Optional[str] = None
+    contexts: list = Field(default_factory=list, description="召回片段 [{content,score,recall,...}]")
+    faithfulness: Optional[float] = None
+    answer_relevancy: Optional[float] = None
+    context_precision: Optional[float] = None
+    context_recall: Optional[float] = None
+    answer_correctness: Optional[float] = None
+    took_recall_ms: int = 0
+    took_generate_ms: int = 0
+    took_score_ms: int = 0
+    status: str = "PENDING"
+    status_label: Optional[str] = None
+    error: Optional[str] = None
+
+
+class EvalRunResp(CamelModel):
+    """评测运行回执（详情时带上 items 与逐指标均值，列表时 metric_avgs 可为空）。"""
+
+    run_id: int = 0
+    kb_id: int = 0
+    kb_name: Optional[str] = None
+    name: Optional[str] = None
+    generation_model_id: int = 0
+    judge_model_id: int = 0
+    embed_model_id: int = 0
+    top_k: int = 5
+    score_threshold: float = 0.0
+    retrieval_mode: Optional[str] = None
+    with_graph: bool = False
+    graph_source_chunks: bool = False
+    total_pairs: int = 0
+    done_pairs: int = 0
+    status: str = "PENDING"
+    status_label: Optional[str] = None
+    avg_latency_ms: int = 0
+    error: Optional[str] = None
+    created_by: int = 0
+    create_time: Optional[str] = None
+    update_time: Optional[str] = None
+    # 五项指标均值（仅已完成的条项参与；无数据时为空 dict）
+    metric_avgs: dict = Field(default_factory=dict)
+    items: list[EvalItemResp] = Field(default_factory=list)
 
 
 # ==================== 配置回显 ====================
@@ -500,5 +615,6 @@ __all__ = [
     "ChunkPageReq", "ChunkUpdateReq", "ChunkResp",
     "RetrieveReq", "RetrieveHit", "RetrieveResp",
     "GraphQueryReq", "GraphBuildReq", "GraphNodeResp", "GraphEdgeResp", "GraphResp",
+    "EvalPairReq", "EvalRunCreateReq", "EvalRunPageReq", "EvalItemResp", "EvalRunResp",
     "RuntimeConfigResp",
 ]

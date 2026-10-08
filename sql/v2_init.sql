@@ -193,7 +193,7 @@ CREATE TABLE IF NOT EXISTS `tb_resource_acl` (
     `grantee_type` TINYINT NOT NULL COMMENT '授权主体：1-用户 2-角色 3-部门 4-用户组 5-全员',
     `grantee_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '主体ID，全员时为0',
     `dept_include_sub` TINYINT NOT NULL DEFAULT 0 COMMENT '仅部门授权：0-仅本部门 1-含下级部门',
-    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/export/delete/share（启停与编辑同码，不再有 toggle），mcp=view/use/test/tools/edit/delete/share，knowledge_base=view/edit/upload/delete/share/preview/content/chunk/reparse/graph/doc_delete/use（后六个里除 use 都是「库内文件」组：在库上勾一次，对库内所有文档生效；content=查看解析后内容、doc_delete=删除知识，与库自己的 view/delete 分码是为了不让「删库」和「删库里一篇文档」共用一个勾选项），document=view/edit/preview/chunk/reparse/graph/delete/share',
+    `action` VARCHAR(16) NOT NULL COMMENT '动作码，合法取值按资源类型各列一份（以 common/common_permission/resource_guard.py 的 RESOURCE_SPECS 为准，长度不得超 16）：workflow=view/use/edit/chat/copy/apikey/template/history/share/delete，workflow_template=view/use/copy/export/edit/delete/share，tool=view/use/test/edit/delete/share，skill=view/use/edit/rename/replace/export/delete/share（启停与编辑同码，不再有 toggle），mcp=view/use/test/tools/edit/delete/share，knowledge_base=view/edit/upload/delete/share/preview/content/chunk/reparse/graph/doc_delete/use/eval（后六个里除 use 都是「库内文件」组：在库上勾一次，对库内所有文档生效；content=查看解析后内容、doc_delete=删除知识，与库自己的 view/delete 分码是为了不让「删库」和「删库里一篇文档」共用一个勾选项；eval=知识评测，独立一组且不进 scope，同部门不自动放开、必须显式授权才能在「知识库-知识评测」页看到这个库），document=view/edit/preview/chunk/reparse/graph/delete/share',
     `expire_time` DATETIME DEFAULT NULL COMMENT '过期时间，NULL=永久（过期不定时清理，判定即失效）',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `create_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '授权人（需持有该资源的 share）',
@@ -339,6 +339,63 @@ CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     KEY `idx_kb` (`kb_id`),
     KEY `idx_kb_type` (`kb_id`, `chunk_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档切片表（分块正文，ES 向量的 MySQL 权威副本）';
+
+-- 2.4 知识评测运行表（RAGAS）：一次评测的配置快照 + 状态 + 平均耗时
+--   生成/裁判/相似度三个模型全部评测页自选（不依赖库表 chat_model_id）；检索参数落快照，
+--   即使后续库配置变更也不影响历史回看。运行历史是个人资产（仅归属人 + ADMIN 可见）。
+CREATE TABLE IF NOT EXISTS `tb_rag_eval_run` (
+    `run_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `kb_id` BIGINT UNSIGNED NOT NULL COMMENT '被评测的知识库',
+    `kb_name` VARCHAR(128) DEFAULT NULL COMMENT '知识库名称冗余（列表展示不回连）',
+    `name` VARCHAR(255) DEFAULT NULL COMMENT '本次运行名称',
+    `generation_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '生成答案的对话模型 id（text_to_text）',
+    `judge_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'RAGAS 裁判模型 id（text_to_text）',
+    `embed_model_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'answer_relevancy 相似度向量模型 id',
+    `top_k` INT NOT NULL DEFAULT 5 COMMENT '检索参数快照 top_k',
+    `score_threshold` FLOAT NOT NULL DEFAULT 0.2 COMMENT '检索参数快照 得分阈值',
+    `retrieval_mode` VARCHAR(16) DEFAULT NULL COMMENT 'VECTOR/KEYWORD/HYBRID，NULL=库默认',
+    `with_graph` TINYINT NOT NULL DEFAULT 0 COMMENT '是否开启图谱增强召回',
+    `graph_source_chunks` INT NOT NULL DEFAULT 0 COMMENT '图谱一路回捞的原文规模（0=默认）',
+    `total_pairs` INT NOT NULL DEFAULT 0 COMMENT '问答对总数',
+    `done_pairs` INT NOT NULL DEFAULT 0 COMMENT '已完成条项数（逐对回填递增）',
+    `status` VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/DONE/FAILED',
+    `avg_latency_ms` INT NOT NULL DEFAULT 0 COMMENT '平均逐对延迟（召回+生成，不含打分）',
+    `error` VARCHAR(1000) DEFAULT NULL COMMENT '整体失败原因',
+    `is_deleted` TINYINT NOT NULL DEFAULT 0,
+    `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（运行历史归属判定列）',
+    `owner_dept_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '归属部门',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`run_id`),
+    KEY `idx_kb` (`kb_id`),
+    KEY `idx_owner_status` (`created_by`, `status`),
+    KEY `idx_create_time` (`create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识评测运行表（RAGAS）';
+
+-- 2.5 逐问答对评测结果表（RAGAS）：每一对问答的召回/生成/五项得分与三段耗时
+--   指标列均可 NULL：NULL = 该项失败（某几个 ragas 指标拿不到分时不影响其余）。
+CREATE TABLE IF NOT EXISTS `tb_rag_eval_item` (
+    `item_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `run_id` BIGINT UNSIGNED NOT NULL COMMENT '所属运行（tb_rag_eval_run.run_id）',
+    `question` MEDIUMTEXT NOT NULL COMMENT '用户问题',
+    `reference` MEDIUMTEXT COMMENT '参考答案（标准答案）',
+    `generated_answer` MEDIUMTEXT COMMENT '本次召回后生成的答案',
+    `contexts` JSON COMMENT '召回片段 [{content,score,recall,...}]（送 ragas 打分的资料）',
+    `faithfulness` FLOAT DEFAULT NULL COMMENT '忠实度',
+    `answer_relevancy` FLOAT DEFAULT NULL COMMENT '答案相关性',
+    `context_precision` FLOAT DEFAULT NULL COMMENT '上下文精确率',
+    `context_recall` FLOAT DEFAULT NULL COMMENT '上下文召回率',
+    `answer_correctness` FLOAT DEFAULT NULL COMMENT '答案正确性',
+    `took_recall_ms` INT NOT NULL DEFAULT 0 COMMENT '召回耗时',
+    `took_generate_ms` INT NOT NULL DEFAULT 0 COMMENT '生成耗时',
+    `took_score_ms` INT NOT NULL DEFAULT 0 COMMENT '打分耗时',
+    `status` VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/DONE/FAILED',
+    `error` VARCHAR(1000) DEFAULT NULL COMMENT '本项失败原因',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`item_id`),
+    KEY `idx_run` (`run_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='逐问答对评测结果表（RAGAS）';
 
 
 
@@ -704,13 +761,14 @@ SET @m_arq = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND 
 SET @m_usergroup = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '用户组管理');
 
 -- 8.3 首页 / 知识库 / 模型工厂 / 数据集工厂 下的页面菜单
---     知识库下三页：知识维护（库列表 + 文档）、知识检索、图谱检索；
+--     知识库下四页：知识维护（库列表 + 文档）、知识检索、图谱检索、知识评测（RAGAS）；
 --     「知识库对话」页与旧「知识库检索」页已取消（检索/图谱从列表行内按钮提升为独立菜单）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (@d_home, '深度探索', 2, 'explorer', 'views/wemirr/home/index.vue', NULL, 1),
 (@d_kb, '知识维护', 2, 'doc',      'views/wemirr/ai/rag/doc/index.vue',      'lucide:folder-open', 1),
 (@d_kb, '知识检索', 2, 'retrieve', 'views/wemirr/ai/rag/retrieve/index.vue', 'lucide:scan-search', 2),
 (@d_kb, '图谱检索', 2, 'graph',    'views/wemirr/ai/rag/graph/index.vue',    'lucide:network',     3),
+(@d_kb, '知识评测', 2, 'eval',     'views/wemirr/ai/rag/eval/index.vue',     'lucide:clipboard-check', 4),
 (@d_model_factory, '模型训练',     2, 'train',    'views/wemirr/model/train/index.vue',    NULL, 1),
 (@d_model_factory, '模型部署',     2, 'deploy',   'views/wemirr/model/deploy/index.vue',   NULL, 2),
 (@d_model_factory, '模型评测',     2, 'eval',     'views/wemirr/model/eval/index.vue',     NULL, 3),
@@ -720,6 +778,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 SET @m_kb_doc = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识维护');
 SET @m_kb_retrieve = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识检索');
 SET @m_kb_graph = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '图谱检索');
+SET @m_kb_eval = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识评测');
 
 -- 8.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -840,7 +899,8 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_kb_doc, '知识库查询', 3, 'ai:kb:list',   3),
 (@m_kb_doc, '新建知识库', 3, 'ai:kb:add',    4),
 (@m_kb_retrieve, '知识检索', 3, 'ai:kb:search', 1),
-(@m_kb_graph, '图谱检索', 3, 'ai:kb:graph',     1);
+(@m_kb_graph, '图谱检索', 3, 'ai:kb:graph',     1),
+(@m_kb_eval, '知识评测', 3, 'ai:kb:eval',     1);
 
 -- =====================================================================================
 -- PART 9  种子：角色授权
@@ -863,10 +923,10 @@ WHERE r.`role_code` = 'USER'
 -- =====================================================================================
 -- PART 10  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 26 张；菜单 117 行 = 目录 7 + 页面 26 + 权限点 84；ADMIN 授权应覆盖这 117 行
-SELECT '表数量（应为 26）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
-SELECT '菜单行数（应为 117）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
-SELECT '菜单分层（应为 1:7 / 2:26 / 3:84）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
+-- 表 28 张；菜单 119 行 = 目录 7 + 页面 27 + 权限点 85；ADMIN 授权应覆盖这 119 行
+SELECT '表数量（应为 28）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+SELECT '菜单行数（应为 119）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
+SELECT '菜单分层（应为 1:7 / 2:27 / 3:85）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;
-SELECT 'ADMIN 授权行数（应为 117）' AS `自查项`, COUNT(*) AS `实际`
+SELECT 'ADMIN 授权行数（应为 119）' AS `自查项`, COUNT(*) AS `实际`
 FROM `tb_role_menu` rm JOIN `tb_role` r ON r.`role_id` = rm.`role_id` WHERE r.`role_code` = 'ADMIN';

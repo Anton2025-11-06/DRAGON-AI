@@ -134,7 +134,9 @@ service_rag:
     # password: ''
     # verify_certs: false           # 自签证书时关；填 true/false 或布尔都行
     # request_timeout: 60           # 单请求超时（秒）
-    # index: rag_knowledge_chunk    # 索引名（缺省用常量 RAG_CHUNK_INDEX）
+    # index: rag_knowledge_chunk    # 切片索引名（缺省用常量 RAG_CHUNK_INDEX）
+    # kg_index: rag_kg_vector       # 图谱向量投影索引（需求 9，缺省用常量 RAG_KG_INDEX；
+                                    # 存量图谱要开图谱增强检索时重建一次图谱即可补上向量）
     # shards: 1                     # 仅建索引时生效（已存在的索引改分片要重建）
     # replicas: 0
     # analyzer: ik_max_word         # ES 装了 ik 分词插件才填

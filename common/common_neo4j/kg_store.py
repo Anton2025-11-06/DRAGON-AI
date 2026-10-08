@@ -344,6 +344,9 @@ async def subgraph(kb_ids: Sequence[int], *, centers: Optional[Sequence[str]] = 
 
     ``entity_type`` 只收窄**起点**（没给 centers 时的度数 top、以及按名字定的中心）；
     展开出的邻居不按类型过滤——只留同类型实体的图会凭空断开关系链。
+
+    centers 为空按「调用方本来就没给起点条件」理解（所以走度数 top 兜底）：**给了起点
+    条件却没命中**不要走到这里，应在上层直接回空图并说明原因，否则那个条件就被静默丢掉。
     """
     ids = _clean_kb_ids(kb_ids)
     if not ids:
@@ -461,6 +464,37 @@ def _add_node(nodes: dict[str, dict], row: dict) -> Optional[dict]:
             "aliases": [str(a) for a in (row.get("aliases") or []) if a]}
     nodes[node_id] = node
     return node
+
+
+async def vector_rows(kb_id: int, *, limit: int = RC.KG_VECTOR_SCAN_LIMIT) -> dict:
+    """整库实体与关系的「向量投影源数据」（需求 9a：写 rag_kg_vector 的唯一口径）。
+
+    为什么整库重算而不是只送本篇新抽的结果：实体节点是**库内同名同类合并**的，
+    一篇文档重建会改写到别的文档提过的实体摘要（summary 被 coalesce 覆盖），
+    只投影本篇会让那些实体的向量停在旧描述上。按整库算，增量只送「新增或文本变了」
+    的那几条，没变的不再调向量模型，而 Neo4j 里已不存在的投影当场清掉。
+
+    关系本身不存描述（RELATED_TO 只带 relation 文本与 doc_ids），所以三元组的可检索文本
+    就是「头 关系 尾」；关系端点的 type 也不参与幂等键（按名字回查实体时两端已在实体集里）。
+    """
+    kb = int(kb_id)
+    ents = await neo4j_client.run(
+        f"MATCH (e:{RC.KG_LABEL_ENTITY}) WHERE e.kb_id = $kb_id "
+        f"RETURN e.name AS name, e.type AS type, e.summary AS summary, "
+        f"       e.aliases AS aliases ORDER BY e.name LIMIT $limit",
+        {"kb_id": kb, "limit": max(1, int(limit))})
+    rels = await neo4j_client.run(
+        f"MATCH (h:{RC.KG_LABEL_ENTITY})-[r:{RC.KG_REL_RELATION}]->(t:{RC.KG_LABEL_ENTITY}) "
+        f"WHERE r.kb_id = $kb_id AND h.kb_id = $kb_id AND t.kb_id = $kb_id "
+        f"RETURN h.name AS head, r.relation AS relation, t.name AS tail, "
+        f"       h.type AS head_type, t.type AS tail_type "
+        f"ORDER BY h.name, t.name LIMIT $limit",
+        {"kb_id": kb, "limit": max(1, int(limit))})
+    truncated = bool(len(ents) >= int(limit) or len(rels) >= int(limit))
+    if truncated:
+        log.warning(f"图谱向量投影源数据触及上限 {limit} 条，超出部分本轮不投影: kb={kb}")
+    return {"entities": [dict(r) for r in ents], "relations": [dict(r) for r in rels],
+            "truncated": truncated}
 
 
 async def statistics(kb_ids: Sequence[int], *, top: int = 10) -> dict:
@@ -593,4 +627,4 @@ def _clamp_limit(value: int) -> int:
 
 __all__ = ["ensure_document", "upsert_graph", "search_entities", "entity_sources",
            "entities_by_docs", "subgraph", "statistics", "delete_by_doc", "delete_by_chunk",
-           "delete_by_kb", "entity_type_of"]
+           "delete_by_kb", "entity_type_of", "vector_rows"]

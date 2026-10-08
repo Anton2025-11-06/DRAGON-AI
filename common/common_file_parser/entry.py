@@ -52,7 +52,7 @@ def merge_parse_options(parse_config: Optional[dict]) -> dict:
         options[key] = value
     for flag in ("remove_toc", "remove_header_footer", "image_understand",
                  "audio_understand", "video_understand", "table_as_text",
-                 "keep_page_break"):
+                 "keep_page_break", "media_desc_enhance"):
         options[flag] = _as_bool(options.get(flag))
     return options
 
@@ -67,7 +67,7 @@ def preprocess(doc: ParsedDocument, parse_config: Optional[dict] = None,
                options: Optional[dict] = None) -> ParsedDocument:
     """预处理开关在这里落地（就地改 blocks）：目录、页眉页脚、表格形态、分页标记。
 
-    放在引擎之外而不是每个引擎内部：三个引擎对「同一篇文档」必须产出同样的切片，
+    放在引擎之外而不是每个引擎内部：各引擎对「同一篇文档」必须产出同样的切片，
     否则用户换引擎时检索效果的变化无法归因（到底是版面分析变好了，还是清洗规则变了？）。
     """
     opts = options or merge_parse_options(parse_config)

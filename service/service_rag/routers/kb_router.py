@@ -96,7 +96,7 @@ async def runtime_config(request: Request,
         "kbTypes": [{"value": t, "label": RC.KB_TYPE_LABELS.get(t, t)} for t in RC.KB_TYPES_ALL],
         "allowedExts": {t: list(e) for t, e in RC.KB_TYPE_ALLOWED_EXTS.items()},
         # 各引擎真读得动的文档格式（解析层声明的唯一数据源）：配置页要按它写清
-        # native/docling/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移
+        # native/mineru 的覆盖范围，前端自己抄一份必然与引擎代码漂移
         "engineFormats": {e: engine_formats(e) for e in RC.PARSE_ENGINES_ALL},
         # 媒体后缀按种类分组下发：三个「解析增强」开关的 hint 要说清各自管哪一类文件
         "mediaExts": {RC.MEDIA_KIND_IMAGE: list(RC.RAG_IMAGE_EXTS),

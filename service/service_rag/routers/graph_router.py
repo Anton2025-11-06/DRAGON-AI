@@ -38,7 +38,10 @@ def _kb_ids(value: Optional[str]) -> Optional[list[int]]:
 @router.post("/query", summary="子图查询（图谱可视化页）")
 @has_permission("ai:kb:graph")
 async def query(request: Request, body: Optional[GraphQueryReq] = None):
-    """起点优先级：关键词 > 文档限定 > 库内度数最高；拿到起点后按 depth 逐跳展开。
+    """起点条件按叠加（AND）算：关键词与实体类型都生效，两个都填时必须同时命中。
+
+    给了关键词却一个实体都没命中时回空图 + ``message`` 说明原因，**不退回库内度数最高**；
+    两个起点条件都没给才按度数 top 给一张默认图。
 
     ``docIds``/``keyword`` 只用来定**起点**，起点之外的邻域仍按知识库展开全部——
     把图硬卡在几篇文档里会让关系链断开，看上去像图谱没数据。

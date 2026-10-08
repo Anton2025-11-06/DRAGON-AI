@@ -19,7 +19,11 @@ import type { InputField, WorkflowGraph } from '#/api/ai-workflow/types';
 
 import { computed, ref, watch } from 'vue';
 
-import { CheckOutlined, CopyOutlined } from '@ant-design/icons-vue';
+import {
+  CheckOutlined,
+  CopyOutlined,
+  DownloadOutlined,
+} from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
 import { getWorkflowDetail, getWorkflowVersion } from '#/api/ai-workflow';
@@ -51,6 +55,9 @@ const emit = defineEmits<{ (e: 'update:open', open: boolean): void }>();
 
 const apiBaseUrl = `${window.location.origin}/api/workflow`;
 
+/** 工作流名（导出的 Markdown 文档标题与文件名用；取详情里的 name，拉不到就退化成 id） */
+const workflowName = ref('');
+
 // ==================== 开始节点入参（取发布快照） ====================
 
 /** 说明所依据的字段清单 */
@@ -80,6 +87,7 @@ async function loadStartFields() {
   fieldsError.value = '';
   try {
     const detail = await getWorkflowDetail(props.workflowId);
+    workflowName.value = String(detail?.name || '').trim();
     const version = Number(detail?.currentVersion) || 0;
     if (version <= 0) {
       notPublished.value = true;
@@ -461,6 +469,91 @@ async function copyText(text: string, key: string = '') {
 function handleClose(open: boolean) {
   emit('update:open', open);
 }
+
+/** 表格单元里不能出现裸竖线/换行（会把 Markdown 表格撞栏）：竖线转义、换行压成空格 */
+function mdCell(text: string): string {
+  return text.replaceAll('|', '\\|').replaceAll('\n', ' ');
+}
+
+/**
+ * 把整份用法说明拼成 Markdown（与弹窗内容一一对应，供下载离线查阅）。
+ *
+ * 只读上面那些 computed/ref（steps / fields / bodyText / fileGuideItems …），不另起一套文案：
+ * curl 模板写两遍必然漂移，下载与页面看到的必须是同一份。
+ */
+function usageMarkdown(): string {
+  const title = workflowName.value || `工作流 ${props.workflowId}`;
+  const lines: string[] = [
+    `# 工作流 API 调用说明 - ${title}`,
+    '',
+    `- 工作流 ID：${props.workflowId}`,
+    `- API Base：${apiBaseUrl}`,
+    `- API Key：${props.apiKey}`,
+    `- ${sourceText.value || '来源：见下'}`,
+  ];
+  if (warnText.value) lines.push('', `> ⚠️ ${warnText.value}`);
+
+  lines.push('', '## 输入参数');
+  if (fields.value.length === 0) {
+    lines.push('', '开始节点没有配置入参，请求体里的 values 传 `{}` 即可。');
+  } else {
+    lines.push('', '| 变量名 | 类型 | 必填 | 取值说明 |', '| --- | --- | --- | --- |');
+    fields.value.forEach((field) => {
+      const desc = fieldDescription(field);
+      const hint = desc ? `${valueHint(field)}（${desc}）` : valueHint(field);
+      lines.push(
+        `| \`${field.name}\` | ${getInputFieldTypeLabel(field.type)} | ${
+          field.required ? '必填' : '可选'
+        } | ${mdCell(hint)} |`,
+      );
+    });
+    lines.push('', '请求体骨架（展开版，改值用）：', '', '```json', bodyText.value, '```');
+  }
+
+  if (fileFields.value.length > 0) {
+    lines.push(
+      '',
+      '## 文件入参怎么填',
+      '',
+      `涉及字段：${fileFields.value.map((field) => field.name).join('、')}`,
+      '',
+    );
+    fileGuideItems.forEach((item) => lines.push(`1. ${item}`));
+    lines.push('', '上传接口返回体：', '', '```json', uploadResponseSample.value, '```');
+  }
+
+  lines.push('', '## 调用步骤');
+  steps.value.forEach((step, index) => {
+    lines.push(
+      '',
+      `### ${index + 1}. ${step.title}`,
+      '',
+      step.desc,
+      '',
+      '```bash',
+      step.code,
+      '```',
+    );
+  });
+
+  lines.push('', '## 事件类型', '', eventTypes.map((item) => `\`${item}\``).join('、'));
+  return lines.join('\n');
+}
+
+/** 导出这份用法说明为 Markdown 文件（与模型广场 Key 下载同口径：Blob + 延迟释放 URL） */
+function downloadUsage() {
+  const blob = new Blob([usageMarkdown()], {
+    type: 'text/markdown;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${workflowName.value || `工作流${props.workflowId}`}-API调用说明.md`;
+  a.click();
+  // 延迟释放，避免部分浏览器在下载开始前 URL 失效
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  message.success('已开始下载');
+}
 </script>
 
 <template>
@@ -471,13 +564,18 @@ function handleClose(open: boolean) {
     title="API Key 用法说明"
     @update:open="handleClose"
   >
-    <!-- Key 本体：整行放得下就不换行，复制按钮固定在右侧 -->
+    <!-- Key 本体：整行放得下就不换行，复制/下载固定在右侧 -->
     <div class="usage-key">
       <span class="usage-key-label">API Key</span>
       <code class="usage-key-value">{{ props.apiKey }}</code>
       <a-button size="small" @click="copyText(props.apiKey)">
         <CopyOutlined /> 复制
       </a-button>
+      <a-tooltip title="把本说明（入参表 + curl 步骤 + 事件类型）导出为 Markdown 文件">
+        <a-button size="small" @click="downloadUsage">
+          <DownloadOutlined /> 下载
+        </a-button>
+      </a-tooltip>
     </div>
 
     <!-- 未发布 / 入参读不到：下面的请求体不能直接照抄，顶在前面说清楚 -->

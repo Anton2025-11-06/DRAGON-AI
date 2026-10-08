@@ -221,8 +221,12 @@ class KnowledgeBaseService:
             extract_model_id=req.extract_model_id or 0, image_model_id=req.image_model_id or 0,
             audio_model_id=int(parse_config.get("audio_model_id") or 0),
             video_model_id=int(parse_config.get("video_model_id") or 0),
+            ocr_model_id=int(parse_config.get("ocr_model_id") or 0),
             enable_graph=bool(req.enable_graph),
-            image_understand=bool(parse_config.get("image_understand")))
+            image_understand=bool(parse_config.get("image_understand")),
+            audio_understand=bool(parse_config.get("audio_understand")),
+            video_understand=bool(parse_config.get("video_understand")),
+            media_desc_enhance=bool(parse_config.get("media_desc_enhance")))
         dim = RagModelService.embedding_dim(checked["embed"])
 
         chunk_config = settings.normalize_chunk_config(
@@ -296,16 +300,22 @@ class KnowledgeBaseService:
             # 开关没开时不参与校验：库里存着一个已被删掉的模型不该拖住一次无关的保存
             extract_model_id = int(req.extract_model_id or 0) or kb.extract_model_id
             image_model_id = int(req.image_model_id or 0) or kb.image_model_id
-            # 音频/视频解析模型没有列，只存在于 parse_config：选了才验（不选不拦）
+            # 音频/视频/OCR 解析模型没有列，只存在于 parse_config：选了才验（不选不拦）
             audio_model_id = int(parse_config.get("audio_model_id") or 0)
             video_model_id = int(parse_config.get("video_model_id") or 0)
+            ocr_model_id = int(parse_config.get("ocr_model_id") or 0)
             checked = await RagModelService.validate_kb_models(
                 kb.kb_type, embed_model_id=kb.embedding_model_id,
                 rerank_model_id=req.rerank_model_id or 0, chat_model_id=req.chat_model_id or 0,
                 extract_model_id=extract_model_id if graph_enabled else 0,
-                image_model_id=image_model_id if image_understand else 0,
+                image_model_id=image_model_id,
                 audio_model_id=audio_model_id, video_model_id=video_model_id,
-                enable_graph=bool(graph_enabled), image_understand=image_understand)
+                ocr_model_id=ocr_model_id,
+                enable_graph=bool(graph_enabled),
+                image_understand=image_understand,
+                audio_understand=bool(parse_config.get("audio_understand")),
+                video_understand=bool(parse_config.get("video_understand")),
+                media_desc_enhance=bool(parse_config.get("media_desc_enhance")))
             if checked["dim"] != kb.embedding_dim:
                 raise ValueError(f"向量模型维度与知识库不一致（知识库 {kb.embedding_dim} 维）")
 

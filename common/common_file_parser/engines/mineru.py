@@ -15,7 +15,7 @@ minerU 官方 HTTP 服务提供两种口：
 先走异步口；返回 404/405/501（部署版本没有该路由）时自动退化到同步口，并在 warnings 里说明——
 这样「部署了旧版 minerU」不需要改代码，只会在文档上看出一条降级记录。
 
-md_content 与 docling 一样交给统一的块构造器，保证三个引擎的分块输入形态一致。
+md_content 交给统一的块构造器，保证各引擎的分块输入形态一致。
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ class MineruEngine(BaseEngine):
         if not self.cfg["base_url"]:
             raise EngineNotAvailable(
                 "未配置 minerU 服务地址（Nacos 的 mineru.base_url），"
-                "请把解析引擎改为 native/docling 或补上部署配置")
+                "请把解析引擎改为 native 或补上部署配置")
 
     async def _parse(self, raw: bytes, filename: str, ext: str) -> ParsedDocument:
         if not raw:
