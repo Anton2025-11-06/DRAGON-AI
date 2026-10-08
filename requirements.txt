@@ -66,7 +66,7 @@ markdown>=3.6
 # 老格式 .doc/.ppt 解析依赖系统中安装的 LibreOffice（soffice），非 pip 依赖
 
 # 智能体自主规划框架
-agentscopd
+agentscope
 # HTTP 流式输出
 sse-starlette>=2.1.0
 # 沙箱进程管理
