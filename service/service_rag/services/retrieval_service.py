@@ -29,10 +29,12 @@
 
 media_url 的出口口径
 --------------------
-库里（MySQL 切片行 + ES）存的是**存储对象名**，出口统一换成匿名可访问地址：
-预签名地址会过期，落库等于留下一批半年后打不开的图；本地后端更不该把部署时的域名
-写进数据。签名只发生在返回前端之前（见 ``_sign_or_keep``），历史数据里已经是完整 URL
-的（旧解析链路写过签名地址）原样透出，不再二次签名。
+MySQL 切片行里存的是**存储对象名**（清理链路要靠它删存储对象），一个切片覆盖多个媒体时
+它们按换行拼在同一列里（见 rag_constant.join_media_refs）；ES 里新写入的数据已经是
+不带凭证的匿名地址（见 parse_service._plain_public_url），历史数据仍是对象名。
+出口先 ``split_media_refs`` 拆成列表，再逐条过 ``_sign_or_keep``：对象名现签一个临时地址
+（兼容未开公共读的部署），已经是完整 URL 的原样透出、不再二次签名。签名只发生在返回前端
+之前——预签名地址会过期，落库等于留下一批半年后打不开的图；本地后端更不该把部署时的域名写进数据。
 """
 from __future__ import annotations
 
@@ -601,9 +603,19 @@ class _SearchRunner:
             rec = docs.get(int(row.get("doc_id") or 0))
             row["doc_name"] = str(rec.doc_name) if rec is not None else None
             row["media_duration"] = int(rec.media_duration or 0) if rec is not None else 0
-            # 媒体型库的切片可能没写 media_url（老数据），原件路径就在文档行上
-            row["media_url"] = await _sign_or_keep(
-                row.get("media_ref") or (str(rec.file_path or "") if rec is not None else ""))
+            # 一条切片可以覆盖多个媒体（按页分块的一页三张），逐个句柄现签后全给前端；
+            # 只签第一个的话，第二张图在页面上就永远放不出来。
+            # 媒体型库的老切片可能没写 media_url，原件路径就在文档行上
+            refs = RC.split_media_refs(row.get("media_ref"))
+            if not refs and rec is not None and str(rec.file_path or ""):
+                refs = [str(rec.file_path)]
+            urls: list[str] = []
+            for one in refs:
+                signed = await _sign_or_keep(one)
+                if signed and signed not in urls:
+                    urls.append(signed)
+            row["media_urls"] = urls
+            row["media_url"] = urls[0] if urls else None
             block_ids = (row.get("extra") or {}).get("block_ids")
             row["block_id"] = _join_block_ids(block_ids)
         return rows
@@ -619,7 +631,7 @@ class _SearchRunner:
         在 ``_load_targets`` 就被剔掉了，这里自然拿不到它。
         """
         self.graph = {"applied": False, "depth": self.graph_depth, "scale": self.graph_scale,
-                      "entities": [], "triples": [], "terms": {}, "truncated": False}
+                      "entities": [], "edges": [], "triples": [], "terms": {}, "truncated": False}
         targets = [t for t in self.targets if t["graph_enabled"]]
         if not self.with_graph:
             return rows
@@ -650,6 +662,7 @@ class _SearchRunner:
             return rows
         self.graph.update({"applied": True,
                            "entities": got.get("entities") or [],
+                           "edges": got.get("edges") or [],
                            "triples": got.get("triples") or [],
                            "terms": got.get("terms") or {},
                            "truncated": bool(got.get("truncated"))})
@@ -851,6 +864,7 @@ class RagRetrievalService:
             keyword_score=float(row.get("keyword_score") or 0.0),
             title_path=row.get("title_path"), page_num=int(row.get("page_num") or 0),
             sheet_name=row.get("sheet_name"), media_url=row.get("media_url"),
+            media_urls=row.get("media_urls") or ([row["media_url"]] if row.get("media_url") else []),
             media_duration=int(row.get("media_duration") or 0),
             block_id=row.get("block_id"),
             recall=str(row.get("recall") or RECALL_CHUNK),

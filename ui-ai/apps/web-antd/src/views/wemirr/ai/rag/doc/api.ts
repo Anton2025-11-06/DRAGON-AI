@@ -8,6 +8,7 @@
  *   业务组件禁止散落魔法字符串。
  */
 import {
+  MODEL_CATEGORY_LABELS,
   MT_AUDIO_TO_TEXT,
   MT_IMAGE_UNDERSTAND,
   MT_MULTIMODAL_EMBEDDING,
@@ -177,6 +178,28 @@ export const KG_STATE_COLORS: Record<number, string> = {
   2: 'success',
   3: 'error',
 };
+
+/**
+ * 实体类型配色（键 = 后端 rag_constant.KG_ENTITY_TYPES 的中文值）。
+ *
+ * 图谱检索页的子图与检索页的「图谱命中」共用一张表：两处各写一份的话，加一个实体类型
+ * 只会染上一边，看上去像另一页的着色坏了。
+ */
+export const KG_ENTITY_COLORS: Record<string, string> = {
+  人物: '#5B8FF9',
+  组织: '#5AD8A6',
+  地点: '#5D7092',
+  时间: '#9270CA',
+  产品: '#6DC8EC',
+  技术: '#13C2C2',
+  事件: '#F6BD16',
+  指标: '#E8684A',
+  其他: '#269A99',
+  DEFAULT: '#8C8C8C',
+};
+export function kgEntityColor(type?: string) {
+  return KG_ENTITY_COLORS[type || ''] || KG_ENTITY_COLORS.DEFAULT;
+}
 
 /** 模态 */
 export const CHUNK_TYPES_ALL = ['audio_video', 'image', 'text'] as const;
@@ -606,6 +629,7 @@ export interface ChunkResp {
   sheetName?: string;
   pageNum: number;
   blockId?: string;
+  /** 本切片的媒体句柄（多个按换行分隔，不是可直接打开的 URL） */
   mediaUrl?: string;
   mediaType?: string;
   tokenCount: number;
@@ -658,7 +682,13 @@ export interface RetrieveHit {
   titlePath?: string;
   pageNum: number;
   sheetName?: string;
+  /** 第一个媒体地址（后端兼容旧前端的回落位） */
   mediaUrl?: string;
+  /**
+   * 本条命中的全部媒体地址（匿名可访问，按正文原位置顺序）。
+   * 一条切片可以覆盖多张图（按页分块的一页三张），只渲染第一个其余就放不出来。
+   */
+  mediaUrls?: string[];
   mediaDuration: number;
   blockId?: string;
   /** CHUNK=关键词+向量这一路，GRAPH=图谱增强叠进来的 */
@@ -878,8 +908,16 @@ const listModels = (type: string) =>
     params: { type },
   });
 
+/**
+ * 下拉项文案：「模型类型 / 模型名称」，都是中文（需求 4）。
+ *
+ * 早期是「provider / name」，一排 dashscope 前缀对选模型没提供任何判断力：同一个厂商
+ * 下既有向量模型也有大模型，区分它们靠的是能力类型。type 直接拿 /models/list 的
+ * category（12 能力码），中文名复用 ai-workflow 的同一份标签表，不再各处抄一份。
+ * 认不出来的码（后台新加了能力而前端标签表没跟上）原样透出，不要让下拉出现空白项。
+ */
 const toOption = (m: ModelOption) => ({
-  label: `${m.provider} / ${m.name}`,
+  label: `${MODEL_CATEGORY_LABELS[m.type] ?? m.type} / ${m.name}`,
   value: m.id,
 });
 
@@ -908,6 +946,9 @@ export async function fetchEmbedModels(kbType: KbType) {
 }
 
 export const fetchRerankModels = () => optionsOf(MT_TEXT_RERANK);
+
+/** 文本向量模型（评测的相似度编码走这一位，与各库自己的向量模型不是同一个能力） */
+export const fetchTextEmbedModels = () => optionsOf(MT_TEXT_EMBEDDING);
 
 export const fetchChatModels = () => optionsOf(MT_TEXT_TO_TEXT);
 

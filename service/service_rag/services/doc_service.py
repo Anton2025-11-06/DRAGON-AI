@@ -32,7 +32,7 @@ import os
 from datetime import datetime
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from common.common_constants import rag_constant as RC
 from common.common_es import es_client, to_json
@@ -143,7 +143,10 @@ class RagDocService:
             await RagDocService._require_kb(login_user, kb_id, ACTION_VIEW, session)
             conds = [Document.kb_id == int(kb_id), Document.is_deleted == 0]
             if req.name:
-                conds.append(Document.doc_name.like(f"%{req.name}%"))
+                # 标题与原始文件名都算命中：列表上显示的是「改过的标题，没改过就是文件名」，
+                # 搜索必须能搜到列上看到的这串字，只按 doc_name 筛会让没改过标题的文档搜不到
+                kw = f"%{req.name}%"
+                conds.append(or_(Document.doc_name.like(kw), Document.file_name.like(kw)))
             if req.status:
                 if req.status not in RC.DOC_STATUS_ALL:
                     raise ValueError(f"未知的解析状态：{req.status}")

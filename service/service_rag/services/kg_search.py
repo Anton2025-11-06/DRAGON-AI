@@ -168,16 +168,19 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
     :param groups: ``[{"kb_ids": [...], "embed_model_id": int}]``——**必须按向量模型分组**：
         实体/关系投影与切片共用知识库自己的向量空间，两个不同模型编出的向量不能交叉比距离。
     :param with_context: 是否回捞原文切片（关掉只出实体与三元组，给「只想看有哪些实体」的场景用）。
-    :return: {"entities","relations","triples","sources","es_ids","terms","truncated","warnings"}
+    :return: {"entities","relations","edges","triples","sources","es_ids","terms","truncated","warnings"}
         ``sources`` 是切片那一路拿不到的东西——**图谱叠加到检索结果上的行**，
         形态 ``[{"es_id","kb_id","entity","score"}]``，score 取命中实体的向量分，
         调用方据此把它和 BM25+kNN 的行一起排序（见 retrieval_service 的 _graph_recall）。
+        ``edges`` 是 ``triples`` 的结构化那份（``head/relation/tail/kb_id/score``）：页面要画
+        「实体—关系—实体」的图，拿拼好的字符串反解等于把展示格式变成隐性契约。
     """
     depth = clamp_depth(depth)
     scale = clamp_scale(scale)
     notes: list[str] = []
     kb_ids = sorted({int(i) for g in groups or [] for i in (g.get("kb_ids") or []) if int(i or 0)})
-    empty = {"entities": [], "relations": [], "triples": [], "sources": [], "es_ids": [],
+    empty = {"entities": [], "relations": [], "edges": [], "triples": [], "sources": [],
+             "es_ids": [],
              "terms": {"entities": [], "relations": []}, "truncated": False,
              "warnings": notes}
     if not kb_ids or not str(question or "").strip():
@@ -231,6 +234,12 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
     rel_list = sorted(relations.values(), key=lambda r: -r["score"])
 
     triples = [triple_of(r) for r in rel_list if triple_of(r)][:RC.KG_CONTEXT_MAX_TRIPLES]
+    # 关系同时给一份结构化的（只留有头有尾的，纯描述型关系在图上没有落点）
+    edges: list[dict] = [
+        {"head": r["head"], "relation": r["relation"], "tail": r["tail"],
+         "kb_id": r["kb_id"], "score": r["score"]}
+        for r in rel_list[:RC.KG_CONTEXT_MAX_TRIPLES] if r["head"] and r["tail"]
+    ]
     truncated = len(rel_list) > RC.KG_CONTEXT_MAX_TRIPLES
 
     # 邻域展开：以命中实体为中心按 depth 跳，把「问句里没提但相关」的关系也带进上下文
@@ -250,6 +259,13 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
                     truncated = True
                     break
                 triples.append(text)
+                # 邻域扩出来的边也要进图：问句里没提关系词时，图上唯一的关系来源就是这批
+                e_head, e_tail = _node_name(edge.get("source")), _node_name(edge.get("target"))
+                if e_head and e_tail:
+                    edges.append({"head": e_head,
+                                  "relation": str(edge.get("relation") or ""),
+                                  "tail": e_tail,
+                                  "kb_id": _node_kb(edge.get("source")), "score": 0.0})
             truncated = truncated or bool(sub.get("truncated"))
         except Exception as e:  # noqa: BLE001  展开失败只用命中的那批关系，不必整路作废
             notes.append(f"图谱邻域展开失败（只用直接命中的关系）：{str(e)[:120]}")
@@ -261,9 +277,19 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
     log.info("图谱检索完成: kb={} 实体词={} 命中实体={} 关系={} 原文={} 深度={} 规模={}",
              kb_ids, len(terms["entities"]), len(ent_list), len(triples), len(sources),
              depth, scale)
-    return {"entities": ent_list, "relations": rel_list[:scale], "triples": triples,
+    return {"entities": ent_list, "relations": rel_list[:scale], "edges": edges,
+            "triples": triples,
             "sources": sources, "es_ids": [s["es_id"] for s in sources],
             "terms": terms, "truncated": truncated, "warnings": notes}
+
+
+def _node_kb(node_id: Any) -> int:
+    """子图节点 id（``kb_id:类型:实体名``）→ 库 id（图上要能说清这个实体出自哪个库）。"""
+    parts = str(node_id or "").split(":")
+    try:
+        return int(parts[0]) if parts else 0
+    except ValueError:
+        return 0
 
 
 def _node_name(node_id: Any) -> str:

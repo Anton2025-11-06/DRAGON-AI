@@ -10,6 +10,9 @@
  *   都不勾 = 让每个库沿用自己的配置；
  * - 重排模型按本次请求选（需求 8）：没选就明确传 rerank=false，不让库上的存量配置替用户做主；
  * - 图谱增强那一路（需求 9）只服务 doc 型，且必须配对话模型——它要先让大模型从问句里抽实体；
+ * - 「图谱命中」页先把命中的实体按分数从高到低列出来，再画一张
+ *   「实体—关系—实体」的小图，鼠标停在实体上（列表行或图上节点）就摊开那个实体的明细；
+ *   小图按住任意处拖动 = 平移、滚轮 = 缩放，交互走 shared/graph-canvas（与图谱检索页同一份口径）；
  * - 选了对话模型就走流式问答，页面左右分栏：左边检索命中，右边模型逐字回答（不做记忆）。
  *
  * API 复用 ../doc/api.ts：那份文件是 RAG 模块契约的唯一来源（枚举、字段名都与
@@ -21,6 +24,7 @@ import type {
   RetrieveReq,
   RetrieveResp,
 } from '../doc/api';
+import type { GraphHit } from '../shared/graph-canvas';
 
 import {
   computed,
@@ -72,6 +76,7 @@ import {
   KG_DEPTH_MIN,
   KG_SCALE_MAX,
   KG_SCALE_MIN,
+  kgEntityColor,
   RAG_AUDIO_EXTS,
   RECALL_CHUNK,
   RECALL_GRAPH,
@@ -81,6 +86,7 @@ import {
   RetrieveAsk,
   uploadQueryImage,
 } from '../doc/api';
+import { attachCanvasInteractions } from '../shared/graph-canvas';
 
 const route = useRoute();
 const { hasPermission } = useAccess();
@@ -200,6 +206,19 @@ const avHits = computed(() => hitsOf(KB_TYPE_AUDIO_VIDEO));
 const graphEntities = computed<Record<string, any>[]>(
   () => result.value?.graph?.entities ?? [],
 );
+/**
+ * 图谱命中：实体按分数从高到低列出，关系另画一张「实体—关系—实体」的小图，
+ * 鼠标停在实体上（列表行与图上节点都算）就把接口回的那份明细摊开。
+ */
+const graphHitsSorted = computed<Record<string, any>[]>(() =>
+  graphEntities.value.toSorted(
+    (a, b) => Number(b.score || 0) - Number(a.score || 0),
+  ),
+);
+/** 后端给的结构化关系；没头没尾的纯描述型关系在图上没有落点，不画 */
+const kgEdges = computed<Record<string, any>[]>(() =>
+  (result.value?.graph?.edges || []).filter((e: any) => e?.head && e?.tail),
+);
 
 function hitsOf(chunkType: string) {
   return (result.value?.hits || []).filter((h) => h.chunkType === chunkType);
@@ -259,14 +278,88 @@ function formatDuration(sec: number) {
 }
 
 /**
- * 这一条音视频命中是不是音频（据签名地址的后缀判）。
+ * 命中分数摊成字段行时的取值口径。
+ *
+ * 某一侧没参与召回就是 0，缺字段才用「—」占位：字段整块消失会让「综合/向量/关键词」
+ * 三栏对不上，用户读不出是哪一路没跑。
+ */
+function scoreText(value?: number) {
+  return value === null || value === undefined ? '—' : Number(value).toFixed(4);
+}
+
+/**
+ * 命中行的字段清单：知识库 / 文件名 /〔分块号〕/ 综合分数 / 向量分数 / 关键词分数，
+ * 后面才补章节、页码这些只在有值时出现的出处信息。
+ *
+ * 交出去的是「字段 + 值 + 配色」而不是一整串文本：每个字段要用各自颜色的胶囊圈起来，
+ * 拼成字符串的话模板里就没法一项一个色。六个字段挤成一行纯文本时，找「向量分数」得从
+ * 行首读到行中，各定一色之后色本身就是定位符。
+ *
+ * cls 得一项一个值：模板里拿它当 v-for 的 key，页码和工作表共用一个 cls 的话，同一行同
+ * 时出现两项就会撞 key。
+ *
+ * 章节只在文本命中里给：图片、音视频这两页展示的是媒体本身，挂个 titlePath 只会让人
+ * 以为一张图也分章节。
+ */
+function hitFields(h: RetrieveHit, isText = false) {
+  const list: Array<{ cls: string; text: string }> = [
+    { cls: 'kb', text: `知识库：${h.kbName || `库 ${h.kbId}`}` },
+    { cls: 'doc', text: `文件名：${h.docName || `文档 ${h.docId}`}` },
+  ];
+  if (isText) list.push({ cls: 'chunk', text: `分块号：${h.chunkIndex}` });
+  list.push(
+    { cls: 'score', text: `综合分数：${scoreText(h.score)}` },
+    { cls: 'vector', text: `向量分数：${scoreText(h.vectorScore)}` },
+    { cls: 'keyword', text: `关键词分数：${scoreText(h.keywordScore)}` },
+  );
+  if (isText && h.titlePath) {
+    list.push({ cls: 'path', text: `章节：${h.titlePath}` });
+  }
+  if (h.graphEntity) {
+    list.push({ cls: 'entity', text: `命中实体：${h.graphEntity}` });
+  }
+  if (h.pageNum) list.push({ cls: 'page', text: `页码：${h.pageNum}` });
+  if (h.sheetName) list.push({ cls: 'sheet', text: `工作表：${h.sheetName}` });
+  if (h.mediaDuration) {
+    list.push({
+      cls: 'duration',
+      text: `时长：${formatDuration(h.mediaDuration)}`,
+    });
+  }
+  return list;
+}
+
+/**
+ * 「分块内容：」与正文拼成同一份 HTML 再交给 v-html。
+ *
+ * .hit-body 是 pre-wrap，模板里并排放两个 span 的话，它们之间的换行会被当成
+ * 正文里的空行；拼进一个字符串里就只占正文开头的几个字。
+ */
+function contentHtml(h: RetrieveHit) {
+  return `<span class="content-label">分块内容：</span>${highlight(h.content)}`;
+}
+
+/**
+ * 这一条命中的全部媒体地址。
+ *
+ * 一条切片可以覆盖多个媒体块（按页分块的一页三张图、标题分块的一节里插了几张），
+ * 后端因此给的是列表；老数据与单媒体卡片只给 mediaUrl，这里回落成一条。
+ */
+function mediaList(h: RetrieveHit) {
+  const list = (h.mediaUrls ?? []).filter(Boolean);
+  if (list.length > 0) return list;
+  return h.mediaUrl ? [h.mediaUrl] : [];
+}
+
+/**
+ * 某一条媒体地址是音频还是视频（据签名地址的后缀判）。
  *
  * 模态位只有 audio_video 一颗，文档内嵌音频与独立视频文件同一个桶：全用
  * <video> 渲染会把音频显示成一块没有画面的黑屏，播放器都找不着。
+ * 同一条切片里既嵌音频又嵌视频时也得各按各的后缀渲染，不能拿第一条定全部。
  */
-function isAudioHit(h: RetrieveHit) {
-  // split 取下标在 noUncheckedIndexedAccess 下是 string | undefined，补个空串兼平
-  const ref = String(h.mediaUrl || '').split('?')[0] ?? '';
+function isAudioUrl(url: string) {
+  const ref = String(url || '').split('?')[0] ?? '';
   const ext = ref.includes('.')
     ? ref.slice(ref.lastIndexOf('.') + 1).toLowerCase()
     : '';
@@ -465,13 +558,275 @@ watch(answer, async () => {
   if (el) el.scrollTop = el.scrollHeight;
 });
 
+// ===== 图谱命中的关系小图与 hover 明细 =====
+/** 小图高度写死：在 TabPane 里靠 flex 去量只会量到 0，G6 就得画在一块 0×0 的画布上 */
+const KG_MINI_HEIGHT = 280;
+/** 明细浮卡按这个宽度夹在容器里，别让它在右边探出画布 */
+const KG_TIP_WIDTH = 230;
+const graphBox = ref<HTMLDivElement | null>(null);
+/** 当前 hover 到的实体（列表行自己走 Tooltip，这里只服务图上的节点） */
+const tipEntity = ref<null | Record<string, any>>(null);
+const tipPos = ref({ left: 0, top: 0 });
+let kgGraph: any = null;
+/** 小图那个容器的 DOM 监听拆口句柄：切页不拆，下次建图就叠上第二套按下/松手 */
+let detachKgCanvas: (() => void) | null = null;
+/** 实体名 → 接口回的那份明细，hover 回调在 DOM 监听里，拿不到 renderKg 的局部变量 */
+let kgDetails = new Map<string, Record<string, any>>();
+
+const kgTipStyle = computed(() => ({
+  left: `${tipPos.value.left}px`,
+  top: `${tipPos.value.top}px`,
+}));
+
+/**
+ * 实体明细：接口回什么就摊开什么（名称/类型/知识库/分数/别名/摘要）。
+ *
+ * 给逐行数组而不是一段 JSON 文本：字段名翻成中文，用户不用一边看一边猜 score 是谁的分。
+ */
+function entityDetail(en?: null | Record<string, any>) {
+  if (!en) return [];
+  const aliases = Array.isArray(en.aliases) ? en.aliases.filter(Boolean) : [];
+  return [
+    `名称：${en.name || ''}`,
+    `类型：${en.type || '其他'}`,
+    `知识库：${en.kbId ?? en.kb_id ?? '-'}`,
+    `分数：${Number(en.score || 0).toFixed(6)}`,
+    `别名：${aliases.join('、') || '无'}`,
+    `摘要：${en.summary || '无'}`,
+  ];
+}
+
+/** 把明细浮卡钉到鼠标旁边（坐标换成容器内的，再夹进画布范围） */
+function showTipAt(en: Record<string, any>, clientX: number, clientY: number) {
+  const el = graphBox.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  tipPos.value = {
+    left: Math.max(
+      4,
+      Math.min(clientX - rect.left + 12, rect.width - KG_TIP_WIDTH - 4),
+    ),
+    top: Math.max(4, Math.min(clientY - rect.top + 12, rect.height - 40)),
+  };
+  tipEntity.value = en;
+}
+
+/**
+ * 停在实体上就把明细浮卡摊到鼠标旁，从命中带里出去就收掉。
+ *
+ * 不听 G6 的 node:mouseenter：它只认形状自己的包围盒，对视后那盒子在屏幕上就是几个像素，
+ * 反馈便是「要挪得很准才出明细」；改走 shared/graph-canvas 的 hover 回调后，命中范围与
+ * 平移、与图谱检索页都是同一份判定。
+ */
+function showTipOnHit(hit: GraphHit | null, event: MouseEvent | null) {
+  const detail = hit && event ? kgDetails.get(hit.id) : undefined;
+  if (!detail || !event) {
+    tipEntity.value = null;
+    return;
+  }
+  showTipAt(detail, event.clientX, event.clientY);
+}
+
+function destroyKg() {
+  // 监听先拆：容器 DOM 是同一个，不拆就会叠上第二套按下/松手（拆口顺手把光标类名也清掉）
+  detachKgCanvas?.();
+  detachKgCanvas = null;
+  if (kgGraph && !kgGraph.destroyed) kgGraph.destroy();
+  kgGraph = null;
+  kgDetails = new Map();
+  tipEntity.value = null;
+}
+
+/**
+ * 把整张小图缩放进容器。
+ *
+ * 用节点模型坐标算包围盒，不用 G6 的 getCanvasBBox：力导的形状位置比模型坐标晚落地，
+ * 拿那个滞后的盒对视会算出放大好几倍（图谱检索页实测过同样的坑）。
+ */
+function fitKg(width: number) {
+  const g = kgGraph;
+  if (!g || g.destroyed) return;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  g.getNodes().forEach((item: any) => {
+    const model = item.getModel();
+    if (!Number.isFinite(model?.x) || !Number.isFinite(model?.y)) return;
+    const size = Array.isArray(model.size)
+      ? model.size
+      : [model.size, model.size];
+    // 标签画在节点下方，各方向留 26px 余量
+    const half = (Number(size[0]) || 16) / 2 + 26;
+    minX = Math.min(minX, model.x - half);
+    maxX = Math.max(maxX, model.x + half);
+    minY = Math.min(minY, model.y - half);
+    maxY = Math.max(maxY, model.y + half);
+  });
+  const boxW = maxX - minX;
+  const boxH = maxY - minY;
+  if (!(boxW > 0) || !(boxH > 0) || !(width > 0)) return;
+  const ratio = Math.min(
+    1.4,
+    Math.max(0.2, Math.min((width - 24) / boxW, (KG_MINI_HEIGHT - 24) / boxH)),
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  g.get('group').setMatrix([
+    ratio,
+    0,
+    0,
+    0,
+    ratio,
+    0,
+    width / 2 - ratio * cx,
+    KG_MINI_HEIGHT / 2 - ratio * cy,
+    0,
+    0,
+    1,
+  ]);
+  g.autoPaint();
+}
+
+/**
+ * 命中实体 + 结构化关系 → 一张「实体—关系—实体」小图。
+ *
+ * 只在「图谱命中」这页可见时建：TabPane 藏起来时容器宽度量到 0，建出来的图就画在
+ * 0×0 的画布上（与图谱检索页同一个坑），而这里没有 ResizeObserver 兜着。
+ * 关系里的邻居也一并上画布：它们不在命中实体里，只能给名字与所属库，明细照常摊开。
+ */
+async function renderKg() {
+  destroyKg();
+  const el = graphBox.value;
+  if (!el || kgEdges.value.length === 0) return;
+  // 容器里只要还留着 canvas 就一律摘掉：叠了两层时，上面那张不再更新的旧图会把新图整个
+  // 盖住，表现正是「拖着不动、明细还钉在老位置上」
+  el.querySelectorAll('canvas').forEach((c) => c.remove());
+  const G6 = await import('@antv/g6');
+  // 同名实体可能来自两个库：按名合并留分最高的那个（graphHitsSorted 已按分降序）
+  const hits = new Map<string, Record<string, any>>();
+  graphHitsSorted.value.forEach((e) => {
+    const name = String(e?.name || '');
+    if (name && !hits.has(name)) hits.set(name, { ...e, hit: true });
+  });
+  const idSet = new Set<string>(hits.keys());
+  const kbByName = new Map<string, number>();
+  kgEdges.value.forEach((e) => {
+    [String(e.head), String(e.tail)].forEach((name) => {
+      idSet.add(name);
+      if (!kbByName.has(name)) kbByName.set(name, Number(e.kb_id || 0));
+    });
+  });
+  // 明细表提到模块级：hover 由 DOM 监听驱动（不在本次闭包里），只认这份 name → 明细
+  kgDetails = new Map<string, Record<string, any>>(
+    [...idSet].map((name) => [
+      name,
+      hits.get(name) || {
+        name,
+        hit: false,
+        kb_id: kbByName.get(name) || 0,
+      },
+    ]),
+  );
+  const nodes = [...idSet].map((name) => {
+    const hit = hits.get(name);
+    const color = hit ? kgEntityColor(hit.type) : '#D9D9D9';
+    return {
+      id: name,
+      label: name,
+      // 命中实体按分数放大、邻居一律小一圈：一眼分得出哪几个是本次真命中的
+      size: hit ? 20 + Math.min(22, Number(hit.score || 0) * 24) : 16,
+      style: { fill: color, stroke: color, lineWidth: hit ? 2 : 1 },
+    };
+  });
+  const edges = kgEdges.value.map((e, i) => ({
+    id: `k${i}`,
+    source: String(e.head),
+    target: String(e.tail),
+    label: String(e.relation || ''),
+  }));
+  const width = Math.max(240, Math.round(el.getBoundingClientRect().width));
+  // 交互监听先挂上再建图（理由见 attachCanvasInteractions 的注释尾段）
+  detachKgCanvas = attachCanvasInteractions(el, {
+    getGraph: () => kgGraph,
+    onHover: showTipOnHit,
+    // 这张小图没有「点实体出详情」，也没有 Shift 摆单个节点，所以 Shift 也照样用来平移
+    reserveShiftForNodeDrag: false,
+  });
+  kgGraph = new G6.Graph({
+    container: el,
+    width,
+    height: KG_MINI_HEIGHT,
+    fitView: false,
+    // 布局与对视都同步做完：animate 开着的话 render 那一帧的位置只是起点
+    animate: false,
+    minZoom: 0.2,
+    maxZoom: 3,
+    // 只把滚轮缩放留给 G6。平移原先是 drag-canvas，而它的 allowDragOnItem 默认 false
+    // （g6-pc/lib/behavior/drag-canvas.js:25/291）：按在节点、边或标签上想推图一律被
+    // return false。这张小图本来就被节点铺满，能起手的地方只剩几点空白 = 「拖着不动」；
+    // 平移与 hover 现在都走 shared/graph-canvas 听 DOM，与图谱检索页共用一份命中判定。
+    modes: { default: ['zoom-canvas'] } as any,
+    layout: {
+      type: 'force',
+      animate: false,
+      preventOverlap: true,
+      nodeSize: 56,
+      linkDistance: 110,
+      nodeStrength: -200,
+      edgeStrength: 0.3,
+    },
+    defaultNode: {
+      type: 'circle',
+      labelCfg: {
+        position: 'bottom',
+        offset: 4,
+        style: { fontSize: 11, fill: '#333' },
+      },
+      style: { cursor: 'pointer' },
+    },
+    defaultEdge: {
+      type: 'quadratic',
+      style: {
+        stroke: '#d5d5d5',
+        lineWidth: 1,
+        endArrow: { path: G6.Arrow.triangle(5, 7, 0), fill: '#d5d5d5' },
+      },
+      labelCfg: {
+        autoRotate: true,
+        style: {
+          fontSize: 10,
+          fill: '#999',
+          background: { fill: '#fff', padding: [2, 4, 2, 4], radius: 2 },
+        },
+      },
+    },
+  });
+  kgGraph.data({ nodes, edges });
+  kgGraph.render();
+  fitKg(width);
+}
+
+// 换结果或切回这一页都重建小图；离开这一页就拆掉（容器一隐藏宽度就归 0）
+watch([activeTab, graphEntities], async () => {
+  if (activeTab.value !== 'graph') {
+    destroyKg();
+    return;
+  }
+  await nextTick();
+  await renderKg();
+});
+
 onMounted(() => {
   loadOptions();
   loadModelOptions();
 });
 
-// 离开页面时断流：不然后台还在读一个没人看的回答，连接也一直占着
-onBeforeUnmount(stopAsk);
+// 离开页面时断流并拆图：不然后台还在读一个没人看的回答，连接与 G6 实例都占着
+onBeforeUnmount(() => {
+  stopAsk();
+  destroyKg();
+});
 </script>
 
 <template>
@@ -688,12 +1043,14 @@ onBeforeUnmount(stopAsk);
             <TabPane key="text" :tab="`文本命中 (${textHits.length})`">
               <div v-if="textHits.length > 0" class="hit-group">
                 <div v-for="(h, i) in textHits" :key="`t${i}`" class="text-hit">
-                  <div class="hit-head">
-                    <Tag color="blue">{{ h.kbName || `库 ${h.kbId}` }}</Tag>
-                    <span class="hit-doc">{{ h.docName }}</span>
-                    <span v-if="h.titlePath" class="hit-path">{{
-                      h.titlePath
-                    }}</span>
+                  <div class="hit-fields">
+                    <span
+                      v-for="f in hitFields(h, true)"
+                      :key="f.cls"
+                      :class="`hf hf-${f.cls}`"
+                    >
+                      {{ f.text }}
+                    </span>
                     <!-- 需求 9：两路叠加后的结果必须把路标出来，否则用户看不出这条为什么在这里 -->
                     <Tag
                       v-if="h.recall && h.recall !== RECALL_CHUNK"
@@ -701,19 +1058,6 @@ onBeforeUnmount(stopAsk);
                     >
                       {{ RECALL_LABELS[h.recall] || h.recall }}
                     </Tag>
-                    <span v-if="h.graphEntity" class="hit-path">
-                      实体：{{ h.graphEntity }}
-                    </span>
-                    <Tag color="green">score {{ h.score.toFixed(3) }}</Tag>
-                    <Tag v-if="h.vectorScore">
-                      向量 {{ h.vectorScore.toFixed(3) }}
-                    </Tag>
-                    <Tag v-if="h.keywordScore">
-                      关键词 {{ h.keywordScore.toFixed(3) }}
-                    </Tag>
-                    <Tag v-if="h.pageNum">第 {{ h.pageNum }} 页</Tag>
-                    <Tag v-if="h.sheetName">{{ h.sheetName }}</Tag>
-                    <Tag>#{{ h.chunkIndex }}</Tag>
                     <Button size="small" type="link" @click="toggleDetail(h)">
                       {{ expanded.has(hitKey(h)) ? '收起' : '展开全文' }}
                     </Button>
@@ -721,7 +1065,7 @@ onBeforeUnmount(stopAsk);
                   <div
                     class="hit-body"
                     :class="{ clipped: !expanded.has(hitKey(h)) }"
-                    v-html="highlight(h.content)"
+                    v-html="contentHtml(h)"
                   ></div>
                 </div>
               </div>
@@ -730,20 +1074,36 @@ onBeforeUnmount(stopAsk);
 
             <TabPane key="image" :tab="`图片命中 (${imageHits.length})`">
               <div v-if="imageHits.length > 0" class="image-wall">
-                <a
+                <!-- 一条切片可以覆盖多张图：全部放出来，只画第一张等于其余的图在页面上不存在 -->
+                <div
                   v-for="(h, i) in imageHits"
                   :key="`i${i}`"
-                  :href="h.mediaUrl"
-                  target="_blank"
-                  rel="noopener"
                   class="image-hit"
                 >
-                  <img :src="h.mediaUrl" :alt="h.docName" />
-                  <div class="hit-cap">
-                    {{ h.kbName }} · {{ h.score.toFixed(3) }}
-                    <span v-if="h.recall === RECALL_GRAPH">· 图谱关联</span>
+                  <div class="media-strip">
+                    <a
+                      v-for="(m, mi) in mediaList(h)"
+                      :key="mi"
+                      :href="m"
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      <img :src="m" :alt="h.docName" />
+                    </a>
                   </div>
-                </a>
+                  <div class="hit-fields">
+                    <span
+                      v-for="f in hitFields(h)"
+                      :key="f.cls"
+                      :class="`hf hf-${f.cls}`"
+                    >
+                      {{ f.text }}
+                    </span>
+                    <Tag v-if="h.recall === RECALL_GRAPH" color="purple">
+                      {{ RECALL_LABELS[h.recall] || '图谱关联' }}
+                    </Tag>
+                  </div>
+                </div>
               </div>
               <Empty v-else description="没有图片命中" />
             </TabPane>
@@ -751,11 +1111,14 @@ onBeforeUnmount(stopAsk);
             <TabPane key="av" :tab="`音视频命中 (${avHits.length})`">
               <div v-if="avHits.length > 0" class="hit-group">
                 <div v-for="(h, i) in avHits" :key="`a${i}`" class="av-hit">
-                  <div class="hit-head">
+                  <div class="hit-fields">
                     <VideoCameraOutlined />
-                    <span class="hit-doc">{{ h.docName }}</span>
-                    <span v-if="h.mediaDuration" class="hit-path">
-                      {{ formatDuration(h.mediaDuration) }}
+                    <span
+                      v-for="f in hitFields(h)"
+                      :key="f.cls"
+                      :class="`hf hf-${f.cls}`"
+                    >
+                      {{ f.text }}
                     </span>
                     <Tag
                       v-if="h.recall && h.recall !== RECALL_CHUNK"
@@ -763,14 +1126,15 @@ onBeforeUnmount(stopAsk);
                     >
                       {{ RECALL_LABELS[h.recall] || h.recall }}
                     </Tag>
-                    <Tag color="green">score {{ h.score.toFixed(3) }}</Tag>
                   </div>
-                  <audio
-                    v-if="isAudioHit(h)"
-                    :src="h.mediaUrl"
-                    controls
-                  ></audio>
-                  <video v-else :src="h.mediaUrl" controls></video>
+                  <div
+                    v-for="(m, mi) in mediaList(h)"
+                    :key="`m${mi}`"
+                    class="media-line"
+                  >
+                    <audio v-if="isAudioUrl(m)" :src="m" controls></audio>
+                    <video v-else :src="m" controls></video>
+                  </div>
                   <div class="hit-body">{{ h.content }}</div>
                 </div>
               </div>
@@ -780,23 +1144,67 @@ onBeforeUnmount(stopAsk);
             <TabPane
               v-if="result?.graph?.applied || (withGraph && graphAvailable)"
               key="graph"
-              :tab="`图谱实体 (${graphEntities.length})`"
+              :tab="`图谱命中 (${graphEntities.length})`"
             >
               <div v-if="graphEntities.length > 0" class="hit-group">
-                <Space wrap>
-                  <Tag
-                    v-for="(en, i) in graphEntities"
-                    :key="`g${i}`"
-                    color="purple"
-                  >
-                    {{ en.name }}（{{ en.entityType || en.type || '其他' }}）
-                  </Tag>
-                </Space>
+                <!-- 先把命中的实体按分数高低说清楚，再画关系 -->
+                <div class="block-title">命中实体（按分数从高到低）</div>
+                <div class="entity-list">
+                  <Tooltip v-for="(en, i) in graphHitsSorted" :key="`g${i}`">
+                    <template #title>
+                      <div
+                        v-for="(line, li) in entityDetail(en)"
+                        :key="li"
+                        class="tip-line"
+                      >
+                        {{ line }}
+                      </div>
+                    </template>
+                    <div class="entity-row">
+                      <span
+                        class="dot"
+                        :style="{ background: kgEntityColor(en.type) }"
+                      ></span>
+                      <span class="entity-name ellipsis">{{ en.name }}</span>
+                      <Tag v-if="en.type">{{ en.type }}</Tag>
+                      <span v-if="en.aliases?.length" class="hit-path">
+                        别名 {{ en.aliases.length }}
+                      </span>
+                      <span class="entity-score">
+                        {{ Number(en.score || 0).toFixed(4) }}
+                      </span>
+                    </div>
+                  </Tooltip>
+                </div>
+
+                <div class="block-title mt-2">
+                  实体关系图谱 · 按住任意处平移 · 滚轮缩放 · 停在实体上出明细
+                </div>
+                <div v-if="kgEdges.length > 0" class="kg-wrap">
+                  <div ref="graphBox" class="kg-canvas"></div>
+                  <div v-if="tipEntity" class="kg-tip" :style="kgTipStyle">
+                    <div
+                      v-for="(line, li) in entityDetail(tipEntity)"
+                      :key="li"
+                      class="tip-line"
+                    >
+                      {{ line }}
+                    </div>
+                    <div v-if="tipEntity.hit === false" class="tip-note">
+                      只是关系里带出的邻居，不在本次命中的实体里
+                    </div>
+                  </div>
+                </div>
+                <Empty
+                  v-else
+                  :image="Empty.PRESENTED_IMAGE_SIMPLE"
+                  description="本次没有可画的关系：图谱那一路只命中了实体，没匹配到关系也没扩出邻域边"
+                />
                 <Alert
                   class="mt-2"
                   type="info"
                   show-icon
-                  message="要看完整关系网，去左侧菜单「图谱检索」——那页才有子图可视化与原文溯源。"
+                  message="要看完整关系网与原文溯源，去左侧菜单「图谱检索」——那页才能按深度扩邻域。"
                 />
               </div>
               <Empty v-else description="本次没有召回图谱实体" />
@@ -889,7 +1297,7 @@ onBeforeUnmount(stopAsk);
   overflow-y: auto;
 }
 
-/* 命中多了先滚过顶部那两条提示：标签页（文本/图片/音视频/图谱实体）钉在
+/* 命中多了先滚过顶部那两条提示：标签页（文本/图片/音视频/图谱命中）钉在
    滚动区顶上，不然切个模态还得先滚回去 */
 :deep(.result-card .ant-tabs-nav) {
   position: sticky;
@@ -1012,16 +1420,87 @@ onBeforeUnmount(stopAsk);
   border-radius: 6px;
 }
 
-.hit-head {
+/* 命中行的每个字段一枚彩色胶囊：知识库/文件名/分块号/三个分数得一眼扫完，全挤成一行
+   纯文本时找「向量分数」要从行首读到行中，各定一色之后色本身就是定位符。
+   立体感靠「上浅下深的渐变 + 同色描边 + 一层薄投影」，不做实底深字：整片命中行都变成
+   色块会把正文压下去。 */
+.hit-fields {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px;
   align-items: center;
   margin-bottom: 6px;
+  font-size: 12px;
+  color: #555;
 }
 
-.hit-doc {
-  font-weight: 500;
+.hf {
+  max-width: 100%;
+  padding: 1px 9px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  box-shadow:
+    0 1px 2px rgb(15 23 42 / 12%),
+    inset 0 1px 0 rgb(255 255 255 / 60%);
+}
+
+.hf-kb {
+  color: #0958d9;
+  background: linear-gradient(180deg, #fff, #e6f4ff);
+  border-color: #91caff;
+}
+
+.hf-doc {
+  color: #08979c;
+  background: linear-gradient(180deg, #fff, #e6fffb);
+  border-color: #87e8de;
+}
+
+.hf-chunk {
+  color: #722ed1;
+  background: linear-gradient(180deg, #fff, #f9f0ff);
+  border-color: #d3adf7;
+}
+
+.hf-score {
+  color: #cf1322;
+  background: linear-gradient(180deg, #fff, #fff1f0);
+  border-color: #ffa39e;
+}
+
+.hf-vector {
+  color: #2f54eb;
+  background: linear-gradient(180deg, #fff, #f0f5ff);
+  border-color: #adc6ff;
+}
+
+.hf-keyword {
+  color: #c41d7f;
+  background: linear-gradient(180deg, #fff, #fff0f6);
+  border-color: #ffadd2;
+}
+
+.hf-path {
+  color: #389e0d;
+  background: linear-gradient(180deg, #fff, #f6ffed);
+  border-color: #b7eb8f;
+}
+
+.hf-entity {
+  color: #d46b08;
+  background: linear-gradient(180deg, #fff, #fff7e6);
+  border-color: #ffd591;
+}
+
+/* 页码/工作表/时长这几项只是补充出处，不该跟六个主字段抢色 */
+.hf-page,
+.hf-sheet,
+.hf-duration {
+  color: #595959;
+  background: linear-gradient(180deg, #fff, #f0f0f0);
+  border-color: #d9d9d9;
 }
 
 .hit-path {
@@ -1052,6 +1531,11 @@ onBeforeUnmount(stopAsk);
   border-radius: 2px;
 }
 
+/* 正文开头的「分块内容：」只做引导，不该比正文抢眼 */
+.hit-body :deep(.content-label) {
+  color: var(--text-color-secondary, #999);
+}
+
 .image-wall {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -1065,10 +1549,26 @@ onBeforeUnmount(stopAsk);
   border-radius: 6px;
 }
 
-.hit-cap {
+/* 一条切片的几张图平铺在同一张卡里：单张时 flex-grow 把它撑满卡宽，与改前的整格一致 */
+.media-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.media-strip > a {
+  flex: 1 1 calc(50% - 4px);
+  min-width: 0;
+}
+
+/* 同一条切片里的多条音视频各占一行：并排挤在一起时第二个播放器都按不到 */
+.media-line {
+  margin-bottom: 6px;
+}
+
+/* 图片墙一格只占 160px：字段行靠自然换行堆叠，不留行高余量会把卡片撑得比图还高 */
+.image-hit .hit-fields {
   margin-top: 4px;
-  font-size: 12px;
-  color: #666;
 }
 
 .av-hit {
@@ -1080,5 +1580,105 @@ onBeforeUnmount(stopAsk);
   max-height: 220px;
   background: #000;
   border-radius: 6px;
+}
+
+/* ===== 图谱命中 ===== */
+.block-title {
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #999);
+}
+
+/* 实体列表钉住最大高度：命中实体最多 50 个，不锁住会把关系图顶到屏幕外 */
+.entity-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.entity-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.entity-row:hover {
+  background: hsl(var(--primary) / 10%);
+}
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.entity-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.entity-score {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-color-secondary, #999);
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-wrap {
+  position: relative;
+}
+
+.kg-canvas {
+  width: 100%;
+  height: 280px;
+  cursor: grab;
+  background: var(--component-background-light, #fafcff);
+  border: 1px solid var(--border-color, #eee);
+  border-radius: 6px;
+}
+
+/* 光标跟着命中带走（带比节点形状本身宽，与图谱检索页同一套）：g-base hover 到带 cursor
+   的形状时会把 cursor 直写到 canvas 元素的行内样式上，盖不过行内只能 !important。 */
+.kg-canvas.pointing,
+.kg-canvas.pointing :deep(canvas) {
+  cursor: pointer !important;
+}
+
+/* 拖动过程中给个「正在推图」的手势反馈（排在 pointing 之后，拖的时候它赢） */
+.kg-canvas.grabbing,
+.kg-canvas.grabbing :deep(canvas) {
+  cursor: grabbing !important;
+}
+
+/* hover 到实体时的明细浮卡：跟着鼠标钉在画布里，pointer-events:none 免得自己挡住下一个命中 */
+.kg-tip {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  max-width: 230px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+}
+
+.tip-line {
+  word-break: break-all;
+}
+
+.tip-note {
+  margin-top: 2px;
+  color: var(--text-color-secondary, #999);
 }
 </style>

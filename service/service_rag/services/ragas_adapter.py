@@ -14,11 +14,6 @@ RAGAS 只认 langchain 的 ``BaseChatModel`` / ``Embeddings`` 抽象，而本仓
 声明 ``arbitrary_types_allowed``。这里只传 ``model_id``（int），调用时再 ``require_config``
 取配置，既避开 pydantic 摩擦，也让每次调用都拿到缓存里的最新配置（模型改了参数即时生效）。
 
-同步入口的桥接
---------------
-RAGAS 在异步里跑，优先命中 ``_agenerate`` / ``aembed_*``；langchain 的同步抽象
-（``_generate`` / ``embed_query``）也必须实现。桥接函数在无事件循环时用 ``asyncio.run``，
-已在循环里时拒绝（那种调用点应由异步路径接住），避免「运行中的 loop 再开 asyncio.run」。
 """
 from __future__ import annotations
 
@@ -27,21 +22,14 @@ from typing import Any, Optional, Sequence
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ChatGeneration, ChatResult  # noqa: F401
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: F401
 from pydantic import ConfigDict, Field
 
 from common.common_model.model_types import ModelConfig
 from service.service_rag.services.rag_model import RagModelService
 
 
-def _run_sync(coro: Any) -> Any:
-    """在同步上下文里跑一个协程：无 loop 时用 asyncio.run，已有 loop 时明确拒绝。"""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    coro.close()
-    raise RuntimeError("评测适配器不应在已运行的事件循环里走同步路径（请用异步入口）")
 
 
 def _split_messages(messages: Sequence[BaseMessage]) -> tuple[str, str]:
@@ -92,10 +80,6 @@ class RagasChatModel(BaseChatModel):
         text = await RagModelService.chat(config, prompt, system=(system or None))
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
 
-    def _generate(self, messages: Sequence[BaseMessage], stop: Optional[list[str]] = None,
-                  run_manager: Any = None, **kwargs: Any) -> ChatResult:
-        # 同步路径给非异步调用兜底（RAGAS 走 _agenerate，一般命中不到这里）
-        return _run_sync(self._agenerate(messages, stop, run_manager, **kwargs))
 
 
 class RagasEmbeddings(Embeddings):
@@ -121,11 +105,6 @@ class RagasEmbeddings(Embeddings):
     async def aembed_query(self, text: str, **kwargs: Any) -> list[float]:
         return await self._aembed_query(text)
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return _run_sync(self._aembed_documents(texts))
-
-    def embed_query(self, text: str) -> list[float]:
-        return _run_sync(self._aembed_query(text))
 
 
 def build_judge_llm(model_id: int, *, label: str = "裁判模型",

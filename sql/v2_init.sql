@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     `sheet_name` VARCHAR(128) DEFAULT NULL COMMENT 'Excel 工作表名',
     `page_num` INT NOT NULL DEFAULT 0 COMMENT '起始页码，0=非分页文档',
     `block_id` VARCHAR(64) DEFAULT NULL COMMENT '来源解析块 id，可对回 sidecar 里的版面信息',
-    `media_url` VARCHAR(500) DEFAULT NULL COMMENT '图片/音视频在公共存储中的 key（ES 只存这个 URL，不存二进制）',
+    `media_url` TEXT COMMENT '本切片覆盖的全部媒体在公共存储中的句柄（多个用换行分隔，单片上限 20 条；ES 只存这个串，不存二进制）。一个切片可以有多张图（按页分块的一页三张），只存第一条会让其余对象在清理链路里成为没人删的孤儿',
     `media_type` VARCHAR(32) DEFAULT NULL COMMENT '媒体 MIME 类型',
     `token_count` INT NOT NULL DEFAULT 0 COMMENT 'token 数（软预算与统计）',
     `available` TINYINT NOT NULL DEFAULT 1 COMMENT '0-人工停用（不删数据，检索直接排除）1-可用',

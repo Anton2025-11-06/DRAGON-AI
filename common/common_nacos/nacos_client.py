@@ -88,8 +88,8 @@ class NacosClient:
         log.info(f"Nacos connecting: address={server_address}, "
                  f"namespace={namespace_id or 'public'}, "
                  f"user={user_name or '(anonymous)'}, "
-                 f"password={'set' if password else 'empty'}, "
-                 f"register={service_name or '-'}@{ip or 'auto'}:{port or '-'}")
+                 f"password={'set' if password else 'empty'}, ")
+                 # f"register={service_name or '-'}@{ip or 'auto'}:{port or '-'}")
 
         client_config = (ClientConfigBuilder()
                          .server_address(server_address)

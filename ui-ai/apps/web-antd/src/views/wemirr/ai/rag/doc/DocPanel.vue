@@ -11,10 +11,10 @@
  * - 多媒体不再自动加载：列表不再下发签名地址，点预览才当场签一个（也是为了让
  *   预览这一步真的过 preview 鉴权）。
  *
- * 进度靠 /documents/progress/batch：每次加载先整屏拉一次（分段进度条即使没在跑也要画得出来），
- * 只有还有文档在跑时才起 2.5s 定时器，有文档转入终态就刷新列表。
+ * 进度靠 /documents/progress/batch：只在每次加载（含点刷新按钮）时整屏拉一次，
+ * 不再起定时器轮询：任务跑到哪里了由用户自己点刷新取，页面上不做后台定时请求。
  * 媒体链路（download/preprocess/embedding/index）的分段进度后端一直在写，
- * 以前只是没在页面上画出来，现在三条链路共用同一个分段进度条。
+ * 分段进度条即使没在跑也要画得出来，所以已成/已败的文档同样靠这一次拉取画出「绿了几段」。
  *
  * 三个口径变更：
  * - 行内操作一律图标化（只把名字放在悬停 tooltip 里）：doc 型定死四项，每一项对应
@@ -22,8 +22,13 @@
  * - 「重新分块」改名「构建向量」、「建图谱」改名「构建图谱」（需求 10）：两者都必须先勾选文档，
  *   且点击后先弹二次确认（会删旧数据，不可逆）；
  * - 「摄取」这个词已从全部文案里消失（需求 14），中文一律叫「解析」。
+ *
+ * 搜索栏（需求 2）：文件名 + 向量化进度 + 图谱进度三个条件都是服务端过滤（走
+ * documents/page 的 name/status/graphState），不在前端筛当前页——当前页只有十几行，
+ * 页内筛出来的「没有结果」其实是别的页上那几百条。图谱进度只对 doc 型给（媒体型的
+ * graphState 恒为未构建，放个下拉上去就是让人筛一个永远只命中一个值的条件）。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import {
   ApartmentOutlined,
@@ -44,6 +49,7 @@ import {
   Input,
   message,
   Modal,
+  Select,
   Space,
   Spin,
   Table,
@@ -57,6 +63,7 @@ import {
   BuildGraph,
   BuildVectors,
   DeleteDocuments,
+  DOC_STATUS_ALL,
   DOC_STATUS_COLORS,
   DOC_STATUS_LABELS,
   DocPageList,
@@ -88,6 +95,40 @@ const progressMap = ref<Record<number, DocProgressResp>>({});
 // 默认一页 10 条：与 showSizeChanger 的候选档对齐（12 不在候选里，下拉会出现一个孤儿档位）
 const pagination = ref({ current: 1, pageSize: 10, total: 0 });
 
+// ---------- 搜索栏（需求 2）----------
+// 三个条件都是 undefined 表示「不筛这一项」，不要拿空字符串当未选：后端把
+// status='' 当非法状态码报一轮错
+const searchName = ref('');
+const searchStatus = ref<string | undefined>(undefined);
+const searchGraphState = ref<number | undefined>(undefined);
+
+const statusOptions = DOC_STATUS_ALL.map((s) => ({
+  label: DOC_STATUS_LABELS[s] ?? s,
+  value: s as string,
+}));
+const graphStateOptions = Object.keys(KG_STATE_LABELS).map((k) => ({
+  label: KG_STATE_LABELS[Number(k)],
+  value: Number(k),
+}));
+
+/** 改条件就回到第一页：停在第 7 页筛一个只有三条结果的条件，页面上是一片空白 */
+function doSearch() {
+  pagination.value.current = 1;
+  load();
+}
+
+function resetSearch() {
+  searchName.value = '';
+  searchStatus.value = undefined;
+  searchGraphState.value = undefined;
+  doSearch();
+}
+
+/** allow-clear 点叉时立刻回查：不然清空了输入框，列表还停在上一轮筛出来的结果上 */
+function onNameChange(e: Event) {
+  if (!(e.target as HTMLInputElement | null)?.value) doSearch();
+}
+
 const uploadOpen = ref(false);
 const contentOpen = ref(false);
 const contentDocId = ref<null | number>(null);
@@ -110,8 +151,6 @@ const isImage = computed(() => props.kb?.kbType === KB_TYPE_IMAGE);
 const isAv = computed(() => props.kb?.kbType === KB_TYPE_AUDIO_VIDEO);
 /** 图片型与音视频型共用媒体列集（没勾选知识库时两个都是 false，表格不渲染） */
 const isMedia = computed(() => isImage.value || isAv.value);
-
-const RUNNING = ['ANALYZING', 'PENDING', 'PROCESSING', 'PARSING'];
 
 /**
  * 按钮只认后端下发的 actions（文档列表接口已按 ACL 逐行求值），判定规则不在前端复制另一份。
@@ -157,13 +196,16 @@ async function load(keepSelection = false) {
     const res = await DocPageList(props.kb.id, {
       current: pagination.value.current,
       size: pagination.value.pageSize,
+      name: searchName.value.trim() || undefined,
+      status: searchStatus.value || undefined,
+      // 媒体型没有图谱概念，不把那个恒为 0 的条件递下去
+      graphState: isDoc.value ? searchGraphState.value : undefined,
     });
     docs.value = res.records || [];
     pagination.value.total = res.total || 0;
     if (!keepSelection) selectedIds.value = [];
     // 分段进度条不只在「跑动中」才需要：已成/已败的文档也要把「哪几个阶段、绿了几段」画出来
     await refreshProgress();
-    ensurePolling();
   } catch (e: any) {
     message.error(e?.message || '加载文档失败');
   } finally {
@@ -171,70 +213,41 @@ async function load(keepSelection = false) {
   }
 }
 
-// ---------- 进度轮询 ----------
-let timer: ReturnType<typeof setInterval> | null = null;
-
-/** 向量化与图谱是两个独立状态机，任一边在跑就得继续轮询 */
-function isBusy(d: DocumentResp) {
-  return RUNNING.includes(d.status || '') || Number(d.graphState) === 1;
-}
-
-function ensurePolling() {
-  if (!docs.value.some(isBusy)) {
-    stopPolling();
-    return;
-  }
-  if (!timer) timer = setInterval(refreshProgress, 2500);
-}
-function stopPolling() {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
-}
-
-/** 整屏拉一次进度（不分在不在跑），并按结果判断要不要刷新列表 */
+/**
+ * 整屏拉一次进度（不分在不在跑）：这是页面上唯一的进度请求点。
+ *
+ * 取消定时轮询是显式口径：进度只在加载与手动刷新时取，跑动中的数字停在屏幕上不动，
+ * 右上那个刷新按钮就是取最新的手段。每次按当前屏的 doc_id 整份重建映射（不是往上叠），
+ * 否则翻了页、换了库以后上一屏的进度会一直赖在内存里被读到。
+ */
 async function refreshProgress() {
-  if (!props.kb || docs.value.length === 0) return stopPolling();
+  if (!props.kb || docs.value.length === 0) return;
   const ids = docs.value.map((d) => d.id);
   try {
     const list = await GetDocsProgressBatch(ids);
-    let finished = false;
-    const map = { ...progressMap.value };
+    const map: Record<number, DocProgressResp> = {};
     list.forEach((p) => {
       map[p.docId] = p;
-      const d = docs.value.find((x) => x.id === p.docId);
-      if (!d) return;
-      if (p.status && RUNNING.includes(d.status || '') && !RUNNING.includes(p.status)) {
-        finished = true;
-      }
-      // 图谱从「构建中」落到终态同样要重拉列表（graphState 是权威值，不在进度里）
-      if (
-        Number(d.graphState) === 1 &&
-        p.graphState !== undefined &&
-        Number(p.graphState) !== 1
-      ) {
-        finished = true;
-      }
     });
     progressMap.value = map;
-    if (finished) await load(true);
   } catch {
-    /* 轮询失败静默，下一轮再试 */
+    /* 进度拉不到只是这一屏少一段分段条，列表已经出来了，不把已加载的内容抹掉 */
   }
 }
 
 watch(
   () => props.kb?.id,
   () => {
-    stopPolling();
     progressMap.value = {};
     pagination.value.current = 1;
+    // 换一个库就把搜索条件清空：上一轮筛的「失败的 xxx.pdf」在别的库里必然零结果
+    searchName.value = '';
+    searchStatus.value = undefined;
+    searchGraphState.value = undefined;
     load();
   },
   { immediate: true },
 );
-onBeforeUnmount(stopPolling);
 
 // ---------- 动作 ----------
 function onTableChange(pag: any) {
@@ -383,11 +396,28 @@ function vectorText(d: DocumentResp) {
   return `${label} ${p.done ?? 0}/${p.total ?? 0} (${p.percent ?? 0}%)`;
 }
 
+/**
+ * 图谱这一路的最新回执原文（进度里的 message）。
+ *
+ * 失败原因只存在这里：tb_document 只有 graph_state 一个状态码，没带原因列，
+ * 页面不取它就只剩一个「失败」。Redis 进度键 TTL 24h，过期后这里为空。
+ */
+function graphMessageOf(d: DocumentResp) {
+  return String(progressMap.value[d.id]?.graphMessage || '').trim();
+}
+
 function graphText(d: DocumentResp) {
   const p = progressMap.value[d.id];
   const state = Number(d.graphState);
   if (state === 1 && p) {
     return `${p.graphStageLabel || p.graphStage || ''} ${p.graphDone ?? 0}/${p.graphTotal ?? 0} (${p.graphPercent ?? 0}%)`;
+  }
+  if (state === 3) {
+    // 失败原因只有进度文案知道（模型调用打不通、没有可用切片、没配抽取模型这类），必须报到页面上；
+    // 一个实体都没抽到不算失败（后端按已构建收口），所以这里不会出现那种文案；
+    // 前缀「图谱构建失败：」与旁边的 Tag 重复，去掉它这一格才装得下真正的原因
+    const msg = graphMessageOf(d).replace(/^图谱构建失败\s*[：:]\s*/, '');
+    return msg ? `失败：${msg}` : '失败';
   }
   return d.graphStateLabel || KG_STATE_LABELS[state] || '未构建';
 }
@@ -523,13 +553,52 @@ const rowSelection = computed<any>(() => ({
         <Button v-if="hasSelection" size="small" danger @click="doBatchDelete">
           删除({{ selectedIds.length }})
         </Button>
-        <Button size="small" @click="load()">
-          <template #icon><ReloadOutlined /></template>
-        </Button>
+        <Tooltip
+          title="刷新（列表与进度都重拉一次；进度不自动轮询，跑动中的数字要点这里才动）"
+        >
+          <Button size="small" @click="load()">
+            <template #icon><ReloadOutlined /></template>
+          </Button>
+        </Tooltip>
       </Space>
     </template>
 
     <Spin :spinning="loading">
+      <!-- 搜索栏（需求 2）：三个条件都是服务端过滤，回车与下拉选择即时生效 -->
+      <div v-if="kb" class="doc-search">
+        <Space :size="8" wrap>
+          <Input
+            v-model:value="searchName"
+            allow-clear
+            placeholder="文件名"
+            size="small"
+            style="width: 220px"
+            @change="onNameChange"
+            @press-enter="doSearch"
+          />
+          <Select
+            v-model:value="searchStatus"
+            :options="statusOptions"
+            allow-clear
+            :placeholder="isDoc ? '向量化进度' : '解析状态'"
+            size="small"
+            style="width: 150px"
+            @change="doSearch"
+          />
+          <Select
+            v-if="isDoc"
+            v-model:value="searchGraphState"
+            :options="graphStateOptions"
+            allow-clear
+            placeholder="图谱进度"
+            size="small"
+            style="width: 140px"
+            @change="doSearch"
+          />
+          <Button size="small" @click="doSearch">查询</Button>
+          <Button size="small" @click="resetSearch">重置</Button>
+        </Space>
+      </div>
       <!-- 三类知识库统一一张表格：列与行操作按 kbType 算（tableColumns），媒体型不再单开形态 -->
       <Table
         v-if="isDoc || isMedia"
@@ -587,7 +656,12 @@ const rowSelection = computed<any>(() => ({
               <Tag :color="KG_STATE_COLORS[record.graphState] || 'default'">
                 {{ record.graphStateLabel || KG_STATE_LABELS[record.graphState] }}
               </Tag>
-              <span class="progress-text">{{ graphText(record as DocumentResp) }}</span>
+              <!-- 格宽只有 220px：失败原因先就地截断展示，悬停看全文（没消息时 tooltip 不出） -->
+              <Tooltip :title="graphMessageOf(record as DocumentResp)">
+                <span class="progress-text">{{
+                  graphText(record as DocumentResp)
+                }}</span>
+              </Tooltip>
             </div>
             <div class="stage-bar">
               <Tooltip
@@ -764,6 +838,11 @@ const rowSelection = computed<any>(() => ({
   color: var(--text-color-secondary, #d46b08);
 }
 
+/* 搜索栏与表格之间的间距（表格自带无上边距，不留这里会贴成一坨） */
+.doc-search {
+  margin-bottom: 10px;
+}
+
 /* 名称格：名字弹性截断，尾部标签固定不被挤掉（min-width:0 让 flex 项允许收缩到
    小于内容宽度，不然省略号不会生效） */
 .doc-name-cell {
@@ -790,8 +869,13 @@ const rowSelection = computed<any>(() => ({
 }
 
 .progress-text {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-color-secondary, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stage-bar {

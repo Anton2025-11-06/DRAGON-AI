@@ -170,8 +170,8 @@ class DocumentChunk(Base):
     page_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="起始页码，0=非分页文档")
     block_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True,
                                                     comment="来源解析块 id，可对回 sidecar")
-    media_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True,
-                                                     comment="图片/音视频在公共存储中的句柄")
+    media_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True,
+                                                     comment="本切片覆盖的全部媒体句柄，多个按换行分隔（不是 URL，出口才签）")
     media_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     available: Mapped[int] = mapped_column(Integer, nullable=False, default=1,

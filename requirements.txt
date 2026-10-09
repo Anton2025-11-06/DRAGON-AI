@@ -66,7 +66,7 @@ markdown>=3.6
 # 老格式 .doc/.ppt 解析依赖系统中安装的 LibreOffice（soffice），非 pip 依赖
 
 # 智能体自主规划框架
-agentscope
+agentscope>=2.0.9
 # HTTP 流式输出
 sse-starlette>=2.1.0
 # 沙箱进程管理
@@ -76,20 +76,37 @@ aiofiles>=23.2.1
 # excel工具
 openpyxl>=3.1.5
 # 阿里云 OSS 存储（官方 Python SDK V2，唯一对象存储后端）
-alibabacloud-oss-v2
+alibabacloud-oss-v2==1.4.0
 
 # RAG 知识评测（RAGAS）：只在 ragflow worker 里执行评测，不影响 API 进程启动。
 # 仅用 langchain-core 的 BaseChatModel/Embeddings 抽象写适配器（见 services/ragas_adapter.py），
-# 生成与向量都转调本仓 common_model，**不装任何 langchain provider**。
+# 生成与向量都转调本仓 common_model，不调用任何 langchain provider。
 # ragas 传递依赖较重（datasets/instructor 等），随 worker 镜像安装。
-ragas
-langchain-core
+# ragas 也要钉死到实测过的这一个版本，不要用 >=：runner 直接 import 它私有命名的指标类
+# （ragas.metrics._Faithfulness / _ResponseRelevancy / _LLMContextPrecisionWithReference /
+# _LLMContextRecall / _AnswerCorrectness）以及 aevaluate、LangchainLLMWrapper、
+# LangchainEmbeddingsWrapper，这些都不在 ragas 对外的兼容承诺里，后续版本改名字或改签名是常态；
+# 用 >= 等于构建 worker 镜像时自动拉进没验证过的新版，症状和这次一样：打分段起不来、条项全 FAILED。
+# 要升级就人工改这一个号，并在装好的环境里把上面这条导入链跑通再提交。
+ragas==0.4.3
+langchain-core==1.6.9
+# langchain-community 必须钉在 0.4 以下，勿放宽：ragas 0.4.3 在 ragas/llms/base.py 顶层硬导入
+# langchain_community.chat_models.vertexai.ChatVertexAI（只拿来凑 isinstance 列表，运行中从不调用），
+# 而 0.4.x 已把该子模块迁去 langchain_google_vertexai → import ragas.llms 直接 ModuleNotFoundError，
+# 评测的打分段整段起不来（日志表现：条项全 FAILED）。ragas 没声明 langchain-community 上界，
+# 不钉版本 pip 会解析到 0.4.x 的不匹配组合；0.3.31 + langchain-core 1.6.9 已实测
+# ragas.llms / aevaluate / dataset_schema / 五个指标全部导入通过。
+# 0.3.31 声明的是 langchain-core<2.0.0,>=0.3.78，和 1.6.9 不冲突：pip install -r 一次就能把
+# ragas / langchain-core / langchain-community 三行一起解出来（实测 dry-run 连 dataclasses-json 也会自动带上）。
+# 只有在已经装着 0.4.2 的现网环境里单独换版时才用 --no-deps，为的是不牵动其它包。
+# 不管哪种方式，换完都要重启 ragflow worker：进程里缓存着旧版的模块对象，磁盘被替了它也不会重读。
+langchain-community==0.3.31
 # 阿里云 OSS 异步客户端（oss.aio.AsyncClient）依赖，SDK 未声明需显式安装
 aiohttp>=3.9.0
 # 大模型
 modelscope>=1.35.0
-dashscope>=1.27.4
-openai>=2.54.0
-arq>=0.28.0
+dashscope==1.27.4
+openai==2.54.0
+arq==0.28.0
 # MCP 官方 SDK（ClientSession：initialize / tools.list / tools.call）
 mcp>=1.8.0

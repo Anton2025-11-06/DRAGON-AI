@@ -5,7 +5,7 @@ service_gateway:
     password: ''
     max_connections: 200
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -21,7 +21,7 @@ service_system:
     password: ""
     max_connections: 10
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -37,7 +37,7 @@ service_login:
     password: ""
     max_connections: 200
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -61,7 +61,7 @@ service_workflow:
     bucket: dragon-ai3
     access_key: ''                  # ★ 到 Nacos 控制台里填真值：本文件在公开仓库里，AK 不要提交
     secret_key: ''                  # ★ 同上；留空则回退环境变量 OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET
-    path_prefix: dragon-ai/         # 对象键前缀，与桶里其它用途隔离
+    path_prefix: workflow/         # 对象键前缀，与桶里其它用途隔离
       # ---------- 以下均可选（bucket 名全局唯一，须与控制台一致）----------
       # endpoint: ''                  # 缺省按 region 构造 oss-<region>.aliyuncs.com
       # security_token: ''            # STS 临时凭证才填（对应环境变量 OSS_SESSION_TOKEN）
@@ -82,7 +82,7 @@ service_workflow:
     password: ""
     max_connections: 10
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -93,7 +93,7 @@ service_workflow:
 
 arq_workflow:
   redis:
-    url: redis://XXX:26739/0
+    url: redis://127.0.0.1:26739/0
     password: Jzh@616294
 
 # ==================== 知识库（RAG）模块 ====================
@@ -103,12 +103,12 @@ arq_workflow:
 # 否则写入与检索分属两个集群。
 service_rag:
   redis:
-    host: 10.88.128.15
+    host: 127.0.0.1
     port: 26379
     password: ""
     max_connections: 300
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -129,7 +129,7 @@ service_rag:
   # Elasticsearch：BM25 + dense_vector 共用单索引 rag_knowledge_chunk（common_es 全局异步单例读本段）
   # 必填只有一项 url（多节点逗号分隔）；其余键注掉即走默认，认证都不填=不认证（内网未开 security）
   es:
-    url:
+    url: http://127.0.0.1:9200
     # username: ''                  # 开了 security 才填（也可用 api_key）
     # password: ''
     # verify_certs: false           # 自签证书时关；填 true/false 或布尔都行
@@ -142,7 +142,7 @@ service_rag:
     # analyzer: ik_max_word         # ES 装了 ik 分词插件才填
   # Neo4j：知识图谱（仅 doc 型知识库，common_neo4j 全局异步单例读本段）
   neo4j:
-    url:
+    url: bolt://127.0.0.1:7687
     user: neo4j
     password: Jzh@616294
     # database: neo4j               # 社区版无多库，留空即默认库
@@ -163,9 +163,9 @@ service_rag:
 # worker 的 arq Redis 从本段 redis.url 读，其余后端字段与 service_rag 同源。
 arq_ragflow:
   redis:
-    url: redis://10.88.128.15:26379/0
+    url: redis://127.0.0.1:26379/0
   mysql:
-    host: 10.87.106.143
+    host: 127.0.0.1
     port: 3306
     user: root
     password: Jzh@616294
@@ -185,6 +185,39 @@ arq_ragflow:
     url:
   neo4j:
     url:
+    user: neo4j
+    password: Jzh@616294
+  mineru:
+    base_url: ''
+    api_key: ''
+    poll_interval: 3
+    timeout: 1800
+
+arq_graphflow:
+  redis:
+    url: redis://XXX:26739/0
+    password: Jzh@616294
+  mysql:
+    host: XXX
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai3
+    pool_size: 10
+    max_overflow: 100
+    echo: False
+  storage:
+    type: aliyun
+    url_expires: 3600
+    region: cn-hangzhou
+    bucket: dragon-ai2
+    access_key: XXX
+    secret_key: XXX
+    path_prefix: rag/
+  es:
+    url: http://127.0.0.1:9200
+  neo4j:
+    url: bolt://127.0.0.1:7687
     user: neo4j
     password: Jzh@616294
   mineru:

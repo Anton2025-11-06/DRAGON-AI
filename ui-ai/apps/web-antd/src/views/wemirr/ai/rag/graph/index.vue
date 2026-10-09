@@ -10,6 +10,12 @@
  * 后端 rag/graph/** 一律先过 kb_scope 白名单，并且只留 doc 型且开了图谱的库：
  * 所以「查出来是空」可能是没图，也可能是这些库都没开图谱，statistics 会把两者分开回话。
  *
+ * 画布交互：按住左键拖 = 平移整张图，滚轮 = 缩放，Shift+拖 = 摆单个节点，
+ * 点一下实体（圆或它下方的名字）= 右侧详情 + 溯源，hover 亮蓝圈的就是能点开的同一个范围。
+ * 平移、命中、hover 都不交给 G6 的行为层，走 shared/graph-canvas 那套 DOM 监听（页面只
+ * 管「命中之后做什么」），而且监听在建图之前就挂上：建图中间抛一下就把交互摘了，页面会
+ * 变成「图看得见但拖不动」。
+ *
  * API 复用 ../doc/api.ts（RAG 模块契约唯一来源）。
  */
 import type { GraphNodeResp, KbOption } from '../doc/api';
@@ -43,12 +49,16 @@ import {
 } from 'ant-design-vue';
 
 import {
+  // 实体类型取自后端 rag_constant.KG_ENTITY_TYPES（中文），按原值着色，未命中落 DEFAULT
+  // 与检索页的「图谱命中」共用一份表，两处各写一份只会各漂一半
+  kgEntityColor as colorOf,
   GraphEntitySearch,
   GraphEntitySources,
   GraphQuery,
   GraphStatistics,
   KbOptions,
 } from '../doc/api';
+import { attachCanvasInteractions } from '../shared/graph-canvas';
 
 const route = useRoute();
 const { hasPermission } = useAccess();
@@ -74,6 +84,13 @@ const totalEdges = ref(0);
 const truncated = ref(false);
 /** 后端给的空白原因（关键词与类型筛空起点时用），空态拿它替掉「库里没图」那句通用文案 */
 const emptyMessage = ref('');
+/**
+ * 建图失败的原因（留在页面上，不只弹 toast）。
+ *
+ * 以前 render() 中途抛了只在调用点弹一条 toast，画布上什么痕迹都不留、图仍然停在屏幕上，
+ * 读者无从知道「拖不动、点不中」是这一抛造成的。
+ */
+const buildError = ref('');
 
 const stats = ref<Record<string, any>>({});
 const loading = ref(false);
@@ -102,25 +119,10 @@ const nodeCardStyle = computed(() => ({
 
 const container = ref<HTMLDivElement | null>(null);
 let graph: any = null;
-/** 一次「按下 → 松手」的记账（详情不能挂 G6 的 click，原因见 finishGesture） */
-let gesture: null | { id?: string; x: number; y: number } = null;
+/** 画布 DOM 监听的收口句柄：render 会反复重建图，容器却是同一个 DOM，不清会叠一层监听 */
+let detachCanvasEvents: (() => void) | null = null;
 
-// 实体类型取自后端 rag_constant.KG_ENTITY_TYPES（中文），按原值着色，未命中落 DEFAULT
-const ENTITY_COLORS: Record<string, string> = {
-  人物: '#5B8FF9',
-  组织: '#5AD8A6',
-  地点: '#5D7092',
-  时间: '#9270CA',
-  产品: '#6DC8EC',
-  技术: '#13C2C2',
-  事件: '#F6BD16',
-  指标: '#E8684A',
-  其他: '#269A99',
-  DEFAULT: '#8C8C8C',
-};
-function colorOf(type?: string) {
-  return ENTITY_COLORS[type || ''] || ENTITY_COLORS.DEFAULT;
-}
+// 实体类型着色走 doc/api 的 kgEntityColor（图谱检索页与检索页共用一份表）
 
 /** 实体类型下拉优先用统计接口给的类型（图上没出现的类型也能筛），拿不到再退回当前子图里出现过的 */
 const entityTypeOptions = computed(() => {
@@ -228,12 +230,6 @@ const MIN_CANVAS = 60;
 const MIN_FIT_ZOOM = 0.08;
 const MAX_FIT_ZOOM = 2;
 
-/**
- * 判定「点一下」的位移容差（px）。drag-canvas 自己累计到 10px 才认平移
- * （g6-pc/lib/behavior/drag-canvas.js 的 DRAG_OFFSET），这里留出 2px 余量，
- * 免得一次手抖既平移了画布又弹出详情。
- */
-const CLICK_MOVE_TOLERANCE = 8;
 /** 浮在节点下方的详情小卡：宽度、与节点的间距、给卡片留出的竖向高度 */
 const CARD_WIDTH = 260;
 const CARD_GAP = 10;
@@ -362,15 +358,14 @@ async function fitToView(g: any) {
 }
 
 /**
- * 让「按在任意形状上」都能起手平移。
+ * 让「按在任意形状上」都能起手拖拽（Shift 摆节点用得上）。
  *
- * allowDragOnItem 只打开了行为层，事件层还有一道闸：g-base 只在按下的那个形状
- * `draggable` 为真时才把这次操作判成拖拽并派发 drag 事件
- * （@antv/g-base/lib/event/event-contoller.js:361），另一条分支要求按下的是**纯空白**
- * （:372）。而 G6 只给节点的 keyShape 补了 draggable（g6-core/item/item.js:158），
- * 标签文字、边的路径与边标签一个都没有。结果就是：按在圆上能拖、按在名字上整张图纹丝
- * 不动，而对视之后圆和名字几乎连成一片铺满画布 —— 用户看到的就是「子图拖不动」。
- * 这里把节点/边容器里的每个子形状都补上 draggable，让平移从哪儿都能起手。
+ * 平移已经改由页面听 DOM 自己做，但 G6 的 drag-node 仍要走事件层那道闸：g-base 只在
+ * 按下的那个形状 `draggable` 为真时才把这次操作判成拖拽并派发 drag 事件
+ * （@antv/g-base/lib/event/event-contoller.js:361）。而 G6 只给节点的 keyShape 补了
+ * draggable（g6-core/item/item.js:158），标签文字、边的路径与边标签一个都没有 ——
+ * Shift+按住名字想摆节点时按在标签上就不出 drag，表现为「只能拖着圆走」。
+ * 这里把节点/边容器里的每个子形状都补上 draggable，让拖拽从哪儿都能起手。
  */
 function enableDragOnAllShapes(g: any) {
   const mark = (shape: any) => {
@@ -414,48 +409,122 @@ function placeCard() {
 }
 
 /**
- * 松手（mouseup）与拖拽结束（dragend）的统一收口：位移没超容差就算这次是「点」。
+ * 把画布交互接到本页面：平移与命中的通用那一段在 shared/graph-canvas（关系小图共用
+ * 同一份口径），这里只给「命中之后做什么」：平移完让浮卡跟上、点开的实体走右侧详情。
  *
- * 为什么不用 node:click：g-base 的 _onmouseup 只在「这次没进拖拽」时才派发 mouseup/click
- * （event-contoller.js:310-322），而它进拖拽的门槛是**按下超过 120ms 且动过一下**
- * （:360 的 `timeWindow > 120 || dist > CLICK_OFFSET`，CLICK_OFFSET=40 只在 120ms 内生效）。
- * 人正常点一下鼠标常常就是 150ms 上下、还夹着一两个像素的抖动，于是 click 被吞成
- * dragend —— 表现就是「点了实体什么详情都不出」。按下与松手自己记账才不受这套判定影响。
+ * 监听得在建图之前就挂上：render() 中途任何一步抛异常（悬空边、重复节点 id 都能让 G6 直接
+ * 报错），挂在函数尾部的这一句就永远执行不到，于是图照样画得出来、却拖不动也点不中，
+ * 只剩一条一闪而过的红 toast，谁也说不清是哪一步废了（失败原因现在会留在页面上，见 buildError）。
  */
-function finishGesture(ev: any) {
-  const rec = gesture;
-  gesture = null;
-  if (!rec?.id) return;
-  if (
-    Math.abs(Number(ev.clientX) - rec.x) > CLICK_MOVE_TOLERANCE ||
-    Math.abs(Number(ev.clientY) - rec.y) > CLICK_MOVE_TOLERANCE
-  ) {
-    return; // 拖过容差 = 平移画布 / Shift 摆节点，不弹详情
-  }
-  void selectNode(nodes.value.find((n) => n.id === rec.id) || null);
+function attachCanvasEvents(el: HTMLElement) {
+  detachCanvasEvents?.();
+  detachCanvasEvents = attachCanvasInteractions(el, {
+    getGraph: () => graph,
+    // 平移不再回经 zoom-canvas 那条路径，卡片得自己跟上（钉在原地会被当成另一个实体）
+    onPan: placeCard,
+    // hover 与点击共用一份命中判定：亮蓝圈的范围就是能点开的那个范围
+    onHover: (hit) => setHover(hit?.id ?? null),
+    onPick: (hit) => {
+      void selectNode(nodes.value.find((n) => String(n.id) === hit.id) || null);
+    },
+  });
 }
 
-async function render() {
-  let el = container.value;
-  if (!el) {
-    // 容器可能比数据晚挂载一帧（首屏 bootstrap 里请求先回来了）：静默 return 会永远空白
-    await nextFrame();
-    el = container.value;
-  }
-  if (!el) return;
-  if (graph) {
-    graph.destroy();
-    graph = null;
-  }
-  // 旧图的按下记账对新图没有意义（节点集已经换了一批），带过来只会认错实体
-  gesture = null;
-  if (nodes.value.length === 0) return;
+/** 当前被 hover 高亮的节点 id：只在变化时改状态，不给每次 mousemove 都上一遍全图 */
+let hoverId: null | string = null;
 
+/**
+ * 把蓝圈（hover 态）打在判定命中的那个节点上。
+ *
+ * 原先靠 G6 的 node:mouseenter/leave，而它只认形状自己的包围盒 —— 对视之后那盒子
+ * 在屏幕上就是几个像素，鼠标要很准才亮，反馈便是「挪开二三十像素才出现蓝圈」。
+ * 现在由 shared/graph-canvas 的 hover 回调驱动（光标类名也归它），蓝圈与点击命中是同一个范围。
+ */
+function setHover(id: null | string) {
+  if (id === hoverId) return;
+  const g = graph;
+  if (!g || g.destroyed) {
+    hoverId = null;
+    return;
+  }
+  if (hoverId) {
+    g.findAll('node', (m: any) => String(m.id) === hoverId).forEach(
+      (it: any) => {
+        g.setItemState(it, 'hover', false);
+      },
+    );
+  }
+  hoverId = id;
+  if (id) {
+    g.findAll('node', (m: any) => String(m.id) === id).forEach((it: any) => {
+      g.setItemState(it, 'hover', true);
+    });
+  }
+}
+
+/**
+ * 建图前的数据自检：G6 对「边指向不存在的节点」是直接抛异常的（render 里取不到端点
+ * 就报错退出），重复节点 id 同理，而这两个坑在图谱页是常态 —— 后端按规模截断时
+ * 会给回一半端点已被裁掉的边。一抛，render() 就断在建图那一半，留下「图看得见但拖不动」。
+ * 这里先把画不出来的边剔掉，剔了多少交给 cutNote 报到页面上，不悄悄丢数据。
+ */
+const graphData = computed(() => {
+  const ids = new Set<string>();
+  const nodeRows: GraphNodeResp[] = [];
+  nodes.value.forEach((n) => {
+    const id = String(n.id);
+    if (ids.has(id)) return;
+    ids.add(id);
+    nodeRows.push(n);
+  });
+  const edgeRows = edges.value.filter(
+    (e) => ids.has(String(e.source)) && ids.has(String(e.target)),
+  );
+  return {
+    droppedEdges: edges.value.length - edgeRows.length,
+    droppedNodes: nodes.value.length - nodeRows.length,
+    edgeRows,
+    nodeRows,
+  };
+});
+
+/** 截断说明：后端截了一刀、这里又剔了多少，都说清楚，否则用户只看到「图比预期稀」 */
+const cutNote = computed(() => {
+  const d = graphData.value;
+  if (!truncated.value && d.droppedEdges === 0 && d.droppedNodes === 0) {
+    return '';
+  }
+  const parts = [
+    `已画进 ${d.nodeRows.length} 个节点 / ${d.edgeRows.length} 条关系`,
+  ];
+  if (truncated.value) parts.push('后端按规模截断了结果');
+  if (d.droppedEdges > 0) parts.push(`${d.droppedEdges} 条关系的端点没进图`);
+  if (d.droppedNodes > 0) parts.push(`${d.droppedNodes} 个重复节点已合并`);
+  return parts.join('，');
+});
+
+/**
+ * 截断与剔除合并成一句提示。
+ *
+ * 不开两条 Alert：两条叠着会把画布顶矮一截，而画布高度一变又得重对视。
+ */
+const cutAlertMessage = computed(() => {
+  if (!cutNote.value) return '';
+  if (truncated.value) {
+    return `结果过大已截断，请缩小深度 / 规模或按关键词过滤后再查看（${cutNote.value}）`;
+  }
+  return `有数据没能画进图里：${cutNote.value}`;
+});
+
+/**
+ * 真正建图的那一段（从 render() 拆出来：拆了才能在外层 try/catch 它）。
+ */
+async function buildGraph(el: HTMLElement) {
   const G6 = await import('@antv/g6');
   const { width, height } = await waitForCanvasSize(el);
   // 边长与斥力按规模收一档：几十个节点时 150 的边长好看，上百个会把整张图撑到
   // 几千像素见方，fitView 只能缩成芝麻粒
-  const largeGraph = nodes.value.length > 80;
+  const largeGraph = graphData.value.nodeRows.length > 80;
 
   graph = new G6.Graph({
     container: el,
@@ -465,28 +534,18 @@ async function render() {
     fitView: false,
     fitViewPadding: FIT_VIEW_PADDING,
     animate: true,
-    // 交互分工。原先写成 ['drag-canvas', 'zoom-canvas', 'drag-node'] 全用默认值，三处不合手：
-    // ① drag-canvas 的 allowDragOnItem 默认 false（g6-pc/lib/behavior/drag-canvas.js:25），
-    //    allowDrag() 里鼠标按在节点/边/标签上就直接 return false 不平移。而这张图对视后
-    //    节点圆加底部标签几乎铺满画布，很难落到纯空白 —— 反馈就是「子图拖不动」。
-    //    打开它只过了行为层这一道闸，事件层还得按在可拖的形状上（见 enableDragOnAllShapes）。
-    // ② ①一开，节点上按下就同时「平移整张画布」+「drag-node 拖走这个节点」，图跟着乱跑。
-    //    所以把 drag-node 收起来：普通拖动只看视图，按住 Shift 才摆单个节点。
-    // ③ 详情不挂 node:click，改走 render 末尾的按下/松手记账自判（见 finishGesture）。
+    // 交互分工：只把滚轮缩放与 Shift 摆节点交给 G6，平移、点实体、hover 都自己听 DOM。
+    // 平移原先挂的是 drag-canvas：它的 allowDragOnItem 默认 false（g6-pc/behavior/drag-canvas.js）
+    // 把按在节点/边/标签上的平移请求一律 return false，打开后事件层还要求按下的形状带
+    // draggable —— 两道闸门都在库里，页面上只能看到「拖不动」。详情原先走 node:mouseup /
+    // node:dragend 记账，而 g-base 把「按下超 120ms」一律判成拖拽、click 被吞——就是
+    // 「点了实体什都不出」。换见 attachCanvasEvents：只依赖 clientX/Y 与视口矩阵。
     modes: {
       default: [
-        {
-          type: 'drag-canvas',
-          allowDragOnItem: true,
-          direction: 'both',
-          // 默认 0 = 最多只能拖一屏，拖到边界会被 updateViewport 判成「要整块推出视口」
-          // 而把 dx/dy 置 0（同样是「拖到某个方向就死住」）。图被对视成一团时余量很容易吃紧，
-          // 这里给足，让它能一直拖过去把左侧内容拉进画面。
-          scalableRange: 2000,
-        },
         'zoom-canvas',
         {
           type: 'drag-node',
+          // 普通拖动已收给 DOM 平移，这里只留 Shift+拖动摆单个节点
           shouldBegin: (ev: any) => !!ev?.originalEvent?.shiftKey,
         },
       ],
@@ -538,13 +597,13 @@ async function render() {
   });
 
   graph.data({
-    nodes: nodes.value.map((n) => ({
+    nodes: graphData.value.nodeRows.map((n) => ({
       id: n.id,
       label: n.name || n.label,
       size: 30 + Math.min(30, (n.weight || 0) * 2),
       style: { fill: colorOf(n.entityType), stroke: colorOf(n.entityType) },
     })),
-    edges: edges.value.map((e, i) => ({
+    edges: graphData.value.edgeRows.map((e, i) => ({
       id: `e${i}`,
       source: e.source,
       target: e.target,
@@ -580,21 +639,59 @@ async function render() {
       placeCard();
     }
   });
-  // 平移是 drag-canvas 逐帧 translate 出来的，不一定回 viewportchange；听它自己发出去的
-  // canvas:drag，让浮卡跟着节点走（卡片钉在原地会被当成另一个实体）
-  graph.on('canvas:drag', () => placeCard());
-  graph.on('node:mouseenter', (ev: any) => graph?.setItemState(ev.item, 'hover', true));
-  graph.on('node:mouseleave', (ev: any) => graph?.setItemState(ev.item, 'hover', false));
-  graph.on('node:mousedown', (ev: any) => {
-    gesture = {
-      id: ev.item?.getModel?.().id,
-      x: Number(ev.clientX),
-      y: Number(ev.clientY),
-    };
-  });
-  // 同一次操作里 g-base 只走 mouseup 与 dragend 其中一条，两个都接上、收口只有一个
-  graph.on('node:mouseup', finishGesture);
-  graph.on('node:dragend', finishGesture);
+  // hover 不再听 G6 的 node:mouseenter/leave：它只认形状的包围盒，对视后就是几个像素，
+  // 鼠标要停得很准才亮圈；改由 attachCanvasEvents 挂的那套 DOM mousemove 驱动，
+  // 与点击共用 shared/graph-canvas 里那份命中判定（见 setHover）
+}
+
+async function render() {
+  let el = container.value;
+  if (!el) {
+    // 容器可能比数据晚挂载一帧（首屏 bootstrap 里请求先回来了）：静默 return 会永远空白
+    await nextFrame();
+    el = container.value;
+  }
+  if (!el) return;
+  // 旧图的监听先拆干净：容器 DOM 是同一个，不拆就会叠上第二套按下/松手
+  detachCanvasEvents?.();
+  detachCanvasEvents = null;
+  hoverId = null;
+  // 光标类名也得清：拖到一半就重新查询时，mouseup 的监听已经被拆了，没人再把 grabbing
+  // 摘掉，整块画布从此顶着一个「正在拖图」的手型
+  el.classList.remove('grabbing', 'pointing');
+  buildError.value = '';
+  if (graph) {
+    try {
+      graph.destroy();
+    } catch {
+      /* 旧图销不干净也不拦着建新图：残留画布由下面那句统一摘掉 */
+    }
+    graph = null;
+  }
+  // 容器里只要还留着 canvas 就一律摘掉：叠了两层时，上面那张不再更新的旧图会把新图整个
+  // 盖住，表现正是「拖着不动、点不中、蓝圈还在老位置上」
+  el.querySelectorAll('canvas').forEach((c) => c.remove());
+  if (nodes.value.length === 0) {
+    // 空图这次不建监听：上一张图的已经在函数开头拆了，没有画布可听
+    return;
+  }
+  // 监听先挂上再建图（理由见 attachCanvasEvents 末尾那段）
+  attachCanvasEvents(el);
+  try {
+    await buildGraph(el);
+  } catch (error: any) {
+    // 建图失败的原因得留在页面上：只弹一条 toast，下一秒就没人知道刚刚发生过什么
+    const reason = String(error?.message || error || '未知错误');
+    buildError.value = reason.slice(0, 200);
+    // 半张图僵在画布上冒充「能交互」比一块空白更难解释：清掉，只留下那句原因
+    try {
+      graph?.destroy();
+    } catch {
+      /* 已经坏了，销不掉就只摘 DOM */
+    }
+    graph = null;
+    el.querySelectorAll('canvas').forEach((c) => c.remove());
+  }
 }
 
 /** 选中一个实体：右侧详情 + 溯源一起换，图上把它描边高亮 */
@@ -687,9 +784,11 @@ watch(container, (el) => {
   resizeObserver.value = new ResizeObserver(() => {
     const size = canvasSize(el);
     if (!graph || size.width < MIN_CANVAS || size.height < MIN_CANVAS) return;
+    // 差不到 4px 一律当量取误差（getBoundingClientRect 取小数、这里四舍五入）：
+    // 跟着这种抖动重画布 + 重对视，等于用户刚拖完就被拽回默认视口
     if (
-      size.width === Math.round(graph.get('width')) &&
-      size.height === Math.round(graph.get('height'))
+      Math.abs(size.width - Math.round(graph.get('width'))) < 4 &&
+      Math.abs(size.height - Math.round(graph.get('height'))) < 4
     ) {
       return;
     }
@@ -706,7 +805,13 @@ watch(kbIds, () => {
 });
 
 onBeforeUnmount(() => {
-  graph?.destroy();
+  detachCanvasEvents?.();
+  detachCanvasEvents = null;
+  try {
+    graph?.destroy();
+  } catch {
+    /* 离开页面时旧图销不掉也不能拦住卸载 */
+  }
   graph = null;
   resizeObserver.value?.disconnect();
 });
@@ -842,7 +947,13 @@ bootstrap();
           </Space>
         </template>
 
-        <Space class="mb-2" wrap :size="8">
+        <!-- 工具栏分两行且都不许被压扁：卡片体是 flex 列、画布那块 flex:1，原先提示文字和
+             控件挤在同一个 Space 里，一换行工具栏就被撑高、而 Space 默认又能缩，缩掉的
+             那一截正好被画布盖住——这就是「这句话被画布挡住」的来处。把会变宽度的
+             「缩放 xx%」与计数挪到第二行（行高固定）还顺带断了另一个反馈环：以前每次滚轮
+             缩放都改工具栏宽度→换行→画布高度变→ResizeObserver 重对视，把用户刚调好的
+             视口拽回默认。 -->
+        <Space class="toolbar-main mb-2" wrap :size="8">
           <Input
             v-model:value="keyword"
             placeholder="起点实体 / 关键词"
@@ -868,21 +979,38 @@ bootstrap();
           <span class="param-label">规模</span>
           <InputNumber v-model:value="limit" :min="10" :max="500" :step="10" style="width: 88px" />
           <Button type="primary" :loading="loading" @click="load">查询</Button>
-          <Tag color="blue">节点 {{ totalNodes }}</Tag>
-          <Tag color="green">关系 {{ totalEdges }}</Tag>
-          <Tag v-if="nodes.length > 0" color="default">缩放 {{ zoomPct }}%</Tag>
-          <!-- 摆节点被收进了 Shift，不写在脸上没人知道还能这么用 -->
-          <span v-if="nodes.length > 0" class="param-label">
-            任意处按住拖动即可平移 · 滚轮缩放 · 点实体出详情 · Shift+拖动摆节点
-          </span>
         </Space>
 
+        <div v-if="nodes.length > 0" class="toolbar-meta mb-2">
+          <Tag color="blue">节点 {{ totalNodes }}</Tag>
+          <Tag color="green">关系 {{ totalEdges }}</Tag>
+          <Tag color="default">缩放 {{ zoomPct }}%</Tag>
+          <!-- 摆节点被收进了 Shift，不写在脸上没人知道还能这么用；但这一句不再挤进
+               控件那一行：定高一行、超长就省略，悬停看全文 -->
+          <Tooltip
+            title="任意处按住拖动即可平移 · 滚轮缩放 · 点实体出详情与溯源（亮蓝圈的就是能点开的）· Shift+拖动摆单个节点；点不中多半是规模太大被截断，把深度或规模调低一档再试"
+          >
+            <span class="param-label toolbar-hint">
+              任意处按住拖动即可平移 · 滚轮缩放 · 点实体出详情 ·
+              Shift+拖动摆节点
+            </span>
+          </Tooltip>
+        </div>
+
         <Alert
-          v-if="truncated"
+          v-if="buildError"
+          type="error"
+          show-icon
+          class="mb-2"
+          :message="`子图渲染失败：${buildError}`"
+          description="把上面的深度调小、规模调低一档再查一次；还是失败就是这批数据里有画不出来的关系。"
+        />
+        <Alert
+          v-else-if="cutAlertMessage"
           type="warning"
           show-icon
           class="mb-2"
-          message="结果过大已截断，请缩小深度 / 规模或按关键词过滤后再查看"
+          :message="cutAlertMessage"
         />
 
         <Spin :spinning="loading" wrapper-class-name="graph-canvas-spin">
@@ -1011,6 +1139,34 @@ bootstrap();
   min-height: 0;
 }
 
+/* 卡片体里除了画布那块，谁都不许被 flex 压扁：工具栏一被压，换行的那一截就落到画布
+   底下；Alert 一被压，失败原因与截断说明正好被裁掉半句。 */
+:deep(.center-col .ant-card-body > .ant-alert) {
+  flex: none;
+}
+
+.toolbar-main,
+.toolbar-meta {
+  flex: none;
+}
+
+/* 第二行行高固定：计数与操作提示都只占一行，超长就地省略，不许把画布顶高顶矮 */
+.toolbar-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.toolbar-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .param-label {
   font-size: 12px;
   color: var(--text-color-secondary, #888);
@@ -1089,9 +1245,27 @@ bootstrap();
   flex: 1;
   width: 100%;
   min-height: 0;
+  overflow: hidden;
+  cursor: grab;
   background: var(--component-background-light, #fafcff);
   border: 1px solid var(--border-color, #eee);
   border-radius: 6px;
+}
+
+/* 命中带比节点形状本身宽（容差见 shared/graph-canvas）：光标也得跟着提前变 pointer，否则
+   「明明是点得中的位置，光标仍是个十字」，读者照样不敢点。 */
+.graph-canvas.pointing,
+.graph-canvas.pointing :deep(canvas) {
+  cursor: pointer !important;
+}
+
+/* 拖动过程中给个「正在推图」的手势反馈：g-base  hover 到带 cursor 属性的形状时会把
+   cursor 直接写到 canvas 元素的行内样式上（event-contoller.js:235），盖不过行内只能
+   用 !important。而 G6 自身不设 canvas 的 cursor（取到 undefined，等于把行内清掉），
+   所以静止时的 grab 能从 .graph-canvas 继承下去，只有节点上显示 pointer。 */
+.graph-canvas.grabbing,
+.graph-canvas.grabbing :deep(canvas) {
+  cursor: grabbing !important;
 }
 
 .graph-empty {
@@ -1102,7 +1276,8 @@ bootstrap();
 }
 
 /* 点中实体浮在节点下方的小卡。pointer-events:none 是必需的：卡片压在画布上，
-   留着它就会挡住下面节点的按下记账，等于自己把「点节点」的判定吃掉一半。 */
+   留着它就会挡住下面 canvas 的按下，而平移与命中都听的是容器 DOM，等于自己把
+   「拖图 / 点节点」的起手挡掉一半。 */
 .node-card {
   position: absolute;
   z-index: 2;

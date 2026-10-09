@@ -16,9 +16,12 @@
 ----------
 - 外层 ``asyncio.Semaphore(EVAL_CONCURRENCY)`` 并发逐问答对做「召回+生成」（用户要求并发查询）；
   ragas 内部打分另有自己的并发，不在这一层控制。
-- 单个问答对失败（没召回到资料、模型报错）只把该 item 置 FAILED + error，不整单失败；
-  全部跑完 run 一律 DONE（个别 item 失败由逐指标 NULL 与 item.status 体现）。
-- ragas/版本异常只影响打分段：指标全 NULL、items 记 error，run 仍 DONE，不推翻已完成的召回与生成。
+- 单个问答对失败（没召回到资料、模型报错、没拿到分）只把该 item 置 FAILED + error，不整单失败。
+- run 的终态与计数只看**拿到分的条数**：至少一条出分就 DONE（done_pairs = 出分条数，
+  部分失败把条数与首条原因写进 run.error），一条都没出分就 FAILED。打分段整段不可用时，
+  列表不能还顶着「已完成」，而「召回+生成成功」的条数不能当完成数用（那正是两边对不上的来源）。
+- 计数回读库里的条项状态，不按本轮跑过的条累加：一个只补跑部分条项的 run 重跑时，
+  之前已落结果的条项照样算数（与 _metric_avgs_map 只认 DONE 的口径一致）。
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ import math
 import time
 from typing import Any, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from common.common_constants import rag_constant as RC
 from common.common_log.log_init import log
@@ -100,17 +103,17 @@ async def _recall_and_generate(run: RagEvalRun, item: RagEvalItem, login_user: d
             "took_recall_ms": took_recall_ms, "took_generate_ms": took_generate_ms}
 
 
-def _score_samples(samples: list[dict], judge_config, embed_config) -> list[dict]:
+async def _score_samples(samples: list[dict], judge_config, embed_config) -> list[dict]:
     """把问答对交给 ragas 打分（同步、自起事件循环，放 to_thread 里调）。
 
     返回与 ``samples`` 同序的指标字典列表。ragas 导入/接口异常在这里原样抛出，
     由调用方兜成「指标全 NULL」而不是推翻整场评测。
     """
-    from ragas import evaluate
+    from ragas import aevaluate
     from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
-    from ragas.metrics import (AnswerCorrectness, Faithfulness,
-                               LLMContextPrecisionWithReference, LLMContextRecall,
-                               ResponseRelevancy)
+    from ragas.metrics import (_AnswerCorrectness, _Faithfulness,
+                               _LLMContextPrecisionWithReference, _LLMContextRecall,
+                               _ResponseRelevancy)
 
     built = [SingleTurnSample(user_input=s["user_input"],
                               retrieved_contexts=s["retrieved_contexts"],
@@ -118,11 +121,11 @@ def _score_samples(samples: list[dict], judge_config, embed_config) -> list[dict
                               reference=s.get("reference") or "")
              for s in samples]
     dataset = EvaluationDataset(samples=built)
-    metrics = [Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(),
-               LLMContextRecall(), AnswerCorrectness()]
+    metrics = [_Faithfulness(), _ResponseRelevancy(), _LLMContextPrecisionWithReference(),
+               _LLMContextRecall(), _AnswerCorrectness()]
     llm = build_judge_llm(0, label="裁判模型", config=judge_config)
     embeddings = build_embeddings(0, label="相似度向量模型", config=embed_config)
-    result = evaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings)
+    result = await aevaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings)
     # to_pandas 的行序与 dataset 一致；缺列（某指标整场没算出来）按 None 处理
     records = result.to_pandas().to_dict("records")
     return [{m: rec.get(m) for m in _METRIC_ATTRS} for rec in records]
@@ -149,10 +152,17 @@ async def execute(run_id: int) -> None:
         await _run(run=run_ref, items=items)
     except Exception as e:  # noqa: BLE001  整体兜底：把意外写成 run 级 FAILED，不让 worker 任务裸抛
         log.error("评测运行整体失败: run_id={}: {}", run_id, e)
+        reason = str(e)[:1000]
         async with mysql_client.get_session() as session:
             await session.execute(update(RagEvalRun).where(
                 RagEvalRun.run_id == int(run_id)).values(
-                status=RC.EVAL_STATUS_FAILED, error=str(e)[:1000]))
+                status=RC.EVAL_STATUS_FAILED, error=reason))
+            # 还没跑到的条项一并收口：详情里留着一行 PENDING 看着像还在排队，
+            # 而这一场其实已经不会再有人去跑它了
+            await session.execute(update(RagEvalItem).where(
+                RagEvalItem.run_id == int(run_id),
+                RagEvalItem.status == RC.EVAL_ITEM_PENDING).values(
+                status=RC.EVAL_ITEM_FAILED, error=reason))
             await session.commit()
 
 
@@ -199,8 +209,7 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
         embed_config = await RagModelService.require_config(run.embed_model_id, "相似度向量模型")
         t0 = time.perf_counter()
         try:
-            score_rows = await asyncio.to_thread(
-                _score_samples, [w["sample"] for w in scored], judge_config, embed_config)
+            score_rows = await _score_samples([w["sample"] for w in scored], judge_config, embed_config)
         except Exception as e:  # noqa: BLE001  打分段失败不推翻召回与生成
             log.error("RAGAS 打分失败: run_id={}: {}", run_id, e)
             for w in scored:
@@ -210,7 +219,7 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
 
     per_score_ms = int(took_score_total_ms / len(scored)) if scored else 0
 
-    # 回填：逐 item 落五指标 + 三段耗时 + 状态；done_pairs 与均值随之更新
+    # 回填：逐 item 落五指标 + 三段耗时 + 状态，再按实底的条项状态收 run 的终态
     scored_idx = 0
     latencies: list[int] = []
     async with mysql_client.get_session() as session:
@@ -221,16 +230,21 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
             status = RC.EVAL_ITEM_FAILED
             error = w.get("error")
             took_score_ms = 0
-            if sample is not None and score_rows and scored_idx < len(score_rows):
-                row = score_rows[scored_idx]
-                scored_idx += 1
-                metrics = {m: _clean_score(row.get(m)) for m in _METRIC_ATTRS}
-                took_score_ms = per_score_ms
-                if any(v is not None for v in metrics.values()):
+            if sample is not None:
+                if score_rows and scored_idx < len(score_rows):
+                    row = score_rows[scored_idx]
+                    scored_idx += 1
+                    metrics = {m: _clean_score(row.get(m)) for m in _METRIC_ATTRS}
+                    took_score_ms = per_score_ms
+                    # 打分跑通就算这条完成：个别指标缺值用 NULL 表达，不再另设状态
                     status = RC.EVAL_ITEM_DONE
                     error = None
-                else:
-                    status = RC.EVAL_ITEM_DONE  # 打分跑通但个别指标缺值也按已完成（NULL 表达缺值）
+                elif not error:
+                    # 召回与生成都成了、却没轮到打分结果（ragas 返回行数少于样本数）：
+                    # 失败必须带原因，否则详情里只剩一个说不清为什么的「失败」
+                    error = "打分段没有返回这一条的结果"
+            w["status"] = status
+            w["error"] = error
             values = {
                 "generated_answer": (w.get("answer") if sample else None),
                 "contexts": (w.get("contexts") if sample else None),
@@ -243,12 +257,33 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
             await session.execute(update(RagEvalItem).where(
                 RagEvalItem.item_id == item.item_id).values(**values))
             latencies.append(int(w.get("took_recall_ms") or 0) + int(w.get("took_generate_ms") or 0))
-        done_pairs = sum(1 for w in work if w["sample"] is not None)
+        # 计数以库里这一场实际的条项状态为准（含本次未重跑的历史结果），不拿本轮 work 累加
+        counts = {str(st): int(cnt) for st, cnt in (await session.execute(
+            select(RagEvalItem.status, func.count()).where(
+                RagEvalItem.run_id == run_id).group_by(RagEvalItem.status))).all()}
+        done_pairs = counts.get(RC.EVAL_ITEM_DONE, 0)
+        failed_pairs = counts.get(RC.EVAL_ITEM_FAILED, 0)
+        # 总数用 run 行上的快照（建 run 时就落定），拿不到才回落到实际条项数
+        total = int(run.total_pairs or 0) or sum(counts.values())
         avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        first_error = next((str(w["error"]) for w in work
+                            if w.get("status") == RC.EVAL_ITEM_FAILED and w.get("error")), "")
+        reason = f"：{first_error}"[:900] if first_error else "（条项没有留下原因）"
+        # 一条分都没拿到 = 这场评测没产出任何结论，整单判 FAILED；只挂一部分仍算 DONE，
+        # 但失败条数与原因留在 run.error 上（否则列表只能看到一个光头「已完成」）
+        if done_pairs == 0:
+            run_status = RC.EVAL_STATUS_FAILED
+            run_error = f"{total} 个问答对没有一条拿到分{reason}"
+        elif failed_pairs > 0:
+            run_status = RC.EVAL_STATUS_DONE
+            run_error = f"{failed_pairs}/{total} 个问答对失败{reason}"
+        else:
+            run_status = RC.EVAL_STATUS_DONE
+            run_error = ""
         await session.execute(update(RagEvalRun).where(
             RagEvalRun.run_id == run_id).values(
-            status=RC.EVAL_STATUS_DONE, done_pairs=done_pairs,
-            avg_latency_ms=avg_latency))
+            status=run_status, done_pairs=done_pairs,
+            avg_latency_ms=avg_latency, error=(run_error[:1000] or None)))
         await session.commit()
-    log.info("评测运行完成: run_id={} 完成对数={}/{} 平均延迟={}ms",
-             run_id, done_pairs, len(items), avg_latency)
+    log.info("评测运行收口: run_id={} 出分={}/{} 失败={} 终态={} 平均延迟={}ms",
+             run_id, done_pairs, total, failed_pairs, run_status, avg_latency)

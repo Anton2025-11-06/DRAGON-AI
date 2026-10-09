@@ -38,7 +38,7 @@ class ImageRef:
     height: int = 0
     mime: str = "image/png"
     object_key: str = ""            # 存储 fileName（上传后回填）
-    url: str = ""                   # 带签名可直接打开的访问地址（检索时现签，不长期落库）
+    url: str = ""                   # 可直接打开的访问地址（不带签名凭证，要随 sidecar 长期落库）
     description: str = ""           # 解析增强结果（对应媒体的 *_understand 开关开启时）
     src: str = ""                   # 正文里的原始引用串（仅内存态，不进 sidecar）
     data: Optional[bytes] = None    # 原始字节（仅内存态，不进 sidecar）
@@ -85,6 +85,16 @@ class ImageRef:
         return (self.description.strip() or self.alt.strip()
                 or RC.MEDIA_KIND_PLACEHOLDERS.get(self.kind,
                                                   RC.MEDIA_KIND_PLACEHOLDER_DEFAULT))
+
+    def address(self) -> str:
+        """可直接打开的绝对地址（不带签名凭证），拿不到就返回空串。
+
+        预签名地址的 x-oss-* 参数到期即失效，把它混进正文等于埋一条半年后打不开的链接，
+        还会让整串签名参数参与 BM25 分词；相对路径与空值不是可访问地址，一律不给。
+        外链原样透出：那不是本存储的对象，改人家的 URL 就是改数据。
+        """
+        url = str(self.url or "").strip()
+        return url.split("?", 1)[0] if "://" in url else ""
 
 
 @dataclass
@@ -194,9 +204,20 @@ class Chunk:
     page_end: int = 0
     sheet: str = ""
     block_ids: list[str] = field(default_factory=list)
-    image: Optional[ImageRef] = None     # 图片块的引用（object_key/url/description）
+    images: list[ImageRef] = field(default_factory=list)   # 本块覆盖的全部媒体引用（正文原位置顺序）
     tokens: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def image(self) -> Optional[ImageRef]:
+        """第一个媒体引用（只关心单媒体的调用方用这一颗）。
+
+        一个切片可以覆盖多张图（按页分块的一页三张、标题分块的一节里插了几张），
+        但 media_type 与图片描述只能有一个答案，它们照旧用第一张（写行的地方在
+        parse_service._replace_chunks）；模态另有其人，由 pieces._chunk_type 按覆盖的
+        单元集合判，历史口径不变。
+        """
+        return self.images[0] if self.images else None
 
     def text(self) -> str:
         """向量文本：缺 embed_text 时回落到 content（手工构造 Chunk 的单测也能跑）。"""
@@ -207,12 +228,17 @@ class Chunk:
                "chunk_type": self.chunk_type, "title_path": self.title_path,
                "page": self.page, "page_end": self.page_end, "sheet": self.sheet,
                "block_ids": self.block_ids, "tokens": self.tokens, "meta": self.meta}
-        if self.image is not None:
-            out["image"] = self.image.to_dict()
+        if self.images:
+            out["images"] = [one.to_dict() for one in self.images]
         return out
 
     @classmethod
     def from_dict(cls, payload: dict) -> "Chunk":
+        images = [ImageRef.from_dict(one) for one in (payload.get("images") or [])
+                  if isinstance(one, dict)]
+        legacy = ImageRef.from_dict(payload.get("image"))
+        if legacy is not None:
+            images.insert(0, legacy)
         return cls(index=int(payload.get("index") or 0), content=str(payload.get("content") or ""),
                    embed_text=str(payload.get("embed_text") or ""),
                    chunk_type=str(payload.get("chunk_type") or RC.CHUNK_TYPE_TEXT),
@@ -220,6 +246,6 @@ class Chunk:
                    page=int(payload.get("page") or 0), page_end=int(payload.get("page_end") or 0),
                    sheet=str(payload.get("sheet") or ""),
                    block_ids=[str(b) for b in (payload.get("block_ids") or [])],
-                   image=ImageRef.from_dict(payload.get("image")),
+                   images=[one for one in images if one is not None],
                    tokens=int(payload.get("tokens") or 0),
                    meta=dict(payload.get("meta") or {}))

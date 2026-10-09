@@ -75,7 +75,7 @@ async def page_runs(request: Request, body: EvalRunPageReq):
 
 @router.get("/template", summary="下载问答对模板（xlsx：序号/问题/参考答案）")
 @has_permission("ai:kb:eval")
-async def template():
+async def template(request: Request):
     content = ExcelUtil.get_excel_template(TEMPLATE_HEADERS, [], [])
     return StreamingResponse(
         io.BytesIO(content), media_type=_XLSX_MIME,

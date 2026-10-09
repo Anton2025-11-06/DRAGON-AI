@@ -109,6 +109,26 @@ def _item_to_dict(item: RagEvalItem) -> dict:
     }
 
 
+async def _fail_run(run_id: int, reason: str) -> None:
+    """把非终态的 run 连同还没跑起来的条项一起落 FAILED（只在发起阶段就出问题时收口）。
+
+    worker 侧的同一件事在 arq 任务函数里兜（见 arq_tasks.tasks.ragflow.run_eval），两边都以
+    「只改非终态」为界，不会互相隔空改写。
+    """
+    reason = str(reason)[:1000]
+    async with mysql_client.get_session() as session:
+        await session.execute(update(RagEvalRun).where(
+            RagEvalRun.run_id == int(run_id),
+            RagEvalRun.status.in_([RC.EVAL_STATUS_PENDING,
+                                   RC.EVAL_STATUS_RUNNING])).values(
+            status=RC.EVAL_STATUS_FAILED, error=reason))
+        await session.execute(update(RagEvalItem).where(
+            RagEvalItem.run_id == int(run_id),
+            RagEvalItem.status == RC.EVAL_ITEM_PENDING).values(
+            status=RC.EVAL_ITEM_FAILED, error=reason))
+        await session.commit()
+
+
 class RagEvalService:
     """知识评测服务（全静态方法，与其它 rag service 的调用口径一致）"""
 
@@ -196,8 +216,15 @@ class RagEvalService:
             await session.commit()
 
         # 落库成功再入队：任务只带 run_id，其余参数 worker 从库里读（快照已在 run 行上）
-        job_id = await RagTaskService.enqueue(
-            RC.RAG_TASK_EVAL, [run_id], job_key=f"eval:{run_id}", unique=False)
+        try:
+            job_id = await RagTaskService.enqueue(
+                RC.RAG_TASK_EVAL, [run_id], job_key=f"eval:{run_id}", unique=False)
+        except Exception as enqueue_error:  # noqa: BLE001  收口后原样上抛，让接口照报错
+            # 入队没成功 = 这条 run 永远没人取走：先把 run/items 落 FAILED 再报错，
+            # 否则接口只报了一句错，页面里却多出一条永远不动的「排队中」
+            log.error("知识评测入队失败，运行置为失败: run_id={}: {}", run_id, enqueue_error)
+            await _fail_run(run_id, f"评测任务入队失败：{enqueue_error}")
+            raise
         log.info("知识评测已提交: run_id={} kb={} pairs={} job={}",
                  run_id, req.kb_id, len(pairs), job_id)
         return {"runId": run_id, "totalPairs": len(pairs)}

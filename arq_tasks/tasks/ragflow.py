@@ -240,14 +240,58 @@ async def purge_knowledge_base(ctx: dict, kb_id: int, doc_ids: Optional[list[int
     await RagParseService.run_purge(kb_id, doc_ids)
 
 
+async def _fail_eval_run(run_id: int, error: BaseException) -> None:
+    """把一场评测 run 连同还没跑起来的问答对一起落 FAILED（只对非终态生效）。
+
+    页面上「排队中/评测中」的唯一数据源就是 run.status：worker 这边一抛（最常见的就是
+    runner 模块 import 期的依赖错误），arq 只在自己的日志里记一笔，run 那么留在 PENDING——
+    用户看到的是个永远不动的「排队中」，而不是失败原因。
+
+    只依赖 sqlalchemy + mysql_client + 表实体，**故意不 import rag_eval_runner**：这层兜底
+    要能在 runner 那一边炸时照样把状态写回去。
+    """
+    from sqlalchemy import update
+
+    from common.common_constants import rag_constant as RC
+    from service.service_rag.models.kb_entity import RagEvalItem, RagEvalRun
+
+    reason = f"{type(error).__name__}: {error}"[:1000]
+    try:
+        async with mysql_client.get_session() as session:
+            # 已终态（DONE / FAILED）的不改：runner 自己已经落过结论，这里不能隔空改写
+            marked = (await session.execute(
+                update(RagEvalRun).where(
+                    RagEvalRun.run_id == int(run_id),
+                    RagEvalRun.status.in_([RC.EVAL_STATUS_PENDING,
+                                           RC.EVAL_STATUS_RUNNING])).values(
+                    status=RC.EVAL_STATUS_FAILED, error=reason))).rowcount
+            await session.execute(
+                update(RagEvalItem).where(
+                    RagEvalItem.run_id == int(run_id),
+                    RagEvalItem.status == RC.EVAL_ITEM_PENDING).values(
+                status=RC.EVAL_ITEM_FAILED, error=reason))
+            await session.commit()
+        log.warning("评测运行已兜底置为失败: run_id={} 改动行数={} 原因={}",
+                    run_id, marked, reason)
+    except Exception as mark_error:  # noqa: BLE001  回写失败不能再掩盖原始异常
+        log.error("评测运行失败状态回写失败: run_id={}: {}", run_id, mark_error)
+
+
 async def run_eval(ctx: dict, run_id: int) -> None:
     """知识评测（RAGAS）：驱动一次 run 的召回+生成+打分+回填。
 
     任务体只做「驱动」：逐问答对的并发、ragas 打分、状态与指标回填全在
     service.service_rag.services.rag_eval_runner 里（与检索页同源）。与文档解析同队列：
     评测要 ES + 模型 +（可选）neo4j，与检索完全同源，不必新开一条流水线。
-    运行内的逐对失败已在 runner 里兜成 item 级 error，不整单抛；这里的兜异常交给 arq 记录。
-    """
-    from service.service_rag.services import rag_eval_runner
 
-    await rag_eval_runner.execute(run_id)
+    外面裹一层兜异常再原样抛出：连 import 失败都算（那正是 runner 自己的兜底覆盖不到的一段），
+    runner 内部已经落好的 FAILED 不回这里，同一个 run 不会被写两次。
+    被 job_timeout / 退出取消也算：CancelledError 是 BaseException，单接 Exception 接不到。
+    """
+    try:
+        from service.service_rag.services import rag_eval_runner
+
+        await rag_eval_runner.execute(run_id)
+    except BaseException as error:  # noqa: BLE001  兼 CancelledError：取消也算没跑完
+        await _fail_eval_run(run_id, error)
+        raise

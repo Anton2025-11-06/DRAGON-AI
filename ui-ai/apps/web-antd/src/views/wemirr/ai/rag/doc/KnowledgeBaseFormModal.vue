@@ -150,6 +150,18 @@ const hasImageDesc = computed(
 const hasAudioModel = computed(() => Number(parseCfg.value.audio_model_id) > 0);
 const hasVideoModel = computed(() => Number(parseCfg.value.video_model_id) > 0);
 
+/**
+ * 图片理解与 OCR 的互斥（需求 3）：选了一个，另一个就置灰不让选。
+ *
+ * 后端本来就是「两个都配时只走图片理解」，OCR 那份配置等于白填：置灰就是这条隐藏
+ * 规则摆到页面上，不让用户以为自己配了两层保险。存量库可能两个都存着值，这时两边
+ * 都不置灰 —— 已选的值清不掉就会卡死在禁用态，改用下面的提示引导用户清掉一个。
+ */
+const imageChosen = computed(() => Number(form.imageModelId) > 0);
+const ocrChosen = computed(() => Number(parseCfg.value.ocr_model_id) > 0);
+const imageDisabled = computed(() => ocrChosen.value && !imageChosen.value);
+const ocrDisabled = computed(() => imageChosen.value && !ocrChosen.value);
+
 /** 引擎可选项（据 runtime.engines 的 available 置灰，mineru 未部署时不可选） */
 const engineSelectOptions = computed(() =>
   PARSE_ENGINES_ALL.map((e) => {
@@ -477,6 +489,27 @@ async function handleSubmit() {
   if (isDoc.value && form.enableGraph && !form.extractModelId) {
     activeTab.value = 'basic';
     message.warning('开启知识图谱需要选择图谱抽取模型');
+    return;
+  }
+  // 媒体库的解析模型必填（需求 5）：这类文件的「正文」就是它转写出来的东西——音频/视频
+  // 缺对应模型时后端直接解析失败，图片缺模型则只剩文件名可检索，等于建了个搜不到的库
+  if (isImage.value && !hasImageDesc.value) {
+    activeTab.value = 'parse';
+    message.warning('图片知识库必须选择解析模型：图片理解或 OCR 二选一');
+    return;
+  }
+  if (isAv.value && !hasAudioModel.value) {
+    activeTab.value = 'parse';
+    message.warning(
+      '音视频知识库必须选择音频转文字模型（音频文件靠它转成正文，缺了上传即解析失败）',
+    );
+    return;
+  }
+  if (isAv.value && !hasVideoModel.value) {
+    activeTab.value = 'parse';
+    message.warning(
+      '音视频知识库必须选择视频理解模型（视频文件靠它描述成正文，缺了上传即解析失败）',
+    );
     return;
   }
   // 开了增强却没选模型，解析层只会塞一句降级警告（不失败）：用户看到的仍是「已完成」，
@@ -870,17 +903,18 @@ async function handleSubmit() {
           <div class="group-title">解析模型</div>
           <Row :gutter="16">
             <Col v-if="isDoc || isImage" :span="6">
-              <FormItem>
+              <FormItem :required="isImage">
                 <template #label>
                   图片理解模型
                   <Tooltip
-                    title="与 OCR 二选一（两个都配时优先用图片理解）。它同时服务三件事：给文档内嵌图片提描述、给上传的图片文件转写成正文、给图片库的「多模态描述增强」生成综合描述。"
+                    title="与 OCR 二选一（选了这个，OCR 那栏自动置灰）。它同时服务三件事：给文档内嵌图片提描述、给上传的图片文件转写成正文、给图片库的「多模态描述增强」生成综合描述。"
                   >
                     <QuestionCircleOutlined class="help-icon" />
                   </Tooltip>
                 </template>
                 <Select
                   v-model:value="form.imageModelId"
+                  :disabled="imageDisabled"
                   :options="imageOptions"
                   allow-clear
                   placeholder="图片理解（image_understand）"
@@ -890,17 +924,18 @@ async function handleSubmit() {
               </FormItem>
             </Col>
             <Col v-if="isDoc || isImage" :span="6">
-              <FormItem>
+              <FormItem :required="isImage">
                 <template #label>
                   OCR 模型
                   <Tooltip
-                    title="没配图片理解模型时用它：只把图里的文字读出来当描述。与图片理解二选一，两个都配时后端优先走图片理解。"
+                    title="与图片理解二选一（选了这个，图片理解那栏自动置灰）：只把图里的文字读出来当描述，读不出图在讲什么。"
                   >
                     <QuestionCircleOutlined class="help-icon" />
                   </Tooltip>
                 </template>
                 <Select
                   v-model:value="ensureParse().ocr_model_id"
+                  :disabled="ocrDisabled"
                   :options="ocrOptions"
                   allow-clear
                   placeholder="OCR（与图片理解二选一）"
@@ -910,7 +945,7 @@ async function handleSubmit() {
               </FormItem>
             </Col>
             <Col v-if="isDoc || isAv" :span="6">
-              <FormItem>
+              <FormItem :required="isAv">
                 <template #label>
                   音频转文字模型
                   <Tooltip
@@ -930,7 +965,7 @@ async function handleSubmit() {
               </FormItem>
             </Col>
             <Col v-if="isDoc || isAv" :span="6">
-              <FormItem>
+              <FormItem :required="isAv">
                 <template #label>
                   视频理解模型
                   <Tooltip
@@ -950,6 +985,31 @@ async function handleSubmit() {
               </FormItem>
             </Col>
           </Row>
+          <!-- 互斥的两种现状给一句人话：置灰是静默的，不解释会有人以为是模型不可用 -->
+          <div
+            v-if="(isDoc || isImage) && imageChosen && ocrChosen"
+            class="hint"
+          >
+            这个库里图片理解和 OCR 都存着选择：实际只走图片理解，OCR
+            那份不生效， 建议清空其中一个再保存。
+          </div>
+          <div
+            v-else-if="(isDoc || isImage) && (imageDisabled || ocrDisabled)"
+            class="hint"
+          >
+            图片理解与 OCR 只能二选一，已选{{
+              imageChosen ? '图片理解' : 'OCR'
+            }}，另一栏已置灰；要换成另一个，先把当前这栏清空。
+          </div>
+          <!-- 媒体库的必填口径（需求 5）：图片是二者择一，音视频是两个都要 -->
+          <div v-if="isImage" class="hint">
+            图片知识库这一位必填（图片理解或 OCR
+            二选一）：图片文件的正文全靠它转写，没配就只能按文件名命中。
+          </div>
+          <div v-else-if="isAv" class="hint">
+            音视频知识库两个都必填：音频靠转文字、视频靠画面理解，缺一个对应那一类文件
+            就是上传即解析失败（而不是退化成只能按文件名搜）。
+          </div>
 
           <!-- 第五行：增强开关（按第四行配了什么模型条件显示；打开不给提示词输入框） -->
           <div class="group-title">解析增强</div>

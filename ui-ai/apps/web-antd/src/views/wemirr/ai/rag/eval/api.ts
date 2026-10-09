@@ -8,16 +8,16 @@
  * - 枚举/标签集中在此定义（与 common_constants/rag_constant.py 第十一节静态对账）。
  *
  * 模型下拉复用 ../doc/api：那份是 RAG 模块契约的唯一来源（fetchChatModels 取 text_to_text，
- * 相似度向量取 MT_TEXT_EMBEDDING），拆两份只会两边各漂一半。
+ * fetchTextEmbedModels 取文本向量），拆两份只会两边各漂一半，文案也会一边中文一边厂商码。
  */
-import { MT_TEXT_EMBEDDING } from '#/api/ai-workflow/const';
 import { defHttp } from '#/api/request';
 
-import { fetchChatModels, type KbOption } from '../doc/api';
+import type { KbOption } from '../doc/api';
+
+import { fetchChatModels, fetchTextEmbedModels } from '../doc/api';
 
 const BASE = '/api/rag';
 const EVAL_BASE = `${BASE}/eval`;
-const WORKFLOW_BASE = '/api/workflow';
 
 // ==================== 枚举（与 rag_constant.py 第十一节一一对应） ====================
 
@@ -211,9 +211,4 @@ export interface ModelOption {
 export const fetchEvalChatModels = () => fetchChatModels();
 
 /** 相似度向量模型：answer_relevancy 用文本向量（RAGAS embeddings 走文本编码） */
-export async function fetchEvalEmbedModels(): Promise<ModelOption[]> {
-  const rows = await defHttp.get<
-    Array<{ id: number; provider: string; name: string }>
-  >(`${WORKFLOW_BASE}/models/list`, { params: { type: MT_TEXT_EMBEDDING } });
-  return (rows || []).map((m) => ({ label: `${m.provider} / ${m.name}`, value: m.id }));
-}
+export const fetchEvalEmbedModels = () => fetchTextEmbedModels();

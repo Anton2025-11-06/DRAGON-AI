@@ -20,6 +20,7 @@
    也回成功，后端自己分不出「删到了」还是「本来就没了」，不必在后端里补这个判定。
 4. **URL 有效期**：public_url 返回 (url, expires_in 秒)。OSS 是预签名 URL（签名自带有效期），
    本地后端是业务模块的下载接口地址（由后端按「写入时间 + 有效期」判定，过期即清理）。
+   需要把地址**长期写进数据**（入库/入索引）时只能用 plain_url：它不带任何签名凭证。
 5. close() 进程停机时统一 await，且必须可重复调用；close 后实例视为不可用。
 """
 from __future__ import annotations
@@ -84,6 +85,19 @@ class StorageBackend(ABC):
         if not self._enabled:
             raise RuntimeError(
                 f"{self.backend_name} 存储后端未初始化（请检查 Nacos storage 配置段）")
+
+    async def plain_url(self, name: str,
+                        base_url: Optional[str] = None) -> str:
+        """匿名可访问地址的长期形态：只取 host + path，不带任何签名参数。
+
+        预签名地址里的 x-oss-credential / x-oss-signature-version / x-expires 到期即打不开，
+        绝不能落进任何持久数据；抹掉查询串得到的是 ``https://{bucket}.{endpoint}/{key}``
+        这种稳定写法（能直接匿名打开的前提是桶开了公共读，由部署方保证）。
+        域名与路径前缀仍由 public_url 定（path_style / cname / 内网域名各自的处理不在这重复），
+        本地后端的地址本来就没有查询串，两个后端共用这一份实现。
+        """
+        url, _expires = await self.public_url(name, base_url=base_url)
+        return url.split("?", 1)[0]
 
     async def close(self) -> None:
         """释放资源（默认无操作，持有连接/会话的子类按需重写）。"""

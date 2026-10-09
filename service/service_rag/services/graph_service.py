@@ -16,6 +16,9 @@
    同名实体的关系混进图里。
 2. **图谱是可失败的增强**：抽取失败只把 ``graph_state`` 打成 FAILED、原因写进进度，
    文档状态仍是 PROCESSED。一篇能被正常检索的文档不该因为图谱被判成失败。
+   反过来，**一个实体都没抽到也不算失败**：目录、页眉、纯表格这类内容本就没有可成图的
+   事实，照样打 DONE，只在完成文案里说清图谱是空的（算失败的是模型调用打不通、
+   没有可用切片、没配抽取模型这三类）。
 3. **重跑不叠加**：``upsert_graph(replace=True)`` 先按文档清掉上一轮子图；已构建的文档
    只有 ``force=True`` 才重抽——一次重抽就是 N 轮大模型调用（按切片分批），不该走默认路径。
 4. **端点类型必须与实体一致**：实体 MERGE 键里带了 type，关系端点给的 type 与实体行
@@ -155,9 +158,8 @@ class RagGraphService:
                     continue
                 payload = await _extract_batch(cfg, prompt, doc_id=doc_id, no=no,
                                                total=len(batches))
-                # 某一批全是页眉/目录之类的无实体内容，不该让整篇文档的图谱跟着失败
-                # （所有批次都为空时由下面的 _merge_batches 结果统一判失败）
-                part_result = _normalize(payload, es_ids, empty_ok=len(batches) > 1)
+                # 一批没抽到实体不是失败：只记一句说明，整篇都为空也按成功收口（见下面的完成文案）
+                part_result = _normalize(payload, es_ids)
                 drawn.append(part_result)
                 progressed["done"] = no
                 if not await _save_ckpt(doc_id, no, part_result, stamp=stamp, sig=want_sig):
@@ -172,8 +174,6 @@ class RagGraphService:
                     message=_extract_message(no, len(batches), progressed["reused"]))
 
             entities, relations, notes = _merge_batches(drawn)
-            if not entities:
-                raise ValueError("大模型没有抽出任何实体（换问答模型或调整抽取提示词后重试）")
             if progressed["reused"]:
                 # 续抽要看得见：完成文案里说清本次省掉了多少批模型调用
                 notes = notes + [
@@ -216,10 +216,16 @@ class RagGraphService:
             # 结果已落 Neo4j，断点再留着没有下一步可用（下一次要么全量重抽、要么内容已变），
             #   当场清掉才不会出现「旧批次的抽取结果在新切片集上假装是新抽的」
             await RagTaskService.kg_ckpt_drop(doc_id)
-            message = f"图谱构建完成：{counts.get('entities', 0)} 个实体、" \
-                      f"{counts.get('relations', 0)} 条关系"
-            if notes:
-                message += f"（{('；'.join(notes))[:200]}）"
+            if not entities:
+                # 没抽到实体是正常结果，不是异常：状态照样 DONE，只把「图谱是空的」说清楚。
+                # 上一轮的旧子图在上面已由 upsert_graph(replace=True) 清掉，不会留下该消失的实体
+                message = (f"图谱构建完成：{len(rows)} 个切片没有抽取出实体，图谱为空"
+                           f"（内容可能以目录、页眉或表格为主，没有可成图的事实）")
+            else:
+                message = f"图谱构建完成：{counts.get('entities', 0)} 个实体、" \
+                          f"{counts.get('relations', 0)} 条关系"
+                if notes:
+                    message += f"（{('；'.join(notes))[:200]}）"
             await RagTaskService.set_progress(doc_id, scope=RC.PROGRESS_SCOPE_GRAPH,
                                               stage="graph_done",
                                               total=len(rows), done=len(rows),
@@ -622,8 +628,7 @@ def _merge_batches(drawn: Sequence[tuple[list[dict], list[dict], list[str]]]
     return list(by_name.values()), relations, notes
 
 
-def _normalize(payload: Any, es_ids: dict[int, str], *,
-               empty_ok: bool = False) -> tuple[list[dict], list[dict], list[str]]:
+def _normalize(payload: Any, es_ids: dict[int, str]) -> tuple[list[dict], list[dict], list[str]]:
     """模型返回的 JSON → kg_store 的入参形态，并记下丢掉了什么（降级必须看得见）。
 
     只认 ``entities/relations`` 之外的同义写法也一并兼容（nodes/triples/edges），
@@ -631,9 +636,7 @@ def _normalize(payload: Any, es_ids: dict[int, str], *,
 
     :param es_ids: ``{chunk_index: ES _id}``——本文档全部可用切片的溯源表，
         模型报回来的切片编号只有在这张表里才能换成溯源地址
-    :param empty_ok: 分批抽取时为 True——某一批没抽到实体只记一句说明，不抛错；
-        所有批次都为空由调用方统一判失败
-    :raises ValueError: 返回结构不是 JSON 对象，或一批都没抽到实体且 ``empty_ok=False``
+    :raises ValueError: 返回结构不是 JSON 对象
     """
     notes: list[str] = []
     data: Any = payload
@@ -647,9 +650,8 @@ def _normalize(payload: Any, es_ids: dict[int, str], *,
     raw_relations = (_as_list(data.get("relations")) or _as_list(data.get("triples"))
                      or _as_list(data.get("edges")))
     if not raw_entities:
-        if empty_ok:
-            return [], [], ["某一批没抽出实体（这段切片可能是目录/页眉，已跳过）"]
-        raise ValueError("大模型没有抽出任何实体（换问答模型或调整抽取提示词后重试）")
+        # 空结果原样返回：这段内容没有可成图的事实不等于抽取失败，整篇为空也由调用方按成功收口
+        return [], [], ["某一批没抽出实体（这段切片可能是目录/页眉，已跳过）"]
 
     entities: list[dict] = []
     type_of: dict[str, str] = {}

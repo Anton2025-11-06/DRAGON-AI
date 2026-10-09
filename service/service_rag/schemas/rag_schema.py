@@ -181,7 +181,7 @@ class KnowledgeBaseResp(CamelModel):
 class DocPageReq(PageReq):
     """文档列表分页（POST /api/rag/knowledge-bases/{kb_id}/documents/page）。"""
 
-    name: Optional[str] = Field(None, max_length=255, description="文档标题模糊匹配")
+    name: Optional[str] = Field(None, max_length=255, description="文档标题/原始文件名模糊匹配")
     status: Optional[str] = Field(None, description="解析状态，见 rag_constant.DOC_STATUS_ALL")
     graph_state: Optional[int] = Field(None, ge=0, le=3, description="图谱构建态 0/1/2/3")
 
@@ -335,7 +335,8 @@ class ChunkResp(CamelModel):
     sheet_name: Optional[str] = None
     page_num: int = 0
     block_id: Optional[str] = None
-    media_url: Optional[str] = None
+    media_url: Optional[str] = Field(
+        None, description="本切片在公共存储里的媒体句柄（多个按换行分隔，不是可直接打开的 URL）")
     media_type: Optional[str] = None
     token_count: int = 0
     available: bool = True
@@ -400,7 +401,10 @@ class RetrieveHit(CamelModel):
     title_path: Optional[str] = None
     page_num: int = 0
     sheet_name: Optional[str] = None
-    media_url: Optional[str] = None
+    media_url: Optional[str] = Field(None, description="第一个媒体地址（兼容旧前端与单媒体卡片）")
+    media_urls: list[str] = Field(
+        default_factory=list, description="本条命中的全部媒体地址（匿名可访问，按正文原位置顺序）："
+                                         "一条切片可以覆盖多张图，只给第一张其余就放不出来")
     media_duration: int = 0
     block_id: Optional[str] = None
     recall: str = Field("CHUNK", description="这一条从哪一路来：CHUNK=关键词+向量，"

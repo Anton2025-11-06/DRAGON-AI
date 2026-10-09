@@ -230,6 +230,9 @@ class RagParseService:
             # 预签名 URL 会过期，写进数据就是留下一批半年后打不开的媒体
             media_ref = str(doc.file_path or "").strip()
             media_url = await _public_url(media_ref)
+            # 写进正文的那一份不带凭证（与分块层给内嵌媒体补的原位地址同一口径）：
+            # media_url 字段是检索出口现签用的，切片正文才是问答上下文与工作流读的东西
+            media_addr = await _plain_public_url(media_ref)
             embed_cfg = await RagModelService.require_config(
                 kb.embedding_model_id, "向量模型")
 
@@ -269,14 +272,17 @@ class RagParseService:
                     doc_id, stage="embedding", message="生成整条媒体的全局向量")
                 vector = await RagModelService.embed_video(embed_cfg, media_url)
 
+            # 切片正文 = 媒体文字（文件名 + 描述） + 原位地址；文档级摘要仍只留文字，
+            # 列表页那一栏里挂个 URL 没有意义
+            content = " ".join(x for x in (summary, media_addr) if x)
             # 媒体只有一条记录：写它才能被切片管理页停用/放开（旧行在写入前先物理替换）
-            row_id = await _insert_media_chunk(kb, doc, chunk_type, summary, media_ref)
+            row_id = await _insert_media_chunk(kb, doc, chunk_type, content, media_ref)
             await RagTaskService.transition(
                 doc_id, RC.DOC_STATUS_PROCESSING, stage="index",
                 total=1, done=0, message="写入检索索引")
             written = await _index_rows(kb, doc_id, [{
                 "chunk_id": row_id, "chunk_index": 0, "chunk_type": chunk_type,
-                "content": summary, "media_url": media_ref, "title_path": "",
+                "content": content, "media_url": media_ref, "title_path": "",
                 "page_num": 0, "sheet_name": "", "available": 1,
                 "extra": {"media_type": kb.kb_type, "file_ext": doc.file_ext},
             }], {0: vector})
@@ -475,6 +481,27 @@ async def _public_url(name: str) -> str:
     return url
 
 
+async def _plain_public_url(name: str) -> str:
+    """对象名 → 不带签名凭证的匿名地址（与切片一起写进检索索引）。
+
+    预签名地址带 x-oss-credential / x-oss-signature-version / x-expires，到期即打不开，
+    落进索引等于埋一批半年后取不出的图；抹掉凭证后的形态（``https://{bucket}.{endpoint}/rag/...``）
+    在桶开匿名公共读时长期可用，前端拿来直接渲染。
+    已经是完整地址的原样透出（markdown 里的外链图不是本存储的对象，改别人的 URL 就是改数据）；
+    取不到地址时退回对象名，不拦整批索引写入（检索出口有现签兜底）。
+    """
+    value = str(name or "").strip()
+    if not value:
+        return ""
+    if "://" in value:
+        return value
+    try:
+        return await get_storage().plain_url(value)
+    except Exception as e:  # noqa: BLE001  媒体地址拿不到不该把向量写入整批打掉
+        log.warning(f"取匿名媒体地址失败，索引里退回对象名 {value}: {e}")
+        return value
+
+
 # =====================================================================================
 # 内部：解析与分块
 # =====================================================================================
@@ -593,7 +620,10 @@ async def _media_to_parsed(doc: Document, raw: bytes, *, kind: str, engine: str,
         ext = str(doc.file_ext or "png").strip(".").lower() or "png"
         ref = ImageRef(block_id=f"b{len(parsed.blocks) + 1}", alt=title,
                        mime=doc.content_type or f"image/{ext}",
-                       object_key=str(doc.file_path or ""), url=url)
+                       object_key=str(doc.file_path or ""),
+                       # 地址分两份：url 是不带凭证的长期形态（进 sidecar、进索引），
+                       # 送模型的那份是上面现签的 url 变量（私有桶的部署靠它才看得到图）
+                       url=(await _plain_public_url(doc.file_path)) or url)
         vision_cfg = RagModelService.vision_config(image_cfg,
                                                    RC.MEDIA_KIND_CATEGORY[kind])
         # 图片理解与 OCR 二选一（需求 6 第四行）：图片理解优先，它不只抽文字还给主体描述；
@@ -643,6 +673,19 @@ async def _media_to_parsed(doc: Document, raw: bytes, *, kind: str, engine: str,
     if not (text or "").strip():
         raise ValueError(f"{label}转写结果为空：模型没有吐出任何文字（纯音乐、无人说话的视频、"
                          f"文件过长都会这样），换个模型或换一段素材再试")
+    # 原件自己也要占一个块位：转写文字是它的「正文」，地址就落在正文里媒体的原位置。
+    # 不补这一位，doc 型库收到的音频/视频只有转写文字块，切片行与索引里的 media_url 恒为
+    # NULL（页面放不出这条媒体），正文里也看不到地址（需求要图片和音视频的 url 同切片入库）。
+    # mime 只认 image/audio/video 前缀，content_type 缺失或写着 octet-stream 时按扩展名兜一层：
+    # 种类认错会把音频切成图片模态，前端就拿 <img> 去装一个 mp3
+    mime = str(doc.content_type or "").strip().lower()
+    if RC.media_kind_of_mime(mime) != kind:
+        ext = str(doc.file_ext or kind).strip(".").lower() or kind
+        mime = f"{kind}/{ext}"
+    ref = ImageRef(block_id=f"b{len(parsed.blocks) + 1}", mime=mime,
+                   object_key=str(doc.file_path or ""),
+                   url=(await _plain_public_url(doc.file_path)) or url)
+    parsed.blocks.append(ParsedBlock(block_id=ref.block_id, type=C.BLOCK_IMAGE, image=ref))
     parsed.blocks.append(ParsedBlock(block_id=f"b{len(parsed.blocks) + 1}",
                                     type=C.BLOCK_TEXT, text=text.strip()))
     return _finalize_media(parsed)
@@ -808,17 +851,21 @@ def _make_image_hook(kb: KnowledgeBase, doc_id: int, parse_config: dict,
                 return
         if not ref.object_key and not ref.url:
             return
-        if not ref.url:
+        model_url = ref.url
+        if ref.object_key:
             try:
-                ref.url = await _public_url(ref.object_key)
+                model_url = await _public_url(ref.object_key)
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"内嵌{label}取不到访问地址（描述跳过）：{str(e)[:120]}")
                 return
+            # 留在产物里的那份不带凭证：sidecar 会被复用，存签名地址等于下一次重跑拿
+            # 一条已过期（甚至已删）的链接去要描述，而切片与索引引用的正是这一份
+            ref.url = await _plain_public_url(ref.object_key) or model_url
         cfg = models.get(kind)
         if cfg is None:
             return
         try:
-            ref.description = await _describe(kind, cfg, ref.url)
+            ref.description = await _describe(kind, cfg, model_url)
         except Exception as e:  # noqa: BLE001
             # 单个媒体失败不该拖垮整篇文档：留一句说明，正文照常带媒体占位与原位地址
             warnings.append(f"{label} {ref.block_id} 解析增强失败：{str(e)[:120]}")
@@ -845,16 +892,29 @@ async def _replace_chunks(kb: KnowledgeBase, doc_id: int, chunks: Sequence[Any],
 
     物理替换而不是增量：重新分块后块数几乎必然变化，增量只能靠「删掉多出来的」拼回去，
     一旦中途失败就出现同一文档两套 chunk_index，ES 的 _id 也跟着错位。
+
+    删与插分两次提交：同一事务里 DELETE 留下的 gap / next-key 锁会挡住紧随的 INSERT，这是
+    InnoDB 在 RR 下的成环组合（多篇并发入同一库时尤其容易撞上，报 1213 Deadlock）；DELETE
+    单独提交后锁即释放，剩下的插入之间只要 insert-intention 锁，而它彼此兼容，不成环。
+    代价是中间一段「本篇无切片行」的窗口，与「构建向量」先清 ES 再重跑同一口径
+    （见 doc_service.build_vectors）：INSERT 崩掉留零行 + 文档 FAILED，重跑一次整批补回
+    （sidecar 已落盘，不必重新解析）。
     """
-    rows: list[dict] = []
     async with mysql_client.get_session() as session:
         await session.execute(delete(DocumentChunk).where(
             DocumentChunk.doc_id == int(doc_id)))
+        await session.commit()
+
+    rows: list[dict] = []
+    async with mysql_client.get_session() as session:
         for chunk in chunks:
             image = getattr(chunk, "image", None)
-            # 自己的存储对象优先；外链图片（markdown 里的 http 图）只有 url，
-            # 少这一条就会把图片切成 media_url=NULL 的文本块（取地址处已兼容完整 URL 直接透出）
-            media = (getattr(image, "object_key", "") or getattr(image, "url", "") or "")[:500]
+            # 本块覆盖的全部媒体一起存（一个切片可以有多张图）：自己的存储对象优先，
+            # 外链图片（markdown 里的 http 图）只有 url——少一条就会让那个对象在清理链路
+            # 里成为没人删的孤儿，也会把图片切成 media_url=NULL 的文本块（取地址处已兼容完整 URL）
+            media = RC.join_media_refs([(getattr(one, "object_key", "")
+                                         or getattr(one, "url", "") or "")
+                                        for one in (getattr(chunk, "images", None) or [])])
             # 模态按媒体自己的 mime 认：内嵌一段音频却登记成 image，
             # 前端就会拿 <img> 去装一个 mp3，页面上只会碎成一张碎图标
             media_kind = getattr(image, "kind", RC.MEDIA_KIND_IMAGE)
@@ -905,10 +965,16 @@ async def _replace_chunks(kb: KnowledgeBase, doc_id: int, chunks: Sequence[Any],
 
 async def _insert_media_chunk(kb: KnowledgeBase, doc: Document, chunk_type: str,
                               content: str, media_url: str) -> int:
-    """媒体型文档只有一条切片（chunk_index=0），写它才能被切片管理页停用/放开。"""
+    """媒体型文档只有一条切片（chunk_index=0），写它才能被切片管理页停用/放开。
+
+    删与插分两次提交，与 _replace_chunks 同一口径（避开 gap 锁挡住 INSERT 的成环组合）。
+    """
     async with mysql_client.get_session() as session:
         await session.execute(delete(DocumentChunk).where(
             DocumentChunk.doc_id == int(doc.doc_id)))
+        await session.commit()
+
+    async with mysql_client.get_session() as session:
         row = DocumentChunk(
             kb_id=kb.kb_id, doc_id=int(doc.doc_id), chunk_index=0,
             chunk_type=chunk_type, content=(content or doc.doc_name or "[媒体]")[:RC.MAX_CHUNK_CHARS],
@@ -983,6 +1049,9 @@ async def _index_rows(kb: KnowledgeBase, doc_id: int, rows: Sequence[dict],
 
     **写完不刷盘**（逐批 refresh=false）：刷新由调用方在全部写完的那一刻统一做一次
     （见 _embed_and_index 与 run_media_parse），漏了就会留下「状态已完成却搜不到」的窗口。
+
+    媒体地址与切片一起进索引（一行可能记了多条，逐个换）：MySQL 行里始终存对象名
+    （清理链路要靠它删存储对象），只有进索引的那一份换成能直接渲染的匿名 URL。
     """
     docs: list[dict] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -993,6 +1062,9 @@ async def _index_rows(kb: KnowledgeBase, doc_id: int, rows: Sequence[dict],
             continue
         if not any(abs(float(x)) > 0.0 for x in vector[:8]):
             continue      # 全零向量是空文本的占位，写进索引只会污染候选集
+        # 媒体地址与切片一起进索引：不带签名凭证的匿名形态，前端直接渲染，不必二次签名
+        media = RC.join_media_refs([await _plain_public_url(one)
+                                    for one in RC.split_media_refs(row.get("media_url"))])
         docs.append({
             "_id": es_doc_id(kb.kb_id, doc_id, int(row["chunk_index"])),
             RC.ES_FIELD_ORG: int(kb.org_id or 0),
@@ -1003,7 +1075,7 @@ async def _index_rows(kb: KnowledgeBase, doc_id: int, rows: Sequence[dict],
             RC.ES_FIELD_TYPE: row.get("chunk_type") or RC.CHUNK_TYPE_TEXT,
             RC.ES_FIELD_CONTENT: row.get("content") or "",
             RC.ES_FIELD_EMBED: [float(x) for x in vector],
-            RC.ES_FIELD_MEDIA_URL: row.get("media_url") or None,
+            RC.ES_FIELD_MEDIA_URL: media or None,
             RC.ES_FIELD_TITLE_PATH: row.get("title_path") or None,
             RC.ES_FIELD_PAGE: int(row.get("page_num") or 0),
             RC.ES_FIELD_SHEET: row.get("sheet_name") or None,
@@ -1095,9 +1167,11 @@ async def _collect_objects(kb_id: int, doc_ids: Sequence[int]) -> tuple[list[str
             media_conds.append(DocumentChunk.doc_id.in_([int(d) for d in doc_ids]))
         medias = (await session.execute(
             select(DocumentChunk.media_url).where(*media_conds))).scalars().all()
-        # 完整 URL（外链图片）不是本存储的对象名，递进去只会被当成删不掉的垃圾报一轮
-        names.extend(str(one) for one in medias
-                     if one and "://" not in str(one))
+        # 一行可能记了多个句柄（一个切片覆盖多张图），逐个摊开：漏掉第 2..N 张就等于
+        # 把那些对象永久留在存储里。完整 URL（外链图片）不是本存储的对象名，
+        # 递进去只会被当成删不掉的垃圾报一轮
+        for one in medias:
+            names.extend(ref for ref in RC.split_media_refs(one) if "://" not in ref)
     deduped = list(dict.fromkeys(n for n in names if n))
     return deduped, targets
 

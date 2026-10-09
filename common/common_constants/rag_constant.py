@@ -222,6 +222,34 @@ MEDIA_KIND_UNDERSTAND_OPTION = {
     MEDIA_KIND_VIDEO: "video_understand",
 }
 
+# 一个切片可以覆盖多个媒体块（一页 PPT 三张图、一节里两段视频），而 media_url 只有一列：
+# 全部句柄按这一位拼成一个串存进 MySQL 与 ES，出口再拆。
+# 选换行而不是逗号：存储对象名（image/{kb}/{doc}/{block}.{ext}）与 URL 都不含换行，
+# 而外链媒体的查询串里出现逗号是常事——拿逗号当分隔符等于把一条 URL 拆成两条坏链接。
+MEDIA_URL_SEP = "\n"
+# 单片最多记几条媒体：按页/按节分块时一篇幻灯片的一个切片能覆盖几十张图，全存既不现实
+# 也画不完；超出部分不丢——正文里的地址是逐个媒体单元拼的，不受这一位限制
+MAX_MEDIA_REFS = 20
+
+
+def join_media_refs(refs) -> str:
+    """媒体句柄列表 → media_url 的存储串（去空、按出现顺序去重、卡上限）。"""
+    kept: list[str] = []
+    for one in refs or []:
+        value = str(one or "").strip()
+        if value and value not in kept:
+            kept.append(value)
+    return MEDIA_URL_SEP.join(kept[:MAX_MEDIA_REFS])
+
+
+def split_media_refs(value) -> list[str]:
+    """media_url 存储串 → 句柄列表（历史单值天然是长度为 1 的列表，不需要迁数据）。
+
+    顺带把 \\r 归一成 \\n：手工往库里粘过句柄的行、Windows 客户端导出的值都不该拆出空项。
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return [one for one in (x.strip() for x in text.split("\n")) if one]
+
 
 # =====================================================================================
 # 四、解析引擎（SPEC §7.2：native + minerU + 自动）
@@ -634,8 +662,8 @@ RAG_SIDECAR_MODES = [RAG_SIDECAR_AUTO, RAG_SIDECAR_REUSE, RAG_SIDECAR_REPARSE]
 # 运行状态（tb_rag_eval_run.status）
 EVAL_STATUS_PENDING = "PENDING"    # 已建 run 并入队，等待 worker 取走
 EVAL_STATUS_RUNNING = "RUNNING"    # worker 已开始跑（召回/生成/打分）
-EVAL_STATUS_DONE = "DONE"          # 终态：全部条项跑完（个别条项失败不整单 FAILED）
-EVAL_STATUS_FAILED = "FAILED"      # 终态：整体失败（入队前校验外 worker 崩溃不做看门狗，RUNNING 保持可见）
+EVAL_STATUS_DONE = "DONE"          # 终态：至少一条拿到分（部分条项失败不整单 FAILED，失败条数与原因写进 run.error）
+EVAL_STATUS_FAILED = "FAILED"      # 终态：整体失败（入队失败、worker 任务抛错/被取消，或一条都没拿到分；进程被硬杀不做看门狗，RUNNING 保持可见）
 EVAL_STATUS_ALL = [EVAL_STATUS_PENDING, EVAL_STATUS_RUNNING, EVAL_STATUS_DONE, EVAL_STATUS_FAILED]
 EVAL_STATUS_LABELS = {
     EVAL_STATUS_PENDING: "排队中",
@@ -645,8 +673,8 @@ EVAL_STATUS_LABELS = {
 }
 # 条项状态（tb_rag_eval_item.status）
 EVAL_ITEM_PENDING = "PENDING"      # 建 run 时落库的初始态
-EVAL_ITEM_DONE = "DONE"            # 召回+生成+打分均成功，至少一个指标有值
-EVAL_ITEM_FAILED = "FAILED"        # 本条失败（5 指标全 NULL + error）
+EVAL_ITEM_DONE = "DONE"            # 召回+生成+打分都跑通（个别指标缺值用 NULL 表达，不影响本条算完成）
+EVAL_ITEM_FAILED = "FAILED"        # 本条失败（5 指标全 NULL + error）；整场失败时没跑到的条也收到这里
 
 # 五大指标（列名与 ragas metric 名一一对应，前端表头按这个序）
 EVAL_METRIC_FAITHFULNESS = "faithfulness"
@@ -669,7 +697,7 @@ EVAL_METRIC_LABELS = {
 
 # 逐问答对并发（外层 asyncio.Semaphore：每对一次召回+一次生成；
 #   ragas 内部打分另有自己的并发，不在这一层控制）
-EVAL_CONCURRENCY = 4
+EVAL_CONCURRENCY = 10
 # run 的 job_id 幂等标识前缀（与 rag:job:{task}:{identity} 拼法一致，identity=run_id）
 EVAL_RUN_IDENTITY_PREFIX = "eval"
 

@@ -171,9 +171,9 @@ const submitting = ref(false);
 
 function validateForm(): null | string {
   if (!form.value.kbId) return '请选择要评测的知识库';
-  if (!form.value.generationModelId) return '请选择生成答案的对话模型';
+  if (!form.value.generationModelId) return '请选择文本生成模型';
   if (!form.value.judgeModelId) return '请选择裁判模型';
-  if (!form.value.embedModelId) return '请选择相似度向量模型';
+  if (!form.value.embedModelId) return '请选择向量模型';
   const valid = pairs.value.filter((p) => (p.question || '').trim());
   if (valid.length === 0) return '请至少录入一个有效的问答对（问题不能为空）';
   return null;
@@ -274,10 +274,52 @@ function fmtMetric(v: null | number | undefined): string {
   return v === null || v === undefined ? '—' : v.toFixed(2);
 }
 
+/**
+ * 列表状态 Tag 的底色：后端 DONE 只保证「至少一条拿到分」，10 对里挂 9 对也照样是 DONE，
+ * 原样染成绿色就等于列表把部分失败说成通过 → 有失败就降成橙色，让「完成」不再骗人。
+ */
+function runTagColor(record: EvalRunResp): string {
+  if (record.status === 'DONE' && record.donePairs < record.totalPairs) {
+    return 'warning';
+  }
+  return EVAL_STATUS_COLORS[record.status] || 'default';
+}
+
+/**
+ * 还没收口的场次（排队中 / 评测中）：这一段后端不会中途写 done_pairs（只在收口时一次性
+ * 落库），跑动中拉到的完成数必然是 0，所以进度不能拿它当百分比画。
+ */
+function isRunInFlight(record: EvalRunResp): boolean {
+  return record.status === 'RUNNING' || record.status === 'PENDING';
+}
+
+/**
+ * 分数什么时候要露出来：跑动中是进度，收口后没跑满则是「几对真正拿到了分」。
+ */
+function showDoneFraction(record: EvalRunResp): boolean {
+  return isRunInFlight(record) || record.donePairs < record.totalPairs;
+}
+
+/** 进度条填充比例 = 拿到分的条数占比（与状态 Tag 同一口径，不另算一份） */
+function runBarPercent(record: EvalRunResp): number {
+  if (!record.totalPairs) return 0;
+  return Math.round((record.donePairs / record.totalPairs) * 100);
+}
+
+/** 条色跟着状态走，避免出现「绿标签配红条」这种自相矛盾的行 */
+function runBarClass(record: EvalRunResp): string {
+  if (record.status === 'RUNNING') return 'is-running';
+  // 排队中：worker 还没取走，给一条空轨而不是流动条（流动会被读成「已经在跑了」）
+  if (record.status === 'PENDING') return 'is-queued';
+  if (record.status === 'FAILED') return 'is-failed';
+  if (record.donePairs < record.totalPairs) return 'is-partial';
+  return 'is-full';
+}
+
 const runColumns = [
   { title: '运行', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
   { title: '知识库', dataIndex: 'kbName', key: 'kbName', width: 140, ellipsis: true },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 90 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 150 },
   { title: '问答对', dataIndex: 'totalPairs', key: 'totalPairs', width: 100 },
   { title: '五指标均值', key: 'metrics', width: 260 },
   { title: '平均耗时', dataIndex: 'avgLatencyMs', key: 'avgLatencyMs', width: 100 },
@@ -300,23 +342,12 @@ const itemColumns = [
   { title: '上下文召回率', dataIndex: 'contextRecall', key: 'contextRecall', width: 110 },
   { title: '答案正确性', dataIndex: 'answerCorrectness', key: 'answerCorrectness', width: 100 },
   { title: '召回/生成/打分 (ms)', key: 'took', width: 160 },
-  { title: '展开', key: 'expand', width: 80 },
 ];
-
-const expandedItems = ref<Set<number>>(new Set());
-
-function toggleItem(itemId: number) {
-  const next = new Set(expandedItems.value);
-  if (next.has(itemId)) next.delete(itemId);
-  else next.add(itemId);
-  expandedItems.value = next;
-}
 
 async function openDetail(runId: number) {
   detailOpen.value = true;
   detailLoading.value = true;
   detail.value = null;
-  expandedItems.value = new Set();
   try {
     detail.value = await EvalRunDetail(runId);
   } catch (error: any) {
@@ -344,8 +375,11 @@ onMounted(() => {
     />
 
     <!-- 一、评测配置 -->
-    <Card :bordered="false" title="评测配置" class="mb-2">
+    <Card :bordered="false" title="评测配置" class="eval-config-card mb-2">
       <Space direction="vertical" :size="12" style="width: 100%">
+        <!-- 配置区两行：第一行评什么 + 怎么召回（库 / 运行名称 / TopK / 阈值 / 检索模式 /
+        图谱增强），第二行用哪三个模型（生成 / 向量 / 裁判）。模型都是 min-width 220 的下拉，
+        再并到第一行就会超出常规屏宽，所以留它单独一行；窗口不够宽时 Space 的 wrap 自行折行。 -->
         <Space wrap :size="12">
           <span class="param-label">知识库</span>
           <Select
@@ -364,47 +398,13 @@ onMounted(() => {
             style="width: 200px"
             :maxlength="255"
           />
-          <Tooltip title="召回后拼 prompt 生成答案的对话模型（文生文）">
-            <span class="param-label">生成模型</span>
-          </Tooltip>
-          <Select
-            v-model:value="form.generationModelId"
-            :options="genModelOptions"
-            placeholder="生成答案的对话模型"
-            style="min-width: 200px"
-            show-search
-            option-filter-prop="label"
-            allow-clear
-          />
-          <Tooltip title="RAGAS 打分裁判模型（文生文）：忠实度 / 上下文精确率 / 召回率 / 答案正确性都靠它">
-            <span class="param-label">裁判模型</span>
-          </Tooltip>
-          <Select
-            v-model:value="form.judgeModelId"
-            :options="judgeModelOptions"
-            placeholder="RAGAS 裁判模型"
-            style="min-width: 200px"
-            show-search
-            option-filter-prop="label"
-            allow-clear
-          />
-          <Tooltip title="answer_relevancy 用文本向量算问题与反向生成问题的相似度">
-            <span class="param-label">相似度向量</span>
-          </Tooltip>
-          <Select
-            v-model:value="form.embedModelId"
-            :options="embedModelOptions"
-            placeholder="相似度向量模型"
-            style="min-width: 200px"
-            show-search
-            option-filter-prop="label"
-            allow-clear
-          />
-        </Space>
-
-        <Space wrap :size="12">
           <span class="param-label">TopK</span>
-          <InputNumber v-model:value="form.topK" :min="1" :max="100" style="width: 78px" />
+          <InputNumber
+            v-model:value="form.topK"
+            :min="1"
+            :max="100"
+            style="width: 78px"
+          />
           <Tooltip title="留空 = 用知识库自己的检索配置">
             <span class="param-label">相似度阈值</span>
           </Tooltip>
@@ -425,7 +425,9 @@ onMounted(() => {
             allow-clear
           />
           <template v-if="graphAvailable">
-            <Tooltip title="叠加图谱增强那一路召回（仅文档型；开启需要该库已构建图谱）">
+            <Tooltip
+              title="叠加图谱增强那一路召回（仅文档型；开启需要该库已构建图谱）"
+            >
               <span class="param-label">图谱增强</span>
             </Tooltip>
             <Switch v-model:checked="form.withGraph" />
@@ -439,6 +441,49 @@ onMounted(() => {
           <span v-else-if="form.kbId" class="param-label">
             图谱增强仅文档型知识库可用
           </span>
+        </Space>
+
+        <Space wrap :size="12">
+          <Tooltip title="召回后拼 prompt 生成答案的对话模型（文生文）">
+            <span class="param-label">文本生成模型</span>
+          </Tooltip>
+          <Select
+            v-model:value="form.generationModelId"
+            :options="genModelOptions"
+            placeholder="生成答案的对话模型"
+            style="min-width: 220px"
+            show-search
+            option-filter-prop="label"
+            allow-clear
+          />
+          <Tooltip
+            title="answer_relevancy 用文本向量算问题与反向生成问题的相似度"
+          >
+            <span class="param-label">向量模型</span>
+          </Tooltip>
+          <Select
+            v-model:value="form.embedModelId"
+            :options="embedModelOptions"
+            placeholder="相似度向量模型"
+            style="min-width: 220px"
+            show-search
+            option-filter-prop="label"
+            allow-clear
+          />
+          <Tooltip
+            title="RAGAS 打分裁判模型（文生文）：忠实度 / 上下文精确率 / 召回率 / 答案正确性都靠它"
+          >
+            <span class="param-label">裁判模型</span>
+          </Tooltip>
+          <Select
+            v-model:value="form.judgeModelId"
+            :options="judgeModelOptions"
+            placeholder="RAGAS 裁判模型"
+            style="min-width: 220px"
+            show-search
+            option-filter-prop="label"
+            allow-clear
+          />
         </Space>
 
         <!-- 二、问答对数据集 -->
@@ -490,7 +535,7 @@ onMounted(() => {
     </Card>
 
     <!-- 三、运行历史 -->
-    <Card :bordered="false" title="评测历史" class="mb-2">
+    <Card :bordered="false" title="评测历史" class="eval-history-card mb-2">
       <template #extra>
         <Space :size="8">
           <Select
@@ -522,17 +567,34 @@ onMounted(() => {
         :pagination="pagination"
         row-key="runId"
         size="small"
-        :scroll="{ x: 1100 }"
+        :scroll="{ x: 1220, y: 400 }"
         @change="onTableChange"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
-            <Tag :color="EVAL_STATUS_COLORS[record.status] || 'default'">
-              {{ record.statusLabel || EVAL_STATUS_LABELS[record.status] || record.status }}
-            </Tag>
-            <span v-if="record.status === 'RUNNING' || record.status === 'PENDING'" class="done-hint">
-              {{ record.donePairs }}/{{ record.totalPairs }}
-            </span>
+            <!-- 失败原因挂在状态 Tag 上：runner 会把「N 条失败 + 首条原因」写进 run.error，
+                 只靠点进详情才看得到，列表里一排绿标没人会去点 -->
+            <Tooltip :title="record.error || ''">
+              <Tag :color="runTagColor(record)">
+                {{
+                  record.statusLabel ||
+                  EVAL_STATUS_LABELS[record.status] ||
+                  record.status
+                }}
+              </Tag>
+            </Tooltip>
+            <div class="run-progress-row">
+              <div class="run-progress" :class="runBarClass(record)">
+                <div
+                  v-if="!isRunInFlight(record)"
+                  class="run-progress-fill"
+                  :style="{ width: `${runBarPercent(record)}%` }"
+                ></div>
+              </div>
+              <span v-if="showDoneFraction(record)" class="done-hint">
+                {{ record.donePairs }}/{{ record.totalPairs }}
+              </span>
+            </div>
           </template>
           <template v-else-if="column.key === 'totalPairs'">
             {{ record.totalPairs }}
@@ -576,9 +638,11 @@ onMounted(() => {
     >
       <Spin :spinning="detailLoading">
         <template v-if="detail">
+          <!-- run.error 现在也装「部分失败」的说明（终态是 DONE 但有条项没拿到分）：
+               整单失败才用红色，免得把 9/10 成功渲染成一整条报错 -->
           <Alert
             v-if="detail.error"
-            type="error"
+            :type="detail.status === 'FAILED' ? 'error' : 'warning'"
             show-icon
             class="mb-2"
             :message="detail.error"
@@ -589,7 +653,7 @@ onMounted(() => {
               <span><span class="param-label">知识库：</span>{{ detail.kbName }}</span>
               <span>
                 <span class="param-label">状态：</span>
-                <Tag :color="EVAL_STATUS_COLORS[detail.status] || 'default'">
+                <Tag :color="runTagColor(detail)">
                   {{ detail.statusLabel || detail.status }}
                 </Tag>
               </span>
@@ -627,12 +691,8 @@ onMounted(() => {
               <template v-else-if="column.key === 'took'">
                 {{ it.tookRecallMs }} / {{ it.tookGenerateMs }} / {{ it.tookScoreMs }}
               </template>
-              <template v-else-if="column.key === 'expand'">
-                <Button size="small" type="link" @click="toggleItem(it.itemId)">
-                  {{ expandedItems.has(it.itemId) ? '收起' : '展开' }}
-                </Button>
-              </template>
             </template>
+            <!-- 展开入口只有 antd 因本插槽自动加上的行首箭头，不再另摆一个「展开」按钮列 -->
             <template #expandedRowRender="{ record: it }">
               <div class="item-detail">
                 <div v-if="it.error" class="item-error">错误：{{ it.error }}</div>
@@ -670,8 +730,57 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 评测还在跑时的进度条动画（用在下面 .run-progress.is-running 的滑动段）：
+   stylelint 的 order 要求 at-rule 排在所有 rule 前面，故放在样式块开头 */
+@keyframes run-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(313%);
+  }
+}
+
+/* 整页不滚：高度锁在视口里（140px 是布局顶栏 + 页签 + 内边距的占位，与 chat 页同一口径），
+   滚动只发生在配置块内部和历史框内部，所以配置栏永远钉在原地不会上下跑。 */
 .page-container {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
   padding: 8px;
+  overflow: hidden;
+}
+
+/* 配置卡不参与长高：问答对行数多时它自己滚，最多占半屏，
+   不会把下面的历史表顶到看不见的地方 */
+.eval-config-card {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  max-height: 52%;
+  overflow: hidden;
+}
+
+.eval-config-card :deep(.ant-card-body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 历史卡固定占满剩下的高度，表体自己滚（配合 Table 的 scroll.y，表头不会跟着滚走） */
+.eval-history-card {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.eval-history-card :deep(.ant-card-body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .param-label {
@@ -720,6 +829,54 @@ onMounted(() => {
   margin-left: 6px;
   font-size: 12px;
   color: var(--text-color-secondary, #999);
+}
+
+/* 状态列的进度条：填充段 = 拿到分的条数占比（与 Tag 的 warning/error 同一口径）。
+   评测中不画百分比（后端要收口时才写数），改成一条来回滑动的蓝段，只表达「还在跑」。 */
+.run-progress-row {
+  display: flex;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.run-progress {
+  position: relative;
+  width: 76px;
+  height: 5px;
+  overflow: hidden;
+  background: var(--border-color, #eee);
+  border-radius: 3px;
+}
+
+.run-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+
+.run-progress.is-full .run-progress-fill {
+  background: #52c41a;
+}
+
+.run-progress.is-partial .run-progress-fill {
+  background: #faad14;
+}
+
+/* 整单失败时后端必然写 done_pairs=0，填充段宽度为 0 等于什么都不画 → 红改画在轨道上，
+   否则失败行会和排队行看起来一模一样（都是一条空灰轨），失败就没报到页面上 */
+.run-progress.is-failed {
+  background: #ff4d4f;
+}
+
+.run-progress.is-running::after {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 32%;
+  height: 100%;
+  content: '';
+  background: #1677ff;
+  border-radius: 3px;
+  animation: run-progress-slide 1.2s ease-in-out infinite;
 }
 
 .detail-avgs {

@@ -77,13 +77,29 @@ class Piece:
         return "\n".join(u.text for _, u in self.covered(units) if u.text)
 
 
+def _unit_text(block: ParsedBlock) -> str:
+    """单元的正文：媒体块在图注/描述后面补上它在正文原位置的**访问地址**。
+
+    「我今天画了个画[图片]，挺不错的」这类切片只留一句「[图片]」：media_url 是检索
+    出口自己用的字段，问答上下文、工作流、导出拿到的都是正文这一份，正文里没地址就等于
+    这些下游全都看不到图。
+
+    地址只在这一层拼，不进 `ParsedBlock.body()`：body() 还被 doc_title 兜底与 plain_text
+    用着，那些场合要的是纯文字（标题里冒出 URL 是灾难），而分块才是「写进数据」的那一步。
+    """
+    text = (block.body() or "").strip()
+    if block.type != C.BLOCK_IMAGE or block.image is None:
+        return text
+    return " ".join(x for x in (text, block.image.address()) if x)
+
+
 def build_units(blocks: Sequence[ParsedBlock]) -> list[Unit]:
     """解析块 → 分块单元（顺带算好每块的面包屑路径，标题层级在此被用起来）。"""
     blocks = list(blocks or [])
     paths = title_paths(blocks)
     units: list[Unit] = []
     for i, b in enumerate(blocks):
-        text = (b.body() or "").strip()
+        text = _unit_text(b)
         if not text and b.image is None:
             continue
         units.append(Unit(text=text, block=b, path=paths[i] if i < len(paths) else "",
@@ -287,7 +303,12 @@ def assemble(units: Sequence[Unit], pieces: Sequence[Piece], cfg: ChunkConfig,
                                           f"[下文] {after}" if after else "") if x)
         page, page_end = _page_of(units, piece)
         block_ids = [u.block.block_id for _, u in span if u.block.block_id]
-        image = next((u.block.image for _, u in span if u.block.image is not None), None)
+        # 本块覆盖的每一个媒体都要记下，不是只取第一个：一页三张图只存下第一张，
+        # 另两张就在 media_url 里彻底消失（正文里虽然有地址，但清理链路、页面预览
+        # 与前端渲染靠的都是字段那一份，那个对象也从此没人能删）。media_type 与图片
+        # 描述照旧只用第一张（见 Chunk.image）；模态由下面的 _chunk_type 按覆盖单元
+        # 集合判，跟第几张无关，两者都不因这次改动而变。
+        images = [u.block.image for _, u in span if u.block.image is not None]
         sheet = next((u.block.sheet for _, u in span if u.block.sheet), "")
         meta = dict(piece.meta)
         if before:
@@ -298,7 +319,7 @@ def assemble(units: Sequence[Unit], pieces: Sequence[Piece], cfg: ChunkConfig,
                          embed_text=embed,
                          chunk_type=_chunk_type(units, piece), title_path=path,
                          page=page, page_end=page_end, sheet=sheet, block_ids=block_ids,
-                         image=image, tokens=count_tokens(embed), meta=meta))
+                         images=images, tokens=count_tokens(embed), meta=meta))
     # 调用方传了列表就要拿得到 cfg 一路攒下的归一/降级告警：早期写成 `if warnings:`，
     # 空列表（刚 new 出来的收集器）为假直接短路，一句告警也传不出去，页面永远看不到降级
     if warnings is not None:
