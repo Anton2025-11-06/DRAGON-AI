@@ -1,0 +1,132 @@
+# LightRAG 原版抽取Prompt（源码 prompt.py，英文原版，分 System + User，不是单段JSON输出）
+
+>
+> LightRAG**不是直接输出JSON**，默认用自定义分隔符 `tuple_delimiter="<|>"` 做元组格式；内置**few-shot示例**，并且有**二次补抽prompt（entity_continue_extraction）**，专门召回第一轮漏掉的实体关系，这是和你当前prompt最大区别。
+
+## 1. entity_extraction_system_prompt（系统提示）
+
+```
+---Role---
+You are a Knowledge Graph Specialist responsible for extracting entities and relationships from the input text.
+
+---Goal---
+Extract entities and relationships that are present in the provided text.
+You must extract all entities and relationships that are explicitly mentioned in the text.
+Do not infer entities or relationships that are not directly supported by the input text.
+
+---Entity Types---
+Use only these entity types: [{entity_types}]
+
+---Steps---
+1. Entity Extraction
+Identify all entities in the text.
+For each entity:
+- entity_name: entity name, same language as input text
+- entity_type: one of the defined entity types
+- entity_description: comprehensive description of entity attributes and activities
+Format: ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>)
+
+2. Relationship Extraction
+From extracted entities, find all pairs clearly related.
+For each relationship pair:
+- source_entity
+- target_entity
+- relationship_description: why they are related
+- relationship_keywords: short keywords summarizing relation
+- relationship_strength: 0~10 numeric score of relation strength
+Format: ("relationship"{tuple_delimiter}<source>{tuple_delimiter}<target>{tuple_delimiter}<desc>{tuple_delimiter}<keywords>{tuple_delimiter}<strength>)
+
+---Rules---
+1. Only use entities discovered in the current text chunk.
+2. Do not create entities/relations that are not present in text.
+3. Decompose multi-entity (n-ary) relationships into multiple binary pairs.
+4. Output in the defined format only. No extra explanation.
+5. Output {completion_delimiter} at end of response.
+
+---Examples---
+{examples}
+```
+
+## 2. entity_extraction_user_prompt（用户侧，传入文本）
+
+```
+Now extract entities and relationships from the following text:
+{input_text}
+```
+
+## 3. 二次补抽 prompt（entity_continue_extraction，LightRAG特色）
+
+第一轮抽取完成后，再调用一次，专门补漏：
+
+```
+MANY entities and relationships were missed in the last extraction.
+Extract entities and relationships again from this text, find all missing ones.
+Follow exactly same rules and format as before.
+Text: {input_text}
+```
+
+## 4. 默认实体类型
+
+```
+DEFAULT_ENTITY_TYPES = ["organization", "person", "geo", "event", "category"]
+```
+
+# 📌 你的Prompt vs LightRAG 核心差异
+
+| 项目 | 你的Prompt | LightRAG |
+| --- | --- | --- |
+| 输出格式 | JSON（方便代码直接解析） | 自定义分隔符元组`("entity"< |
+| 抽取轮次 | 单次抽取，没有补漏 | **两轮抽取：第一轮+二次补漏prompt**，显著提升召回 |
+| 关系字段 | head/tail/relation | source/target + 关系描述 + 关键词 + strength强度打分 |
+| 示例few-shot | 无Few-shot样例 | 内置few-shot例子，模型更容易对齐格式 |
+| 字段 | `chunk_indexes`（你业务新增，用于绑定切片） | 原生不带chunk索引，LightRAG后续在代码层关联chunk |
+| 约束 | 宁缺毋滥，禁止推测 | 同样禁止编造，但目标是**尽可能全提取** |
+
+>
+> 你的场景：**RAG知识库、多chunk入库、需要绑定chunk_indexes**，完全没必要改成LightRAG的`<|>`分隔符；JSON格式对你的python/neo4j链路更友好。
+
+# ✅ 优化建议：基于你现有prompt，吸收LightRAG优点（不改JSON输出）
+
+1. 增加**第二轮补漏prompt**（LightRAG最核心增益，提升实体召回）
+2. 关系字段增加 `keywords`、`strength`（可选，用于图检索权重）
+3. 增加few-shot示例，减少模型JSON格式错乱
+4. 保留你独有的 `chunk_indexes`
+
+## 优化后的中文版本（可直接替换你的 DEFAULT_GRAPH_EXTRACT_PROMPT）
+
+```
+DEFAULT_GRAPH_EXTRACT_PROMPT = (
+    "你是知识图谱抽取专家，从文档片段提取实体与实体间关系。\n"
+    "实体类型只能从这些里选：{entity_types}；归类不出的统一写成「其他」。\n"
+    "规则：\n"
+    "1. 只提取原文**明确存在**的实体和关系，禁止推测、脑补原文不存在信息；\n"
+    "2. 多元关系拆成多个二元头尾关系；\n"
+    "3. chunk_indexes填写实体出现的切片编号，与下面[切片N]对齐；\n"
+    "4. 输出严格JSON，不要任何解释、前言、注释。\n\n"
+    "输出JSON结构：\n"
+    '{"entities": [{"name": "实体名", "type": "实体类型", "summary": "一句话说明", "chunk_indexes": [0]}],\n'
+    ' "relations": [{"head": "头实体名", "tail": "尾实体名", "relation": "关系描述", "keywords": ["关键词"], "strength": 5}]}\n'
+    "strength取值0~10，代表关系紧密程度；keywords放1~3个概括该关系的词。\n\n"
+    "文档片段：\n{content}"
+)
+
+# 新增：二次补漏prompt（模仿LightRAG continue extraction）
+GRAPH_EXTRACT_CONTINUE_PROMPT = (
+    "上一轮抽取遗漏了很多实体和关系。\n"
+    "重新阅读文档片段，找出所有漏掉的实体和关系，严格遵守同样规则、同样JSON格式。\n"
+    "不要重复已经提取的内容，只补充新增实体/关系。\n"
+    "实体类型只能从这些里选：{entity_types}\n"
+    "chunk_indexes填写实体出现的切片编号。\n\n"
+    "文档片段：\n{content}"
+)
+```
+
+>
+> 工程逻辑：
+>
+>
+> 1. 第一次调用 `DEFAULT_GRAPH_EXTRACT_PROMPT` 拿到结果
+> 2. 再调用 `GRAPH_EXTRACT_CONTINUE_PROMPT` 做补抽
+> 3. 代码合并两个结果，做实体去重（名称归一），存入Neo4j
+
+要不要我顺便写**实体归一合并的简易Python代码**（合并两轮抽取结果，合并同名实体）适配你的DragonAI？
