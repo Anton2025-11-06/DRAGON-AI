@@ -66,20 +66,20 @@ async def proxy(service_name: str, path: str, request: Request):
     # 服务发现走进程级单例（与 common_mysql 同一口径）；Nacos 不可用即 503，
     # 没有静态实例表可回退
     target = None
-    # try:
-    #     target = await nacos_client.get_one_healthy_instance(service_name)
-    # except Exception as e:
-    #     log.warning(f"Nacos discovery failed for {service_name}: {e}")
-    # if target is None:
-    #     raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
-    if service_name == "service_workflow":
-        target = ("127.0.0.1", 9003)
-    if service_name == "service_login":
-        target = ("127.0.0.1", 9004)
-    if service_name == "service_system":
-        target = ("127.0.0.1", 9001)
-    if service_name == "service_rag":
-        target = ("127.0.0.1", 9002)
+    try:
+        target = await nacos_client.get_one_healthy_instance(service_name)
+    except Exception as e:
+        log.warning(f"Nacos discovery failed for {service_name}: {e}")
+    if target is None:
+        raise HTTPException(status_code=503, detail=f"服务 {service_name} 无可用实例")
+    # if service_name == "service_workflow":
+    #     target = ("127.0.0.1", 9003)
+    # if service_name == "service_login":
+    #     target = ("127.0.0.1", 9004)
+    # if service_name == "service_system":
+    #     target = ("127.0.0.1", 9001)
+    # if service_name == "service_rag":
+    #     target = ("127.0.0.1", 9002)
 
     ip, port = target
     url = f"http://{ip}:{port}/{path}"
@@ -118,15 +118,15 @@ async def ws_proxy(websocket: WebSocket, service_name: str, path: str):
     # 服务发现走进程级单例；拿不到实例即以 4404 关闭连接（WS 里抛 HTTPException 无意义）
     target = None
     try:
-        # target = await nacos_client.get_one_healthy_instance(service_name)
-        if service_name == "service_workflow":
-            target = ("127.0.0.1", 9003)
-        if service_name == "service_login":
-            target = ("127.0.0.1", 9004)
-        if service_name == "service_system":
-            target = ("127.0.0.1", 9001)
-        if service_name == "service_rag":
-            target = ("127.0.0.1", 9002)
+        target = await nacos_client.get_one_healthy_instance(service_name)
+        # if service_name == "service_workflow":
+        #     target = ("127.0.0.1", 9003)
+        # if service_name == "service_login":
+        #     target = ("127.0.0.1", 9004)
+        # if service_name == "service_system":
+        #     target = ("127.0.0.1", 9001)
+        # if service_name == "service_rag":
+        #     target = ("127.0.0.1", 9002)
     except Exception as e:
         log.warning(f"Nacos discovery failed for {service_name}: {e}")
 
