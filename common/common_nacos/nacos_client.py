@@ -148,7 +148,7 @@ class NacosClient:
                                           weight=self.weight,
                                           enabled=True,
                                           healthy=True,
-                                          ephemeral=False
+                                          ephemeral=True
                                           ))
         if success:
             log.info(f"Service {self.service_name} registered to Nacos at {self.ip}:{self.port}")
