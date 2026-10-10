@@ -136,17 +136,17 @@ def create_app(service_name: str,
     async def lifespan(app: FastAPI):
         # 与 mysql_client 同一用法：直接用模块级单例，不再自行构造/挂 app.state
         await nacos_client.init(
-            user_name=os.environ.get("nacos_name", Config.nacos_name),
-            password=os.environ.get("nacos_password", Config.nacos_password),
-            server_address=os.environ.get("nacos_server_address", Config.nacos_server_address),
+            user_name=Config.nacos_name,
+            password=Config.nacos_password,
+            server_address=Config.nacos_server_address,
             service_name=service_name,
             # TODO 自动获取 实例IP
             ip=get_container_default_ip(),
             port=port,
-            namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
+            namespace_id=Config.nacos_namespace_id,
             log_level=Config.nacos_log_level,
         )
-        # await nacos_client.register_service()
+        await nacos_client.register_service()
         yml_config = await nacos_client.get_config_content(service_name)
 
         # 暴露给业务扩展（如检索参数、向量化配置），保持 app.state.config 全服务可用

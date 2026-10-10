@@ -86,9 +86,9 @@ class NacosClient:
         # 建连接前先把实际生效的参数打一行：地址端口填成 gRPC 口（8848 误写成 9848）这类错，
         # 只会看到 SDK 报 get access token failed，完全看不出真因；凭据只打印是否非空，不落明文。
         log.info(f"Nacos connecting: address={server_address}, "
-                 f"namespace={namespace_id or 'public'}, "
-                 f"user={user_name or '(anonymous)'}, "
-                 f"password={'set' if password else 'empty'}, ")
+                 f"namespace={namespace_id}, "
+                 f"user={user_name}, "
+                 f"password={password}")
                  # f"register={service_name or '-'}@{ip or 'auto'}:{port or '-'}")
 
         client_config = (ClientConfigBuilder()
