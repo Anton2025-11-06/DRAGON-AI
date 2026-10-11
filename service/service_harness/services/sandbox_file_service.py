@@ -1,0 +1,358 @@
+# -*- coding: utf-8 -*-
+"""harness 沙箱文件代理：把每用户的 OpenSandbox 工作区代理成文件浏览器四口。
+
+与旧 demo（service_workflow 的 sandbox_service，本地目录版）保持同一套响应
+形状（files / file / upload / download），前端切换只换 URL 不换结构。
+
+执行通道（agentscope 官方文档确认的口径，v2.0.9）：
+- ``workspace.get_backend()`` 拿到绑定沙箱的执行后端；
+- ``Bash(backend=...)`` 在沙箱里执行 shell——镜像契约必含 python3 / tar /
+  base64（agentscope 文件工具自身就靠它们），元信息用 python3 单行输出
+  JSON、路径经环境变量传入（杜绝 shell 注入）；
+- 上传/下载走 base64-over-exec（与 agentscope 快照机制同款通道），分块
+  绕开 Linux 单命令行参数 ~128KiB 的上限。
+
+workspace 生命周期（与 worker 的轮次执行共享同一个沙箱）：
+- workspace_id = ``harness-{user_id}``（workspace_factory 同一约定），attach
+  幂等（沙箱还在时走 reattach+resume 快路径）；
+- 进程级缓存 + 空闲 TTL 只回收引用，**不调 close**——close 可能是销毁性
+  语义（demo teardown 选 pause 而非 close 即此因），沙箱本体由 worker 轮次
+  收尾的 pause 管理；
+- 同一用户首次 attach 加锁去重（冷启动 bootstrap 是分钟级，不能并发重复）。
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import posixpath
+import secrets
+import shlex
+
+from common.common_log.log_init import log
+
+# ==================== 业务异常（router 转 400） ====================
+
+
+class HarnessSandboxError(Exception):
+    """沙箱文件操作的预期内失败（路径非法 / 后端未配置 / 命令失败）。"""
+
+
+# ==================== 大小限制 ====================
+
+READ_TEXT_MAX = 200 * 1024          # 文本预览截断（字节）
+UPLOAD_MAX = 20 * 1024 * 1024       # 上传上限（分块传输，超过明显变慢）
+DOWNLOAD_MAX = 50 * 1024 * 1024     # 下载上限（单次 base64 回传）
+_UPLOAD_CHUNK = 64 * 1024           # 单条命令携带的 base64 字符数（< 128KiB）
+
+# workspace 连接缓存的空闲回收窗（秒）：只丢引用，沙箱生命周期不归本进程管
+_WS_TTL_S = 600.0
+
+# user_id -> {"workspace", "bash", "workdir", "expire"}（backend/bash 绑定后不变）
+_WS_CACHE: dict[int, dict] = {}
+_WS_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+# ==================== workspace 连接（进程级缓存） ====================
+
+
+async def _get_entry(user_id: int) -> dict:
+    """取（或 attach）当前用户的沙箱执行入口：Bash 工具 + workdir。
+
+    build_workspace 幂等（reattach 快路径）；冷启动（沙箱从未建过）是分钟级
+    bootstrap——同一用户的并发请求在此处排队，只 attach 一次。
+    """
+    loop = asyncio.get_running_loop()
+    entry = _WS_CACHE.get(user_id)
+    if entry and entry["expire"] > loop.time():
+        entry["expire"] = loop.time() + _WS_TTL_S
+        return entry
+
+    lock = _WS_LOCKS.setdefault(user_id, asyncio.Lock())
+    async with lock:
+        entry = _WS_CACHE.get(user_id)  # 双检：排队期间可能已被别的请求建好
+        if entry and entry["expire"] > loop.time():
+            entry["expire"] = loop.time() + _WS_TTL_S
+            return entry
+
+        from agentscope.tool import Bash
+
+        from service.service_harness.agent.workspace_factory import (
+            build_workspace, workspace_id_of,
+        )
+
+        workspace = await build_workspace({"user_id": user_id})
+        backend = workspace.get_backend()
+        entry = {
+            "workspace_id": workspace_id_of(user_id),
+            "workspace": workspace,
+            "bash": Bash(backend=backend),
+            "workdir": str(getattr(workspace, "workdir", "") or "/workspace"),
+            "expire": loop.time() + _WS_TTL_S,
+        }
+        _WS_CACHE[user_id] = entry
+        return entry
+
+
+async def _run(entry: dict, command: str) -> str:
+    """在沙箱里执行一条命令并取 stdout 文本（失败抛业务异常）。
+
+    Bash 工具失败（非零 exit / 内部异常）时 state 会带 ERROR，错误文本通常
+    在 chunk 里——统一包装成 HarnessSandboxError，router 侧转 400。
+    """
+    try:
+        chunk = await entry["bash"](command=command)
+    except HarnessSandboxError:
+        raise
+    except Exception as e:  # noqa: BLE001  agentscope 内部异常 / 参数名不符
+        log.warning("harness sandbox exec failed: {}", e)
+        raise HarnessSandboxError(f"沙箱执行通道异常：{e}") from e
+    state = getattr(chunk, "state", None)
+    state_name = str(getattr(state, "name", state) or "")
+    text = _chunk_text(chunk)
+    if "ERROR" in state_name.upper():
+        raise HarnessSandboxError(f"沙箱命令失败：{(text or state_name)[:300]}")
+    return text
+
+
+def _chunk_text(chunk) -> str:
+    """把 ToolChunk 的 content blocks 拼成纯文本（非文本块跳过）。"""
+    parts: list[str] = []
+    for block in getattr(chunk, "content", None) or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts)
+
+
+# ==================== 路径安全（全部相对 workdir） ====================
+
+
+def _safe_rel(path: str) -> str:
+    """前端路径 → workdir 相对路径；逃逸（../、绝对路径、反斜杠）即拒。"""
+    rel = (path or "").strip().replace("\\", "/").strip("/")
+    if not rel:
+        return ""
+    norm = posixpath.normpath(rel)
+    if norm in (".", ""):
+        return ""
+    if norm == ".." or norm.startswith("../") or norm.startswith("/"):
+        raise HarnessSandboxError("非法路径")
+    return norm
+
+
+def _join_rel(dir_path: str, filename: str) -> str:
+    """上传目标 = 目录 + 净化后的文件名（basename 防穿越）。"""
+    name = posixpath.basename((filename or "").replace("\\", "/"))
+    if not name or name in (".", ".."):
+        raise HarnessSandboxError("非法文件名")
+    rel = _safe_rel(dir_path)
+    return f"{rel}/{name}" if rel else name
+
+
+def _q(value: str) -> str:
+    """shell 单参数安全引号（workdir/相对路径/脚本统一走这里）。"""
+    return shlex.quote(value)
+
+
+# ==================== 沙箱内 python 辅助脚本（python3 -c） ====================
+
+# 列目录：输出 [{name,type,size,mtime}] 的 JSON；目录不存在输出 {"error":..}
+_LS_SCRIPT = """import os,json,time
+base=os.environ['HP']
+if not os.path.isdir(base):
+    print('{"error":"not_dir"}')
+else:
+    items=[]
+    for n in sorted(os.listdir(base)):
+        p=os.path.join(base,n)
+        try:
+            st=os.stat(p)
+        except OSError:
+            continue
+        items.append({'name':n,'type':'dir' if os.path.isdir(p) else 'file','size':st.st_size,'mtime':time.strftime('%Y-%m-%d %H:%M',time.localtime(st.st_mtime))})
+    print(json.dumps(items))"""
+
+# 读文件：NUL 预检分二进制/文本；文本截断打标；二进制只回标记不回内容
+# （f-string 内插限额；脚本内的 %d/%s 是沙箱里 python 自己的格式化，不参与外层）
+_READ_SCRIPT = f"""import os
+p=os.environ['HP']
+if not os.path.isfile(p):
+    print('ERR:not_file')
+else:
+    d=open(p,'rb').read()
+    if b'\\x00' in d[:4096]:
+        print('BIN:%d' % len(d))
+    else:
+        t=d[:{READ_TEXT_MAX}].decode('utf-8','replace')
+        print('TXT:'+t+('\\n[文件较大，已截断]' if len(d)>{READ_TEXT_MAX} else ''))"""
+
+
+# ==================== 四口实现 ====================
+
+
+async def list_dir(login_user: dict, path: str = "") -> dict:
+    """目录列表（响应形状与旧沙箱口一致，前端零改动）。"""
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    rel = _safe_rel(path)
+    out = await _run(
+        entry,
+        f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_LS_SCRIPT)}",
+    )
+    import json
+
+    try:
+        items = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise HarnessSandboxError("沙箱目录读取失败") from None
+    if isinstance(items, dict) and items.get("error") == "not_dir":
+        raise HarnessSandboxError("目录不存在")
+    return {
+        "workspace": entry["workspace_id"],
+        "current_path": rel,
+        "parent_path": posixpath.dirname(rel),
+        "items": items,
+    }
+
+
+async def read_text_file(login_user: dict, path: str) -> dict:
+    """查看文件：文本截断预览；二进制只回标记（内容走下载口）。"""
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    rel = _safe_rel(path)
+    out = await _run(
+        entry,
+        f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_READ_SCRIPT)}",
+    )
+    body = out[4:] if out[:4] in ("TXT:", "BIN:") else ""
+    if out.startswith("ERR:"):
+        raise HarnessSandboxError("文件不存在")
+    if out.startswith("BIN:"):
+        return {"path": rel, "name": posixpath.basename(rel),
+                "size": int(body or 0), "truncated": False,
+                "content": "（二进制文件，请下载后查看）", "binary": True}
+    return {"path": rel, "name": posixpath.basename(rel),
+            "size": len(body.encode("utf-8", "replace")),
+            "truncated": "[文件较大，已截断]" in body,
+            "content": body, "binary": False}
+
+
+async def save_file(login_user: dict, dir_path: str, filename: str,
+                    content: bytes) -> dict:
+    """上传：base64 分块写临时文件再解码落位（绕开单参数 128KiB 上限）。"""
+    if len(content) > UPLOAD_MAX:
+        raise HarnessSandboxError(f"文件超过 {UPLOAD_MAX // 1024 // 1024}MB 限制")
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    target = _join_rel(dir_path, filename)
+    parent = posixpath.dirname(target)
+    b64 = base64.b64encode(content).decode("ascii")
+    tmp = f".harness_up_{secrets.token_hex(8)}"
+    cd = f"cd {_q(entry['workdir'])}"
+    try:
+        for i in range(0, len(b64), _UPLOAD_CHUNK):
+            part = b64[i:i + _UPLOAD_CHUNK]
+            await _run(entry, f"{cd} && printf '%s' {part} >> {tmp}")
+        mkdir = f"mkdir -p {_q(parent)}" if parent else "true"
+        await _run(entry, f"{cd} && {mkdir} && base64 -d {tmp} > {_q(target)}")
+    finally:
+        # 幂等清理：成功失败都删临时文件（失败只记日志不掩盖原异常）
+        try:
+            await _run(entry, f"{cd} && rm -f {tmp}")
+        except HarnessSandboxError as e:
+            log.warning("harness sandbox temp cleanup failed: {}", e)
+    return {"name": posixpath.basename(target), "size": len(content)}
+
+
+async def _stat_size(entry: dict, rel: str) -> int:
+    """文件字节数（下载前的限额检查；目录返回 0）。"""
+    out = await _run(
+        entry, f"cd {_q(entry['workdir'])} && wc -c < {_q(rel)} 2>/dev/null || echo 0")
+    try:
+        return int(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def read_bytes(login_user: dict, path: str) -> tuple[bytes, str, bool]:
+    """下载单文件：base64 回传（size 检查在先）。
+
+    返回 (字节, 文件名, 是否目录)——目录场景由 pack_dir 走 zip。
+    """
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    rel = _safe_rel(path)
+    if not rel:
+        raise HarnessSandboxError("非法路径")
+    if await _stat_size(entry, rel) > DOWNLOAD_MAX:
+        raise HarnessSandboxError(f"文件超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
+    out = await _run(entry,
+                     f"cd {_q(entry['workdir'])} && base64 {_q(rel)} 2>/dev/null "
+                     f"|| echo ERR")
+    if not out or out.strip() == "ERR":
+        raise HarnessSandboxError("文件不存在")
+    data = base64.b64decode("".join(out.split()))
+    if not data:
+        raise HarnessSandboxError("文件不存在或为空")
+    return data, posixpath.basename(rel), False
+
+
+async def pack_dir(login_user: dict, path: str) -> tuple[bytes, str, bool]:
+    """下载目录：tar.gz + base64 回传（响应头按 zip 呈现给浏览器）。"""
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    rel = _safe_rel(path)
+    if not rel:
+        raise HarnessSandboxError("非法路径")
+    full = await _run(entry,
+                      f"cd {_q(entry['workdir'])} && tar cz {_q(rel)} 2>/dev/null "
+                      f"| base64")
+    body = "".join(full.split())
+    if not body:
+        raise HarnessSandboxError("目录不存在或为空")
+    data = base64.b64decode(body)
+    if len(data) > DOWNLOAD_MAX:
+        raise HarnessSandboxError(f"目录超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
+    return data, f"{posixpath.basename(rel)}.zip", True
+
+
+async def download(login_user: dict, path: str) -> tuple[bytes, str, bool]:
+    """下载分流：文件回原样字节，目录打包 tar.gz（文件名带 .zip）。
+
+    判型在沙箱内一条 test 完成（D=目录/F=文件/N=不存在），避免本地猜测
+    与沙箱真实状态不一致。返回 (字节, 下载名, 是否目录)。
+    """
+    entry = await _get_entry(int(login_user.get("user_id") or 0))
+    rel = _safe_rel(path)
+    if not rel:
+        raise HarnessSandboxError("非法路径")
+    kind = await _run(
+        entry,
+        f"cd {_q(entry['workdir'])} && (test -d {_q(rel)} && echo D "
+        f"|| (test -f {_q(rel)} && echo F || echo N))",
+    )
+    marker = (kind.strip().splitlines() or ["N"])[-1][-1:]
+    if marker == "D":
+        return await pack_dir(login_user, path)
+    if marker == "F":
+        return await read_bytes(login_user, path)
+    raise HarnessSandboxError("文件或目录不存在")
+
+
+# ==================== workspace 重置（会话清理口，M3-5） ====================
+
+
+async def reset_workspace(login_user: dict) -> dict:
+    """清空当前用户的沙箱工作区（WorkspaceBase.reset，官方 Lifecycle 接口）。
+
+    场景：用户要一个干净的探索环境（旧产物/误传文件全清）；会话与消息不
+    动，下一轮对话在同一 workspace_id 上继续。执行后本进程的连接缓存一并
+    失效（reset 语义 = 回到初始，缓存的 backend 不可复用）。
+    """
+    user_id = int(login_user.get("user_id") or 0)
+    entry = await _get_entry(user_id)
+    workspace = entry["workspace"]
+    reset = getattr(workspace, "reset", None)
+    if not callable(reset):
+        raise HarnessSandboxError("当前 agentscope 版本不支持 workspace reset")
+    try:
+        await reset()
+    except Exception as e:  # noqa: BLE001
+        raise HarnessSandboxError(f"沙箱重置失败：{e}") from e
+    _WS_CACHE.pop(user_id, None)
+    return {"workspace": entry["workspace_id"], "reset": True}
