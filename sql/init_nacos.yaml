@@ -95,8 +95,8 @@ arq_workflow:
   redis:
     url: redis://127.0.0.1:26739/0
     password: Jzh@616294
-
-# ==================== 知识库（RAG）模块 ====================
+0
+# a ==================== 知识库（RAG）模块 ====================
 # service_rag（API 进程）与 arq_ragflow（摄取/图谱 worker）必须读到同一套
 # mysql/storage/es/neo4j：上传在 API 进程落 OSS、解析在 worker 取文件，两处存储后端
 # 不一致就会出现「上传成功、worker 找不到文件」；两段的 es/neo4j 亦必须同实例，
@@ -225,3 +225,53 @@ arq_graphflow:
     api_key: ''
     poll_interval: 3
     timeout: 1800
+
+
+# ==================== 深度探索（harness）模块 ====================
+# service_harness（API 进程）与 arq_harness（对话轮次 worker）必须读到同一套
+# mysql/redis/opensandbox/agentscope：会话与消息行在 API 进程写、轮次执行
+# 在 worker 读；opensandbox 与 AgentState 存储两侧不一致会出现「API 建会话、
+# worker 连不到沙箱」的错配。
+service_harness:
+  redis:
+    host: 127.0.0.1
+    port: 26379
+    password: ""
+    max_connections: 50
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    user: root
+    password: Jzh@616294
+    database: ai3
+    pool_size: 10
+    max_overflow: 20
+    echo: False
+  # OpenSandbox 云沙箱（智能体的执行环境，每用户一个 workspace，文件跨会话
+  # 保留）。domain 留空 = 未部署：发消息时报「沙箱未配置」，不连陌生默认
+  # 地址；自托管容器（docker-compose 的 opensandbox 服务）填 http://opensandbox:8006。
+  opensandbox:
+    domain: ''
+    api_key: ''                    # server 开了鉴权才填
+    # protocol: http               # http | https
+    # image: ''                    # 沙箱镜像，留空用 opensandbox 默认（含 agentscope gateway）
+    # request_timeout_seconds: 600 # SDK 单请求超时，对齐 agentscope 引导命令超时（首建 bootstrap 分钟级，不能比它短）
+    # timeout_seconds: 3600        # 单条命令/首次引导上限（bootstrap 分钟级）
+  # agentscope AgentState 的 RedisStorage（跨轮记忆窗口/HITL 待答上下文）：
+  # host/port/db/password 四键全配才生效，缺省回落 redis 段 + db=1（与业务
+  # key 隔离）
+  agentscope:
+    host: 127.0.0.1
+    port: 26379
+    db: 1
+    password: Jzh@616294
+  # 技能 zip 的解压缓存（worker 本地磁盘）；留空回落系统临时目录
+  skills:
+    dir: ''
+
+# arq harness worker 的队列 Redis：整段未配置时生产端与 worker 双侧都回落
+# arq_workflow 段（同一 Redis），不会出现「任务投了没人消费」。
+arq_harness:
+  redis:
+    url: redis://127.0.0.1:26739/0
+    password: Jzh@616294

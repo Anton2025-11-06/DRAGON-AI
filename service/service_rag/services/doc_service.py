@@ -22,20 +22,23 @@
 3. **批量逐项回执**：上传与重试一批文档时，一个文件失败不回滚其它文件（批量场景里
    成 10 个失败 2 个是常态）。上传按批走（一批建行 + 并发落存储 + 并发入队）而不是
    逐文件串行——多选上传的耗时几乎全在等上一个文件的网络往返；回执仍然一项一个文件。
-4. **列表不返回正文**：切片完整正文只在 tb_document_chunk（SPEC §10.2 里 ES 的 content
-   是给检索用的副本），列表页要看得动就翻页到切片管理，避免一次列表拖几百 KB。
+4. **正文只在 ES**：分块正文的唯一存放处是 ES 的 content（SPEC §10.2 原「ES 是
+   检索副本」的口径已反转），MySQL 切片行只留元数据（chunk_id 契约、media_url 清理依据、
+   vectorized 断点位），content/embed_text 两列退役写空串占位。列表不返回正文，
+   要看得动就走正文预览或切片管理，两边都直接读 ES。
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 from datetime import datetime
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import delete, func, or_, select, update
 
 from common.common_constants import rag_constant as RC
-from common.common_es import es_client, to_json
+from common.common_es import es_client, from_json, to_json
 from common.common_es.index_mapping import es_doc_id
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -69,15 +72,84 @@ TITLE_MAX = 255
 FILE_NAME_MAX = 255
 MIME_MAX = 128
 
-# 批量上传的节流：一批多少个文件、一批里并发多少路。分批是为了别让一次请求在 MySQL 上
-# 挂着长事务（开放 API 单次可达 100 个文件）；并发上限同时就是「最多有多少份原件停在
-# 内存里」——存储 PUT 慢在往返，并发几路就已接近吃满带宽，再开高也不会更快
-UPLOAD_BATCH = 8
-UPLOAD_CONCURRENCY = 6
-
 
 class RagDocService:
     """文档与切片的管理层（全静态方法，router 直接 await）"""
+
+    @staticmethod
+    def _to_dict(row: Document) -> dict:
+        """ORM 行 → 前端契约字典。"""
+        resp = DocumentResp(
+            id=row.doc_id, kb_id=row.kb_id, title=row.doc_name, file_name=row.file_name,
+            file_ext=row.file_ext, file_size=int(row.file_size or 0),
+            content_type=row.content_type, media_type=row.media_type,
+            parser_engine=row.parser_engine, parse_version=int(row.parse_version or 0),
+            status=row.status,
+            status_label=RC.DOC_STATUS_LABELS.get(row.status, row.status),
+            vectorized=bool(row.vectorized), graph_state=int(row.graph_state or 0),
+            graph_state_label=RC.KG_STATE_LABELS.get(int(row.graph_state or 0), None),
+            chunk_count=int(row.chunk_count or 0), page_count=int(row.page_count or 0),
+            media_duration=int(row.media_duration or 0), media_summary=row.media_summary,
+            task_id=row.task_id, error_msg=row.error_msg,
+            created_by=int(row.created_by or 0),
+            create_time=_fmt(row.create_time), update_time=_fmt(row.update_time))
+        return resp.dump()
+
+    @staticmethod
+    def _es_hit_to_dict(hit: dict) -> dict:
+        """ES 命中 → 前端契约字典（分块正文的唯一存放处就是 ES，不再回 MySQL 拼）。
+
+        embedText/blockId/mediaType/tokenCount 是旧 MySQL 行里才有的列位：正文只在
+        ES 后没有独立于正文的送模文本可回，块编号已进 extra，模态由 chunkType 表达，
+        字数也不再维护——字段留在契约里恒空值，前端本就不渲染它们。
+        ES 里能查到即已向量化，vectorized 恒 True。
+        """
+        src = hit.get("_source") or {}
+        chunk_type = str(src.get(RC.ES_FIELD_TYPE) or RC.CHUNK_TYPE_TEXT)
+        return ChunkResp(
+            id=int(src.get(RC.ES_FIELD_CHUNK) or 0),
+            kb_id=int(src.get(RC.ES_FIELD_KB) or 0),
+            doc_id=int(src.get(RC.ES_FIELD_DOC) or 0),
+            chunk_index=int(src.get(RC.ES_FIELD_INDEX) or 0),
+            chunk_type=chunk_type,
+            chunk_type_label=RC.CHUNK_TYPE_LABELS.get(chunk_type, chunk_type),
+            content=str(src.get(RC.ES_FIELD_CONTENT) or ""),
+            media_url=src.get(RC.ES_FIELD_MEDIA_URL) or None,
+            title_path=src.get(RC.ES_FIELD_TITLE_PATH) or None,
+            sheet_name=src.get(RC.ES_FIELD_SHEET) or None,
+            page_num=int(src.get(RC.ES_FIELD_PAGE) or 0),
+            available=bool(src.get(RC.ES_FIELD_AVAILABLE)),
+            vectorized=True,
+            extra=from_json(src.get(RC.ES_FIELD_SOURCE)),
+            create_time=str(src.get(RC.ES_FIELD_CREATE_TIME) or "") or None,
+        ).dump()
+
+    @staticmethod
+    async def _attach_media_urls(kb: Optional[KnowledgeBase], items: list[dict],
+                                 paths: dict[int, str]) -> None:
+        """详情行补一条**原件**的可访问地址（本地后端没配 public_base 就留空）。
+
+        只在 detail() 用：列表已改成表格、不自动加载多媒体，预览走 original_preview。
+        doc 型库里内嵌图片的地址在切片层，那一份随 ES 的 media_url（匿名 URL）直接可渲染。
+        """
+        if kb is None or not items:
+            return
+        for item in items:
+            item["mediaUrl"] = await _sign(paths.get(int(item.get("id") or 0), ""))
+
+    @staticmethod
+    async def _kb_of(kb_id: int) -> KnowledgeBase:
+        async with mysql_client.get_session() as session:
+            kb = await KnowledgeBaseService.load(session, kb_id)
+            if kb is None:
+                raise ValueError("知识库不存在")
+            return kb
+
+    @staticmethod
+    def _action_result(items: list[dict]) -> dict:
+        """批量动作的统一回执。"""
+        ok = sum(1 for i in items if i.get("taskId"))
+        return {"accepted": ok, "rejected": len(items) - ok, "items": items}
 
     # ==================== 一、加载与鉴权 ====================
 
@@ -281,44 +353,44 @@ class RagDocService:
     async def content_preview(login_user: dict, doc_id: int) -> dict:
         """正文预览（按 chunk_index 顺序拼该文档的**全部**切片，不截断）。
 
-        只读 MySQL 的切片表，不回 ES：预览要看的是「我们存下来的原文」，
-        而 ES 那份是为检索准备的副本（可能被截断、也可能还没刷盘）。
+        只读 ES：分块正文的唯一存放处就是 ES 的 content（MySQL 切片行不再存正文）。
+        文档在「向量化中」的窗口里 ES 还没写完，预览就先空着——完成态才是这个
+        入口的正常打开时机；真出问题先看文档状态，不是这个接口。
 
         带媒体切片在正文里补一条地址（需求 13 的「地址回填到多媒体原位置」）：
-        库里存的是对象名，签名地址会过期，所以只能在这一刻现签，不进也不落库。
-        排版是**地址在上、描述在下**：先看得到图，再读它说明什么。
-        音视频不用 markdown 图片语法（那不是个能播的东西），给一条可点开的链接。
+        ES 里的 media_url 本来就是匿名可访问 URL（写入时已换好、不带签名凭证），
+        直接渲染不必二次签名。排版是**地址在上、描述在下**：先看得到图，再读它
+        说明什么。音视频不用 markdown 图片语法（那不是个能播的东西），给一条可
+        点开的链接；一个切片可覆盖多张图，逐张摊开。
 
         ``truncated`` 恒为 False：字段留着只为了兼容已经上线的前端，不再有意义。
-        大文档（几万片）一次拼回全部正文会同时占住内存与响应体，真出问题就
-        在这里加回长度上限。
+        超过 ES 单次拉取上限（10000 片）的巨型文档只拼到前一万片——真出问题
+        就在这里加回长度上限。
         """
         doc = await RagDocService.require(login_user, doc_id, ACTION_VIEW)
-        async with mysql_client.get_session() as session:
-            rows = (await session.execute(
-                select(DocumentChunk.content, DocumentChunk.media_url)
-                .where(DocumentChunk.doc_id == int(doc_id))
-                .order_by(DocumentChunk.chunk_index.asc()))).all()
+        hits = await es_client.list_by_doc(int(doc_id), int(doc.kb_id))
         parts: list[str] = []
-        for one_text, media in rows:
-            body = str(one_text or "")
-            url = await _sign(str(media or "")) if media else None
-            if url:
-                ref = str(media or "").rsplit("?", 1)[0]
+        for hit in hits:
+            src = hit.get("_source") or {}
+            body = str(src.get(RC.ES_FIELD_CONTENT) or "")
+            # 没增强时切片正文就是那一句占位词（[图片]/[音频]/[视频]），
+            # 与地址行一并写出来就是同一句话说两遍
+            if body.strip() in RC.MEDIA_KIND_PLACEHOLDERS.values():
+                body = ""
+            heads: list[str] = []
+            for url in (u for u in RC.split_media_refs(
+                    str(src.get(RC.ES_FIELD_MEDIA_URL) or "")) if u):
+                ref = url.rsplit("?", 1)[0]
                 ext = ref.rsplit(".", 1)[-1].lower() if "." in ref else ""
                 kind = RC.media_kind_of_ext(ext) or RC.MEDIA_KIND_IMAGE
                 label = RC.MEDIA_KIND_LABELS.get(kind, "图片")
                 # 图片走内联语法（渲染视图里能真看见），音视频只给链接：
                 # 写成 ![视频](url) 在 markdown 里只会退成一句 Alt 文字，不是能播的播放器
-                head = (f"![{label}]({url})" if kind == RC.MEDIA_KIND_IMAGE
-                        else f"[{label}]({url})")
-                # 没增强时切片正文就是那一句占位词（[图片]/[音频]/[视频]），
-                # 与地址行一并写出来就是同一句话说两遍
-                if body.strip() in RC.MEDIA_KIND_PLACEHOLDERS.values():
-                    body = ""
-                body = f"{head}\n{body}" if body.strip() else head
-            if body:
-                parts.append(body)
+                heads.append(f"![{label}]({url})" if kind == RC.MEDIA_KIND_IMAGE
+                             else f"[{label}]({url})")
+            section = "\n\n".join(heads + ([body] if body.strip() else []))
+            if section:
+                parts.append(section)
         text = "\n\n".join(parts)
         return {"docId": int(doc_id), "docName": doc.doc_name,
                 "totalChunks": int(doc.chunk_count or 0),
@@ -351,7 +423,7 @@ class RagDocService:
     @staticmethod
     async def upload(login_user: dict, kb_id: int, files: Sequence[Any], *,
                      open_api: bool = False) -> dict:
-        """批量上传：按库类型卡格式，分批建行 + 并发落存储 + 并发入队（不整批回滚）。
+        """批量上传：按库类型卡格式，一次建行拿齐 doc_id → 并发落存储 → 并发入队（不整批回滚）。
 
         :param files: FastAPI 的 UploadFile 序列（开放 API 同样是 multipart）
         :param open_api: True 时按 ``rag_constant.OPEN_API_MAX_FILES`` 限单次文件数（当前 100）——
@@ -369,14 +441,10 @@ class RagDocService:
         allowed = [str(e).lower() for e in RC.KB_TYPE_ALLOWED_EXTS.get(kb.kb_type, [])]
 
         results: list[dict] = []
-        # 分批走：一批一次事务、一批一次并发，既拿到批量的收益，又不至于在
-        # 开放 API 单次 100 个文件时把事务时长与内存驻留一起拉满
-        for start in range(0, len(items), UPLOAD_BATCH):
-            results.extend(await RagDocService._save_more(
-                kb, items[start:start + UPLOAD_BATCH], allowed, login_user))
+        results.extend(await RagDocService._save_more(kb, items, allowed, login_user))
         accepted = sum(1 for r in results if r.get("docId"))
         message = "；".join(f"{r['fileName']}: {r['message']}"
-                            for r in results if r.get("message"))
+                           for r in results if r.get("message"))
         return {"kbId": int(kb.kb_id), "accepted": accepted,
                 "rejected": len(results) - accepted, "items": results,
                 "message": message[:500] or None}
@@ -384,17 +452,7 @@ class RagDocService:
     @staticmethod
     async def _save_more(kb: KnowledgeBase, files: Sequence[Any], allowed: Sequence[str],
                          login_user: dict) -> list[dict]:
-        """一小批文件：校验 → 一次建行拿齐 doc_id → 并发落存储 → 一次提交回写路径 → 并发入队。
-
-        取代逐文件串行的写法：12 张图原本是 12 轮「开会话 + INSERT + PUT + UPDATE + 排队」
-        串着跑，每一轮都在等上一个文件的往返。现在 DB 只剩批量的几次，真正耗时的
-        存储 PUT 与排队按 ``UPLOAD_CONCURRENCY`` 并发。
-
-        顺序仍不能调：对象名里带 doc_id，没建行就没有名字；文件落不下去就把刚建的行
-        一并标删，否则留下一条永远解析失败的文档，用户只能在列表里看着它。
-
-        逐项隔离的口径不变：批里某个文件读流/落存储/入队失败，只摘它自己的行、
-        只影响它自己的回执（开放 API 单次 100 个文件时，成 98 败 2 是常态不是异常）。
+        """批量上传：校验 → 一次建行拿齐 doc_id → 并发落存储 → 一次提交回写路径 → 并发入队。
         """
         creator = int(login_user.get("user_id") or 0)
         # 默认按库型定展示形态；doc 型库现在也收图片/音频/视频，这类行改按扩展名写，
@@ -421,7 +479,10 @@ class RagDocService:
         if not pending:
             return [receipts[i] for i in range(len(files))]
 
-        sem = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+        # 一次调用只打一条统计日志的分段计时：建行+回写提交（写库）、落存储（OSS）、
+        # 入队（队列）；t_stage 滚动重置，t0 算总耗时
+        t0 = time.perf_counter()
+        t_stage = t0
         try:
             async with mysql_client.get_session() as session:
                 for p in pending:
@@ -430,7 +491,7 @@ class RagDocService:
                         file_name=p["name"][:FILE_NAME_MAX],
                         file_path="",  # 拿到 doc_id 才能算对象名，落成功后再回写
                         file_ext=p["ext"][:16],
-                        file_size=0,   # 真实大小要读到字节才知道，同上一起回写
+                        file_size=0,  # 真实大小要读到字节才知道，同上一起回写
                         content_type=p["mime"], media_type=p["mediaType"],
                         status=RC.DOC_STATUS_PENDING, parse_version=int(kb.version or 0),
                         created_by=creator)
@@ -440,8 +501,12 @@ class RagDocService:
                 for p in pending:
                     # 下游只在会话内用 ORM 对象，doc_id 先落字典：会话一关属性就取不到了
                     p["docId"] = int(p["doc"].doc_id)
+                ms_insert = int((time.perf_counter() - t_stage) * 1000)
+                t_stage = time.perf_counter()
                 await asyncio.gather(
-                    *(RagDocService._store_one(sem, kb, p) for p in pending))
+                    *(RagDocService._store_one(kb, p) for p in pending))
+                ms_store = int((time.perf_counter() - t_stage) * 1000)
+                t_stage = time.perf_counter()
                 dropped: list[int] = []
                 for p in pending:
                     if p.get("error"):
@@ -454,8 +519,11 @@ class RagDocService:
                     await session.execute(update(Document).where(
                         Document.doc_id.in_(dropped)).values(is_deleted=1))
                 await session.commit()
+                ms_commit = int((time.perf_counter() - t_stage) * 1000)
         except Exception as e:  # noqa: BLE001  批级兜底：没走完的每个文件都给失败回执
-            log.exception(f"批量上传落库失败 kb={kb.kb_id} 批={len(pending)}")
+            # 失败也带总耗时：统计日志只在成功路径打，这一条就是失败路径的那一条
+            log.exception(f"批量上传落库失败 kb={kb.kb_id} 批={len(pending)} "
+                          f"耗时={int((time.perf_counter() - t0) * 1000)}ms")
             # 事务会回滚，但已经 PUT 上去的原件不会跟着回滚：不删就是存储里没人指向的
             # 孤儿对象。改批量后一次 commit 失败最多会漏一批，比逐文件时口子更大，这里补上
             landed = [p["objectName"] for p in pending if p.get("objectName")]
@@ -467,8 +535,22 @@ class RagDocService:
             return [receipts[i] for i in range(len(files))]
 
         # 入队放在提交之后：worker 拉起任务时文档行与原件必须已经可读
-        await asyncio.gather(*(RagDocService._enqueue_one(sem, kb, p) for p in pending
+        t_stage = time.perf_counter()
+        await asyncio.gather(*(RagDocService._enqueue_one(kb, p) for p in pending
                                if not p.get("error")))
+        t_end = time.perf_counter()
+        ms_queue = int((t_end - t_stage) * 1000)
+        # 一次调用只出这一条统计：三个步骤各给总耗时与单文件最大最小
+        # （写库是批级 SQL，最大/最小即建行与回写提交两步的较大/较小值）
+        stores = [int(p["storeMs"]) for p in pending if p.get("storeMs") is not None]
+        queues = [int(p["queueMs"]) for p in pending if p.get("queueMs") is not None]
+        log.info("上传统计: kb={} 文件数={} 总耗时={}ms "
+                 "写库总={}ms OSS总={}ms(最大{} 最小{}) "
+                 "入队总={}ms(最大{} 最小{})",
+                 kb.kb_id, len(files), int((t_end - t0) * 1000),
+                 ms_insert + ms_commit,
+                 ms_store, max(stores) if stores else 0, min(stores) if stores else 0,
+                 ms_queue, max(queues) if queues else 0, min(queues) if queues else 0)
         for p in pending:
             if p.get("error"):
                 receipts[p["idx"]] = RagDocService._reject(p["name"], p["error"])
@@ -477,8 +559,8 @@ class RagDocService:
                                       "taskId": None, "status": RC.DOC_STATUS_FAILED,
                                       "message": p["queueError"]}
             else:
-                log.info("文档已接收: kb={} doc={} file={} size={} task={}",
-                         kb.kb_id, p["docId"], p["name"], p.get("size"), p.get("taskId"))
+                # log.info("文档已接收: kb={} doc={} file={} size={} task={}",
+                #          kb.kb_id, p["docId"], p["name"], p.get("size"), p.get("taskId"))
                 receipts[p["idx"]] = {"docId": p["docId"], "fileName": p["name"],
                                       "taskId": p.get("taskId"),
                                       "status": RC.DOC_STATUS_PENDING, "message": None}
@@ -502,33 +584,35 @@ class RagDocService:
         return None
 
     @staticmethod
-    async def _store_one(sem: "asyncio.Semaphore", kb: KnowledgeBase, p: dict) -> None:
-        """读流 + 落存储（受 sem 限并发的那一段）。失败只记在 p 上，不外抛牵连同批。"""
-        async with sem:
-            try:
-                data = await p["file"].read()
-            except Exception as e:  # noqa: BLE001  读流失败（客户端断开等）只影响这一个文件
-                p["error"] = f"读取上传流失败：{str(e)[:120]}"
-                return
-            finally:
-                p["file"] = None  # 抽掉引用：一批里最多只留 UPLOAD_CONCURRENCY 份原件在内存
-            if not data:
-                p["error"] = "文件内容为空"
-                return
-            if len(data) > MAX_FILE_SIZE:
-                p["error"] = (f"文件超过单文件上限 "
-                              f"{MAX_FILE_SIZE // 1024 // 1024}MB")
-                return
-            object_name = obj_raw_name(kb.kb_id, int(p["docId"]), p["ext"])
-            try:
-                await get_storage().save(object_name, data,
-                                         p["mime"] or "application/octet-stream")
-            except Exception as e:  # noqa: BLE001  存储后端报错只多这一个文件落不下去
-                log.exception(f"上传落存储失败 kb={kb.kb_id} file={p['name']}")
-                p["error"] = f"保存失败：{str(e)[:150]}"
-                return
-            p["objectName"] = object_name
-            p["size"] = len(data)
+    async def _store_one(kb: KnowledgeBase, p: dict) -> None:
+        """读流 + 落存储。失败只记在 p 上，不外抛牵连同批。"""
+        t_store = time.perf_counter()
+        try:
+            data = await p["file"].read()
+        except Exception as e:  # noqa: BLE001  读流失败（客户端断开等）只影响这一个文件
+            p["error"] = f"读取上传流失败：{str(e)[:120]}"
+            return
+        finally:
+            p["file"] = None  # 抽掉引用：字节已落在 p 里，spool 临时文件早点可回收
+        if not data:
+            p["error"] = "文件内容为空"
+            return
+        if len(data) > MAX_FILE_SIZE:
+            p["error"] = (f"文件超过单文件上限 "
+                          f"{MAX_FILE_SIZE // 1024 // 1024}MB")
+            return
+        object_name = obj_raw_name(kb.kb_id, int(p["docId"]), p["ext"])
+        try:
+            await get_storage().save(object_name, data,
+                                     p["mime"] or "application/octet-stream")
+        except Exception as e:  # noqa: BLE001  存储后端报错只多这一个文件落不下去
+            log.exception(f"上传落存储失败 kb={kb.kb_id} file={p['name']}")
+            p["error"] = f"保存失败：{str(e)[:150]}"
+            return
+        p["objectName"] = object_name
+        p["size"] = len(data)
+        # 单文件耗时（读流+PUT）：聚进上传统计日志的 OSS 最大/最小
+        p["storeMs"] = int((time.perf_counter() - t_store) * 1000)
 
     @staticmethod
     async def _drop_object(object_name: str) -> None:
@@ -539,20 +623,21 @@ class RagDocService:
             log.warning(f"孤儿原件清理失败 {object_name}: {e}")
 
     @staticmethod
-    async def _enqueue_one(sem: "asyncio.Semaphore", kb: KnowledgeBase, p: dict) -> None:
+    async def _enqueue_one(kb: KnowledgeBase, p: dict) -> None:
         """投递解析任务（``enqueue_document`` 自带写 task_id 的状态流转）。
 
         它内部要自己开一段短会话，所以并发度受连接池而不是受本批大小限制；
         入队失败的意外（Redis 断连等）也按「排队失败」给回执，不拉下整批。
         """
-        async with sem:
-            try:
-                p["taskId"] = await RagTaskService.enqueue_document(
-                    int(p["docId"]), kb.kb_type)
-            except Exception as e:  # noqa: BLE001
-                # 文件已在存储里、行也建好了，只是没排上队：标失败让用户在列表里点重试
-                await RagDocService._mark_enqueue_failed(int(p["docId"]), e)
-                p["queueError"] = f"排队失败：{str(e)[:150]}"
+        try:
+            t_queue = time.perf_counter()
+            p["taskId"] = await RagTaskService.enqueue_document(
+                int(p["docId"]), kb.kb_type)
+            p["queueMs"] = int((time.perf_counter() - t_queue) * 1000)
+        except Exception as e:  # noqa: BLE001
+            # 文件已在存储里、行也建好了，只是没排上队：标失败让用户在列表里点重试
+            await RagDocService._mark_enqueue_failed(int(p["docId"]), e)
+            p["queueError"] = f"排队失败：{str(e)[:150]}"
 
     @staticmethod
     def _reject(file_name: str, message: str) -> dict:
@@ -577,8 +662,8 @@ class RagDocService:
         async with mysql_client.get_session() as session:
             await session.execute(update(Document).where(
                 Document.doc_id == int(doc_id)).values(
-                    doc_name=text[:TITLE_MAX],
-                    update_by=int(login_user.get("user_id") or 0)))
+                doc_name=text[:TITLE_MAX],
+                update_by=int(login_user.get("user_id") or 0)))
             await session.commit()
         return True
 
@@ -675,7 +760,7 @@ class RagDocService:
             await RagDocService._require_kb(login_user, kb_id, ACTION_VIEW, session)
             rows = (await session.execute(select(Document).where(
                 Document.doc_id.in_(ids), Document.kb_id == int(kb_id),
-                Document.is_deleted == 0))).scalars().all()
+                                          Document.is_deleted == 0))).scalars().all()
             targets: list[int] = []
             for doc in rows:
                 try:
@@ -689,8 +774,8 @@ class RagDocService:
                 raise ValueError("所选文档都没有可删除的权限")
             await session.execute(update(Document).where(
                 Document.doc_id.in_(targets)).values(
-                    is_deleted=1, status=RC.DOC_STATUS_PENDING,
-                    update_by=int(login_user.get("user_id") or 0)))
+                is_deleted=1, status=RC.DOC_STATUS_PENDING,
+                update_by=int(login_user.get("user_id") or 0)))
             await session.commit()
             await KnowledgeBaseService.refresh_counters(int(kb_id), session=session)
         task_id = await RagTaskService.enqueue_purge(int(kb_id), targets)
@@ -703,32 +788,29 @@ class RagDocService:
 
     @staticmethod
     async def chunks_page(login_user: dict, doc_id: int, req: ChunkPageReq) -> dict:
-        """切片分页（正文在这里看，列表页不返回正文）。"""
+        """切片分页（正文在这里看，列表页不返回正文）。
+
+        只读 ES：分块正文的唯一存放处就是 ES 的 content（MySQL 切片行只剩元数据），
+        关键词过滤（match_phrase，分词后的连续序列≈旧版 like 子串）与分页/排序/
+        总数都在 ES 一边算完。未写进 ES 的切片（空正文块、构建向量清库的中间态）
+        在这里不可见——正文不在 MySQL 后，那里不再是看正文的地方。
+        """
         async with mysql_client.get_session() as session:
             doc = await RagDocService.require(login_user, doc_id, ACTION_VIEW, session=session)
-            kb = await KnowledgeBaseService.load(session, doc.kb_id)
-            conds = [DocumentChunk.doc_id == int(doc_id)]
-            if req.chunk_type:
-                if req.chunk_type not in RC.CHUNK_TYPES_ALL:
-                    raise ValueError(f"未知的模态：{req.chunk_type}")
-                conds.append(DocumentChunk.chunk_type == req.chunk_type)
-            if req.keyword:
-                conds.append(DocumentChunk.content.like(f"%{req.keyword}%"))
-            if req.available is not None:
-                conds.append(DocumentChunk.available == int(req.available))
-            if req.kb_id:
-                # 冗余过滤：前端跨文档核对权限时带上，与所属文档不一致就直接拒
-                conds.append(DocumentChunk.kb_id == int(req.kb_id))
-            total = (await session.execute(
-                select(func.count()).select_from(DocumentChunk).where(*conds))).scalar() or 0
-            rows = (await session.execute(
-                select(DocumentChunk).where(*conds)
-                .order_by(DocumentChunk.chunk_index.asc())
-                .limit(req.size).offset((req.current - 1) * req.size))).scalars().all()
-            items = [RagDocService._chunk_to_dict(r) for r in rows]
-            await RagDocService._attach_chunk_media_urls(kb, items)
-            return {"records": items, "total": total,
-                    "current": req.current, "size": req.size}
+            doc_kb = int(doc.kb_id)
+        if req.chunk_type and req.chunk_type not in RC.CHUNK_TYPES_ALL:
+            raise ValueError(f"未知的模态：{req.chunk_type}")
+        if req.kb_id and int(req.kb_id) != doc_kb:
+            # 冗余过滤：前端跨文档核对权限时带上，与所属文档不一致就直接拒
+            raise ValueError("kbId 与该文档所属知识库不一致")
+        total, hits = await es_client.page_by_doc(
+            int(doc_id), doc_kb, current=int(req.current), size=int(req.size),
+            chunk_type=req.chunk_type or None,
+            keyword=(req.keyword or "").strip() or None,
+            available=(None if req.available is None else bool(req.available)))
+        items = [RagDocService._es_hit_to_dict(h) for h in hits]
+        return {"records": items, "total": total,
+                "current": req.current, "size": req.size}
 
     @staticmethod
     async def chunk_update(login_user: dict, chunk_id: int, req: ChunkUpdateReq) -> dict:
@@ -770,9 +852,8 @@ class RagDocService:
                     message = "索引里没有这条切片（未向量化），可用性只作用于业务表"
 
             if content is not None:
-                row.content = content
-                row.embed_text = content
-                row.token_count = len(content)
+                # 正文唯一存放在 ES：MySQL 不再写 content/embed_text（列已退役），
+                # 只把断点位置回 0，重算结果才是终态
                 row.vectorized = 0
             # commit 会 expire 全部 ORM 对象，异步会话里再读属性就得再发一次同步 IO（直接报错），
             # 所以把返回体和后续向量化要用的值一次性取成局部变量
@@ -784,9 +865,13 @@ class RagDocService:
             await session.commit()
 
         if content is not None:
+            # 正文先行落 ES（索引里有这条才保存得上）：向量化一次模型往返可能几十秒、
+            # 失败也不丢用户的编辑——代价是那个窗口里检索暂按旧语义命中，失败提示里说清
+            saved = await es_client.update_chunk(es_id, {RC.ES_FIELD_CONTENT: content})
             # 正文换了，上面那次可用性同步算的还是旧向量的账，一切以重算结果为准
             vectorized, embed_message = await RagDocService._revectorize(
-                int(chunk_id), es_id, kb_id, org_id, embedding_model_id)
+                int(chunk_id), es_id, kb_id, org_id, embedding_model_id, content,
+                content_saved=saved)
             message = embed_message or message
         return {"chunkId": int(chunk_id), "docId": doc_id, "available": available,
                 "vectorized": bool(vectorized), "message": message}
@@ -808,7 +893,7 @@ class RagDocService:
             if not row:
                 raise ValueError("切片不存在")
             doc = await RagDocService.require(login_user, row.doc_id, ACTION_CHUNK,
-                                             session=session)
+                                              session=session)
             es_id = es_doc_id(row.kb_id, row.doc_id, row.chunk_index)
             chunk_index = int(row.chunk_index or 0)
             kb_id, doc_id = int(row.kb_id), int(row.doc_id)
@@ -851,48 +936,64 @@ class RagDocService:
 
     @staticmethod
     async def _revectorize(chunk_id: int, es_id: str, kb_id: int, org_id: int,
-                           embedding_model_id: Optional[int]) -> tuple[int, Optional[str]]:
-        """单片重新向量化并覆盖写 ES 的 content+embedding，返回 (vectorized, 提示)。
+                           embedding_model_id: Optional[int], content: str, *,
+                           content_saved: bool = True) -> tuple[int, Optional[str]]:
+        """单片重新向量化并覆盖写 ES 的 embedding，返回 (vectorized, 提示)。
 
-        自己开一段短会话：向量模型一次往返可能几十秒，摊在主会话里会让这条切片的行一直
-        被锁着，同一页上的另一次编辑只能干等。失败时改用 Core 语句把 vectorized 落成 0——
-        刚回滚过的 ORM 对象已经过期，再去改它的属性会触发一次同步刷新。
+        正文已由调用方先行落进 ES（update_chunk content），这里只补向量：旧文本的
+        向量配新文本是最难查的问题（页面看到的和检索命中的不是同一份内容），所以
+        这一步失败必须让用户看见，而不是悄悄留下 vectorized=1 的行。
+
+        :param content: 新正文（整条重写兜底与送模型的输入都用它）
+        :param content_saved: 调用方先行写 ES 是否成功；False 说明索引里原本没这条
+            （历史上被跳过/整篇重跑后未写），向量整条重写也没成时连正文都没落上，
+            提示要说得比「正文已保存」更重
         """
         async with mysql_client.get_session() as session:
             row = (await session.execute(select(DocumentChunk).where(
                 DocumentChunk.chunk_id == int(chunk_id)))).scalar_one_or_none()
             if not row:
                 return 0, "切片不存在，未做向量化"
-            content = row.content or ""
-            full_doc = RagDocService._chunk_es_doc(row, es_id, kb_id, org_id)
+            # 整条重写兜底要用的元数据（ES 没这条时才会真的用到）
+            media = str(row.media_url or "")
+            if media:
+                # 行里存的是对象名，进索引的那份换匿名可渲染 URL（与解析写入同口径）
+                media = RC.join_media_refs(
+                    [await _sign(one) for one in RC.split_media_refs(media)])
+            full_doc = RagDocService._chunk_es_doc(row, es_id, kb_id, org_id,
+                                                   content, media or None)
             try:
                 cfg = await RagModelService.require_config(embedding_model_id, "向量模型")
-                vectors = await RagModelService.embed_texts(cfg, [row.embed_text or content])
+                vectors = await RagModelService.embed_texts(cfg, [content])
                 vector = [float(x) for x in list(vectors[0])] if vectors else []
                 if not vector or not any(x > 0.0 or x < 0.0 for x in vector[:8]):
                     raise ValueError("向量模型返回了空向量")
-                if not await es_client.update_chunk(
-                        es_id, {RC.ES_FIELD_CONTENT: content, RC.ES_FIELD_EMBED: vector}):
+                if not await es_client.update_chunk(es_id, {RC.ES_FIELD_EMBED: vector}):
                     # 索引里没有这条（历史上被跳过，或整篇重跑过）：整条重写，_id 幂等
                     await es_client.put_chunks(
                         [{**full_doc, RC.ES_FIELD_EMBED: vector}], refresh="wait_for")
                 row.vectorized = 1
                 await session.commit()
                 return 1, None
-            except Exception as e:  # noqa: BLE001  正文已经落库，向量这一步失败要说清楚
+            except Exception as e:  # noqa: BLE001  正文已落 ES，向量这一步失败要说清楚
                 await session.rollback()
                 await session.execute(update(DocumentChunk).where(
                     DocumentChunk.chunk_id == int(chunk_id)).values(vectorized=0))
                 await session.commit()
                 log.warning(f"单片重新向量化失败 chunk={chunk_id}: {e}")
-                return 0, f"正文已保存，但重新向量化失败（检索仍按旧语义命中）：{str(e)[:150]}"
+                if content_saved:
+                    return 0, f"正文已保存，但重新向量化失败（检索仍按旧语义命中）：{str(e)[:150]}"
+                return 0, f"该切片未入索引，正文与向量都未写入：{str(e)[:150]}"
 
     @staticmethod
-    def _chunk_es_doc(row: DocumentChunk, es_id: str, kb_id: int, org_id: int) -> dict:
-        """切片行 → ES 文档（不含 embedding）：索引里没这条时整条重写用。
+    def _chunk_es_doc(row: DocumentChunk, es_id: str, kb_id: int, org_id: int,
+                      content: str, media: Optional[str] = None) -> dict:
+        """切片行 + 新正文 → ES 文档（不含 embedding）：索引里没这条时整条重写用。
 
-        键集合必须落在 index_mapping 的 strict 白名单内（多一个键整批写入就报错），
-        所以这份列顺序与 parse_service._index_rows 保持一致。
+        正文与媒体地址从参数进（MySQL 列已不存正文，行里只提供元数据）；media 由
+        调用方把对象名换成匿名可渲染 URL。键集合必须落在 index_mapping 的 strict
+        白名单内（多一个键整批写入就报错），所以这份列顺序与 parse_service._index_rows
+        保持一致。
         """
         return {
             "_id": es_id,
@@ -902,8 +1003,8 @@ class RagDocService:
             RC.ES_FIELD_CHUNK: int(row.chunk_id),
             RC.ES_FIELD_INDEX: int(row.chunk_index),
             RC.ES_FIELD_TYPE: row.chunk_type or RC.CHUNK_TYPE_TEXT,
-            RC.ES_FIELD_CONTENT: row.content or "",
-            RC.ES_FIELD_MEDIA_URL: row.media_url or None,
+            RC.ES_FIELD_CONTENT: content,
+            RC.ES_FIELD_MEDIA_URL: media,
             RC.ES_FIELD_TITLE_PATH: row.title_path or None,
             RC.ES_FIELD_PAGE: int(row.page_num or 0),
             RC.ES_FIELD_SHEET: row.sheet_name or None,
@@ -912,81 +1013,6 @@ class RagDocService:
             RC.ES_FIELD_CREATE_TIME: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             RC.ES_FIELD_SOURCE: to_json(row.extra or {}),
         }
-
-    # ==================== 序列化 ====================
-
-    @staticmethod
-    def _to_dict(row: Document) -> dict:
-        """ORM 行 → 前端契约字典。"""
-        resp = DocumentResp(
-            id=row.doc_id, kb_id=row.kb_id, title=row.doc_name, file_name=row.file_name,
-            file_ext=row.file_ext, file_size=int(row.file_size or 0),
-            content_type=row.content_type, media_type=row.media_type,
-            parser_engine=row.parser_engine, parse_version=int(row.parse_version or 0),
-            status=row.status,
-            status_label=RC.DOC_STATUS_LABELS.get(row.status, row.status),
-            vectorized=bool(row.vectorized), graph_state=int(row.graph_state or 0),
-            graph_state_label=RC.KG_STATE_LABELS.get(int(row.graph_state or 0), None),
-            chunk_count=int(row.chunk_count or 0), page_count=int(row.page_count or 0),
-            media_duration=int(row.media_duration or 0), media_summary=row.media_summary,
-            task_id=row.task_id, error_msg=row.error_msg,
-            created_by=int(row.created_by or 0),
-            create_time=_fmt(row.create_time), update_time=_fmt(row.update_time))
-        return resp.dump()
-
-    @staticmethod
-    def _chunk_to_dict(row: DocumentChunk) -> dict:
-        resp = ChunkResp(
-            id=row.chunk_id, kb_id=row.kb_id, doc_id=row.doc_id,
-            chunk_index=int(row.chunk_index or 0),
-            chunk_type=row.chunk_type or RC.CHUNK_TYPE_TEXT,
-            chunk_type_label=RC.CHUNK_TYPE_LABELS.get(row.chunk_type or "", row.chunk_type),
-            content=row.content or "", embed_text=row.embed_text,
-            title_path=row.title_path, sheet_name=row.sheet_name,
-            page_num=int(row.page_num or 0), block_id=row.block_id,
-            media_url=row.media_url, media_type=row.media_type,
-            token_count=int(row.token_count or 0), available=bool(row.available),
-            vectorized=bool(row.vectorized), extra=row.extra,
-            create_time=_fmt(row.create_time))
-        return resp.dump()
-
-    @staticmethod
-    async def _attach_media_urls(kb: Optional[KnowledgeBase], items: list[dict],
-                                 paths: dict[int, str]) -> None:
-        """详情行补一条**原件**的可访问地址（本地后端没配 public_base 就留空）。
-
-        只在 detail() 用：列表已改成表格、不自动加载多媒体，预览走 original_preview。
-        doc 型库里内嵌图片的地址在切片层，由 _attach_chunk_media_urls 处理。
-        """
-        if kb is None or not items:
-            return
-        for item in items:
-            item["mediaUrl"] = await _sign(paths.get(int(item.get("id") or 0), ""))
-
-    @staticmethod
-    async def _attach_chunk_media_urls(kb: Optional[KnowledgeBase], items: list[dict]) -> None:
-        """切片列表的图片句柄换成可访问地址（doc 型库的内嵌图也走这一条）。"""
-        if kb is None or not items:
-            return
-        for item in items:
-            name = item.get("mediaUrl") or ""
-            if name:
-                item["mediaUrl"] = await _sign(name)
-
-    @staticmethod
-    async def _kb_of(kb_id: int) -> KnowledgeBase:
-        async with mysql_client.get_session() as session:
-            kb = await KnowledgeBaseService.load(session, kb_id)
-            if kb is None:
-                raise ValueError("知识库不存在")
-            return kb
-
-    @staticmethod
-    def _action_result(items: list[dict]) -> dict:
-        """批量动作的统一回执。"""
-        ok = sum(1 for i in items if i.get("taskId"))
-        return {"accepted": ok, "rejected": len(items) - ok, "items": items}
-
 
 async def _sign(name: str) -> Optional[str]:
     """对象名 → 匿名可访问地址；拿不到就返回 None（页面显示占位，不整体报错）。
@@ -1005,11 +1031,9 @@ async def _sign(name: str) -> Optional[str]:
         log.debug(f"签名地址生成失败 {name}: {e}")
         return None
 
-
 def _fmt(value) -> Optional[str]:
     """DATETIME → 前端展示串（与 kb_service 同口径）。"""
     return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
 
 
 __all__ = ["RagDocService"]
-

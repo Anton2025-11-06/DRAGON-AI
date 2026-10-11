@@ -27,6 +27,8 @@ import { useAccess } from '@vben/access';
 
 import {
   AimOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -155,11 +157,17 @@ const topEntities = computed<Record<string, any>[]>(
  * 「没匹配到起点」与「这个范围内根本没图」在画布上是一块同样的白，不把两者分开，
  * 用户只会反复换关键词、或怀疑上面两个过滤条件没生效。
  */
-const emptyText = computed(
-  () =>
+const emptyText = computed(() => {
+  // 没选库时根本没发查询（见 bootstrap）：空态得把「下一步做什么」说清楚，
+  // 否则读者会把「没查」读成「查了但没图」
+  if (!kbIds.value.length) {
+    return '请先在左上角选择知识库（支持多选），选好后自动查询图谱';
+  }
+  return (
     emptyMessage.value ||
-    '当前范围内没有图谱数据：确认所选知识库已开启图谱，且文档已完成「构建图谱」',
-);
+    '当前范围内没有图谱数据：确认所选知识库已开启图谱，且文档已完成「构建图谱」'
+  );
+});
 
 async function loadOptions() {
   try {
@@ -213,6 +221,25 @@ async function load() {
   } finally {
     loading.value = false;
   }
+}
+
+/**
+ * 清空画布与口径（选中的库被清空时用）。
+ *
+ * render() 里「拆监听 → 销图 → 摘 canvas → 空图早退」那一整套本来就是给空数据
+ * 准备的：把数据清成空再走它，画布、浮卡与详情一并收掉，不必另写一条销毁路径。
+ */
+function clearView() {
+  nodes.value = [];
+  edges.value = [];
+  totalNodes.value = 0;
+  totalEdges.value = 0;
+  truncated.value = false;
+  emptyMessage.value = '';
+  selectedNode.value = null;
+  cardNode.value = null;
+  sourceDocs.value = [];
+  void render();
 }
 
 /** 对视四周留白；算缩放比用的是 (画布尺寸 - 2×此值) / 内容包围盒 */
@@ -340,6 +367,15 @@ async function fitToView(g: any) {
       ),
     ),
   );
+  // 矩阵必须是 9 元素 gl-matrix 列主序 mat3：[sx,0,0, 0,sy,0, tx,ty,1]。
+  // 这里最初照着 4×4 的手感写了 11 个数，第 9 位（齐次位）落成 0，矩阵从此奇异，
+  // 而且两个症状都恰好被「图渲染正常」盖住（渲染只吃 m0/m1/m3/m4/m6/m7，不看 m8）：
+  // - graph.translate 内部算 T·A，A 的第三行全零导致 T·A ≡ A，平移数学上是空操作
+  //   → 怎么拖画布都不动；
+  // - mat3.invert 对奇异矩阵返回 null，getPointByClient 兜底回退单位阵，把画布坐标
+  //   当模型坐标去做命中 → 点在圆上也选不中，离中心越远（头尾实体）漂得越远。
+  // 第 9 位补成 1 之后平移与命中才真正落到这套 DOM 监听上（源码核对：
+  // g6-core 0.8.24 graph.js:492 / view.js:330 / util/math.js:192）。
   g.get('group').setMatrix([
     ratio,
     0,
@@ -349,8 +385,6 @@ async function fitToView(g: any) {
     0,
     width / 2 - ratio * box.cx,
     height / 2 - ratio * box.cy,
-    0,
-    0,
     1,
   ]);
   g.autoPaint();
@@ -425,7 +459,11 @@ function attachCanvasEvents(el: HTMLElement) {
     // hover 与点击共用一份命中判定：亮蓝圈的范围就是能点开的那个范围
     onHover: (hit) => setHover(hit?.id ?? null),
     onPick: (hit) => {
-      void selectNode(nodes.value.find((n) => String(n.id) === hit.id) || null);
+      // 空白处回 null（shared/graph-canvas 的口径）：点一下空白把详情与浮卡一起收掉，
+      // 点开的东西点空白能关，比只能靠点别的实体顶掉它更跟手
+      void selectNode(
+        hit ? nodes.value.find((n) => String(n.id) === hit.id) || null : null,
+      );
     },
   });
 }
@@ -517,6 +555,25 @@ const cutAlertMessage = computed(() => {
 });
 
 /**
+ * 布局遮罩的揭除口（幂等）：afterlayout 对视完成、3s 超时兜底、render 的各条
+ * 失败/清理路径共用。
+ *
+ * 为什么需要遮罩：force 布局是异步收敛的（render 返回后还要跑 ~1.4s，见 modelBBox
+ * 的注释），中间帧是「节点从初始位置被力一点点推开」的过程，首帧就是整团挤在
+ * 画布左上角、标签叠成一坨重影。盖住这段、对视落完矩阵后淡入，用户看到的是
+ * 「查一下、稍等一瞬、直接摆好的整图」；不盖就是「一坨重影慢慢摊开」。
+ */
+let layoutRevealTimer = 0;
+
+function revealLayout() {
+  if (layoutRevealTimer) {
+    clearTimeout(layoutRevealTimer);
+    layoutRevealTimer = 0;
+  }
+  container.value?.classList.remove('layoutting');
+}
+
+/**
  * 真正建图的那一段（从 render() 拆出来：拆了才能在外层 try/catch 它）。
  */
 async function buildGraph(el: HTMLElement) {
@@ -525,6 +582,12 @@ async function buildGraph(el: HTMLElement) {
   // 边长与斥力按规模收一档：几十个节点时 150 的边长好看，上百个会把整张图撑到
   // 几千像素见方，fitView 只能缩成芝麻粒
   const largeGraph = graphData.value.nodeRows.length > 80;
+  // 遮罩从这里盖起（render 开头已收掉上一轮的）：建图+力导收敛+对视这几百毫秒到
+  // ~1.4s 里画布整块透明，摆好了再由 revealLayout 揭掉淡入；3s 兜底保证 afterlayout
+  // 万一不来（G6 版本差异/布局异常）也不会永远黑屏
+  if (layoutRevealTimer) clearTimeout(layoutRevealTimer);
+  el.classList.add('layoutting');
+  layoutRevealTimer = window.setTimeout(revealLayout, 3000);
 
   graph = new G6.Graph({
     container: el,
@@ -596,13 +659,26 @@ async function buildGraph(el: HTMLElement) {
     },
   });
 
+  // 预置初始位置：d3-force 把没有坐标的节点初始化在原点附近的一小圈里，而布局是
+  // 异步的（render 返回时远未收敛，实测 ~1.4s 后才 afterlayout），首帧就是「整团
+  // 挤在画布左上角、标签叠成一坨」——先把节点沿画布中心撒开一圈，布局从这个起点
+  // 收敛得更快；即便遮罩兜底没接住，画面上也不是左上角一坨。
+  const nodeCount = graphData.value.nodeRows.length;
+  const spreadR = Math.max(80, (Math.min(width, height) / 2) * 0.7);
   graph.data({
-    nodes: graphData.value.nodeRows.map((n) => ({
-      id: n.id,
-      label: n.name || n.label,
-      size: 30 + Math.min(30, (n.weight || 0) * 2),
-      style: { fill: colorOf(n.entityType), stroke: colorOf(n.entityType) },
-    })),
+    nodes: graphData.value.nodeRows.map((n, i) => {
+      // 均匀角度 + 半径抖动：完全规整的圆环会被斥力先撑成多边形再松弛，抖一抖更自然
+      const angle = (i / nodeCount) * Math.PI * 2;
+      const radius = spreadR * (0.75 + 0.5 * Math.random());
+      return {
+        id: n.id,
+        label: n.name || n.label,
+        size: 30 + Math.min(30, (n.weight || 0) * 2),
+        style: { fill: colorOf(n.entityType), stroke: colorOf(n.entityType) },
+        x: width / 2 + radius * Math.cos(angle),
+        y: height / 2 + radius * Math.sin(angle),
+      };
+    }),
     edges: graphData.value.edgeRows.map((e, i) => ({
       id: `e${i}`,
       source: e.source,
@@ -613,9 +689,13 @@ async function buildGraph(el: HTMLElement) {
     })),
   });
   // 监听必须在 render 之前挂：布局同步收敛时 afterlayout 就在 render 里面发出去，
-  // 挂晚了听不到。fitToken 保证多次对视只有最后一次生效（不会回到同帧二次对视那个坑）
+  // 挂晚了听不到。fitToken 保证多次对视只有最后一次生效（不会回到同帧二次对视那个坑）。
+  // 对视落完矩阵再揭遮罩：afterlayout 那一刻布局刚收敛，直接亮出来还会看到一次
+  // 对视造成的整图平移缩放，等矩阵就位后淡入才是「摆好了给你看」
   graph.once('afterlayout', () => {
-    if (graph && !graph.destroyed) void fitToView(graph);
+    if (graph && !graph.destroyed) {
+      void fitToView(graph).then(revealLayout);
+    }
   });
   graph.render();
   // 子形状是 render 里才建出来的，draggable 只能补在这一步之后
@@ -657,8 +737,10 @@ async function render() {
   detachCanvasEvents = null;
   hoverId = null;
   // 光标类名也得清：拖到一半就重新查询时，mouseup 的监听已经被拆了，没人再把 grabbing
-  // 摘掉，整块画布从此顶着一个「正在拖图」的手型
+  // 摘掉，整块画布从此顶着一个「正在拖图」的手型。布局遮罩与兜底计时器也一并收掉：
+  // 新一轮渲染要盖由 buildGraph 自己再盖
   el.classList.remove('grabbing', 'pointing');
+  revealLayout();
   buildError.value = '';
   if (graph) {
     try {
@@ -683,6 +765,8 @@ async function render() {
     // 建图失败的原因得留在页面上：只弹一条 toast，下一秒就没人知道刚刚发生过什么
     const reason = String(error?.message || error || '未知错误');
     buildError.value = reason.slice(0, 200);
+    // 遮罩更不能留在失败画面上：揭掉 + 收掉兜底计时器（afterlayout 不会再来了）
+    revealLayout();
     // 半张图僵在画布上冒充「能交互」比一块空白更难解释：清掉，只留下那句原因
     try {
       graph?.destroy();
@@ -778,6 +862,32 @@ function fitCanvas() {
   if (graph && !graph.destroyed) void fitToView(graph);
 }
 
+// ==================== 全屏 ====================
+// 全屏落在中间这张卡而不是画布元素上：浮卡、空态、Alert 都在卡片体里，只全屏
+// canvas 会把它们留在原页面，全屏里就剩一张孤图。画布的 ResizeObserver 已盯着
+// 容器，进出全屏的尺寸变化会自动 changeSize + 重对视，不必另挂一套。
+const centerCard = ref<any>(null);
+const isFullscreen = ref(false);
+
+/** 子图一键全屏 / 退出全屏（Esc 也能退，fullscreenchange 里同步按钮图标） */
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else {
+      await (centerCard.value?.$el as HTMLElement | undefined)?.requestFullscreen();
+    }
+  } catch (e: any) {
+    message.error(e?.message || '切换全屏失败');
+  }
+}
+
+function onFullscreenChange() {
+  isFullscreen.value = document.fullscreenElement === centerCard.value?.$el;
+}
+
+document.addEventListener('fullscreenchange', onFullscreenChange);
+
 const resizeObserver = ref<ResizeObserver | null>(null);
 watch(container, (el) => {
   if (!el) return;
@@ -800,8 +910,15 @@ watch(container, (el) => {
   resizeObserver.value.observe(el);
 });
 
-watch(kbIds, () => {
+// 选库即查（打开页面时不自动查，见 bootstrap）：统计跟着库走，子图选了库才画；
+// 清空选择是收起画布而不是「回到全部库」——留着上一轮的图只会让人误读当前范围
+watch(kbIds, (ids) => {
   loadStats();
+  if (ids.length > 0) {
+    void load();
+  } else {
+    clearView();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -814,12 +931,18 @@ onBeforeUnmount(() => {
   }
   graph = null;
   resizeObserver.value?.disconnect();
+  document.removeEventListener('fullscreenchange', onFullscreenChange);
+  revealLayout();
 });
 
 async function bootstrap() {
   await loadOptions();
   if (!allowed.value) return;
-  await Promise.all([loadStats(), load()]);
+  // 打开页面只拉统计、不查子图：一上来就把全部库的图拖回来是一笔不小的开销，
+  // 而进这页多半是奔着某个库去的——等用户选完库（或带 kbId 进来被 loadOptions
+  // 预选，由上面的 watch 触发）再查。没选库时空态会写明下一步，统计的总量与
+  // 核心实体榜单也够先判断「这儿有没有图」。
+  await loadStats();
 }
 
 bootstrap();
@@ -842,7 +965,7 @@ bootstrap();
           v-model:value="kbIds"
           mode="multiple"
           :options="kbSelectOptions"
-          placeholder="知识库（留空 = 全部可用库）"
+          placeholder="选择知识库后自动查询图谱"
           style="min-width: 300px"
           :max-tag-count="2"
           option-filter-prop="label"
@@ -920,10 +1043,18 @@ bootstrap();
       </Card>
 
       <!-- 中：看关系 -->
-      <Card :bordered="false" size="small" class="flex-1 center-col">
+      <Card ref="centerCard" :bordered="false" size="small" class="flex-1 center-col">
         <template #title>子图</template>
         <template #extra>
           <Space :size="4">
+            <Tooltip title="全屏 / 退出全屏（Esc）">
+              <Button size="small" @click="toggleFullscreen">
+                <template #icon>
+                  <FullscreenExitOutlined v-if="isFullscreen" />
+                  <FullscreenOutlined v-else />
+                </template>
+              </Button>
+            </Tooltip>
             <Tooltip title="放大">
               <Button size="small" @click="zoom(0.2)">
                 <template #icon><ZoomInOutlined /></template>
@@ -952,21 +1083,24 @@ bootstrap();
              那一截正好被画布盖住——这就是「这句话被画布挡住」的来处。把会变宽度的
              「缩放 xx%」与计数挪到第二行（行高固定）还顺带断了另一个反馈环：以前每次滚轮
              缩放都改工具栏宽度→换行→画布高度变→ResizeObserver 重对视，把用户刚调好的
-             视口拽回默认。 -->
-        <Space class="toolbar-main mb-2" wrap :size="8">
+             视口拽回默认。
+             行内布局用 flex 不用 Space：Space 的子项宽度全跟内容走，关键词框 200 + 类型
+             150 加上深度/规模/按钮，总宽超了中列，一换行「查询」按钮就掉到第二行、
+             正好挡在下面那行上——flex 里让关键词框自己收缩（kw-input），正常宽度一行放下。 -->
+        <div class="toolbar-main mb-2">
           <Input
             v-model:value="keyword"
+            class="kw-input"
             placeholder="起点实体 / 关键词"
             allow-clear
-            style="width: 200px"
             @press-enter="load"
           />
           <Select
             v-model:value="entityType"
+            class="type-select"
             :options="entityTypeOptions"
             placeholder="实体类型"
             allow-clear
-            style="width: 150px"
           />
           <Tooltip
             title="这两个条件是叠加过滤（AND）：都填了就以「名字命中关键词且类型相符」的实体当起点，其中一个把起点筛空就是空图（空态会写明原因，不会悄悄丢掉关键词只按类型给图）。两者都只决定起点，展开出来的邻居不按类型筛——只留同类型的节点会把关系链凭空切断。"
@@ -979,7 +1113,7 @@ bootstrap();
           <span class="param-label">规模</span>
           <InputNumber v-model:value="limit" :min="10" :max="500" :step="10" style="width: 88px" />
           <Button type="primary" :loading="loading" @click="load">查询</Button>
-        </Space>
+        </div>
 
         <div v-if="nodes.length > 0" class="toolbar-meta mb-2">
           <Tag color="blue">节点 {{ totalNodes }}</Tag>
@@ -1139,6 +1273,15 @@ bootstrap();
   min-height: 0;
 }
 
+/* 全屏的是中间这张卡（理由见脚本）：:fullscreen 时它脱离三栏布局铺满整屏，卡片头、
+   工具栏、画布按原 flex 层级顺下来（body 的 flex:1 上面那条已备好）；不铺背景的话
+   卡片后面透出来的是浏览器全屏的纯黑底 */
+.center-col:fullscreen {
+  display: flex;
+  flex-direction: column;
+  background: var(--component-background, #fff);
+}
+
 /* 卡片体里除了画布那块，谁都不许被 flex 压扁：工具栏一被压，换行的那一截就落到画布
    底下；Alert 一被压，失败原因与截断说明正好被裁掉半句。 */
 :deep(.center-col .ant-card-body > .ant-alert) {
@@ -1148,6 +1291,26 @@ bootstrap();
 .toolbar-main,
 .toolbar-meta {
   flex: none;
+}
+
+/* 工具行行内布局：关键词框是唯一可收缩的（窄屏先把 200px 收到 170px），其余控件
+   定宽不许挤；wrap 兜底超窄屏（有 row-gap，换行不粘连） */
+.toolbar-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  row-gap: 8px;
+  align-items: center;
+}
+
+.toolbar-main .kw-input {
+  flex: 1 1 170px;
+  min-width: 150px;
+  max-width: 320px;
+}
+
+.toolbar-main .type-select {
+  flex: 0 0 140px;
 }
 
 /* 第二行行高固定：计数与操作提示都只占一行，超长就地省略，不许把画布顶高顶矮 */
@@ -1250,6 +1413,14 @@ bootstrap();
   background: var(--component-background-light, #fafcff);
   border: 1px solid var(--border-color, #eee);
   border-radius: 6px;
+  /* 淡入揭遮罩（时机见脚本 revealLayout）；只在 opacity 上过渡，不碰别的属性 */
+  transition: opacity 0.25s ease;
+}
+
+/* force 布局异步收敛（~1.4s）：收敛前节点先挤在初始位置再被力推开，看着像渲染
+   坏了。布局期间整块画布透明，afterlayout 对视完成（或 3s 兜底）揭掉淡入 */
+.graph-canvas.layoutting {
+  opacity: 0;
 }
 
 /* 命中带比节点形状本身宽（容差见 shared/graph-canvas）：光标也得跟着提前变 pointer，否则

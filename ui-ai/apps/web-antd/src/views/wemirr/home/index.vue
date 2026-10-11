@@ -1,12 +1,22 @@
 <script lang="ts">
-import { defineComponent, nextTick, onMounted, ref } from 'vue';
+import {
+  computed,
+  defineComponent,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+} from 'vue';
 
 import { useAccessStore } from '@vben/stores';
 
 import {
   ArrowLeftOutlined,
+  ClearOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  DeleteOutlined,
   FileTextFilled,
   FolderFilled,
   PlusOutlined,
@@ -19,24 +29,35 @@ import { message } from 'ant-design-vue';
 import { getTraceId } from '#/api/request';
 import * as api from './api';
 
+/** 对话条（前端渲染模型）：assistant 消息聚合思考流/工具轨迹/正文 */
 interface ChatMsg {
   role: 'assistant' | 'user';
   content: string;
+  /** 思考流（thinking.delta 累积，折叠展示） */
+  thinking?: string;
+  /** 工具调用轨迹（tool.started/completed 逐条追加） */
+  toolCalls?: api.ToolCallTrace[];
+  /** 本轮仍在流式（渲染光标，终态帧清掉） */
+  running?: boolean;
+  /** 失败/中断提示（终态帧或历史行带出） */
+  error?: string;
 }
 
 /** 已挂载条目 */
 interface MountedItem {
   key: string;
   name: string;
-  source: 'kb' | 'skill' | 'tool';
+  source: 'kb' | 'mcp' | 'skill' | 'tool';
 }
 
 export default defineComponent({
   name: 'HernesExplorerPage',
   components: {
     ArrowLeftOutlined,
+    ClearOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
+    DeleteOutlined,
     FileTextFilled,
     FolderFilled,
     PlusOutlined,
@@ -47,21 +68,39 @@ export default defineComponent({
   setup() {
     const accessStore = useAccessStore();
 
+    // ==================== 会话（harness） ====================
+    const sessions = ref<api.HarnessSession[]>([]);
+    const sessionId = ref(0);
+    const sessionLoading = ref(false);
+    const modelOptions = ref<api.HarnessModelOption[]>([]);
+    /** 当前生效的模型授权（未建会话时是草稿值，建会话时随请求落库） */
+    const modelApplyId = ref(0);
+    const modelSelectOptions = computed(() =>
+      modelOptions.value.map((m) => ({
+        label: m.applied ? m.name : `${m.name}（需授权）`,
+        value: m.applyId,
+        disabled: !m.applied,
+      })),
+    );
+
     // ==================== 对话框 ====================
     const messages = ref<ChatMsg[]>([]);
     const inputValue = ref('');
     const sending = ref(false);
     const streaming = ref(false);
     const mountedItems = ref<MountedItem[]>([]);
-    const typeWriterTimer = ref<any>(null);
+    /** SSE 连接（普通变量即可：同一时刻只允许一条流写本屏） */
+    let eventSource: null | EventSource = null;
+    let activeTurnId = '';
 
-    // 选择弹窗
+    // 选择弹窗（四口候选：kb / mcp / tool / skill）
     const pickerVisible = ref(false);
-    const pickerType = ref<'kb' | 'skill' | 'tool'>('skill');
+    const pickerType = ref<'kb' | 'mcp' | 'skill' | 'tool'>('skill');
     const pickerLoading = ref(false);
-    const skillOptions = ref<api.SandboxSkill[]>([]);
-    const toolOptions = ref<api.McpToolOption[]>([]);
-    const kbOptions = ref<api.KbOption[]>([]);
+    const skillOptions = ref<api.HarnessOptionItem[]>([]);
+    const mcpOptions = ref<api.HarnessOptionItem[]>([]);
+    const toolOptions = ref<api.HarnessOptionItem[]>([]);
+    const kbOptions = ref<api.HarnessOptionItem[]>([]);
     const pickerSelected = ref<MountedItem[]>([]);
 
     // ==================== 沙箱 ====================
@@ -75,9 +114,12 @@ export default defineComponent({
 
     // ==================== 初始化 ====================
     onMounted(() => {
+      loadSessions(true);
+      loadModels();
       loadSandboxFiles();
-      loadSkills();
     });
+    // 离开页面即关 SSE（组件卸载后回调里再写 messages 已无意义）
+    onUnmounted(() => closeStream());
 
     // ==================== 对话框逻辑 ====================
     /** 轻量 markdown 渲染：加粗 / 引用 / 无序列表 / 换行 */
@@ -109,67 +151,367 @@ export default defineComponent({
       return text.replaceAll(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     }
 
-    /** 打字机效果展示 AI 回复 */
-    function typewrite(full: string) {
-      streaming.value = true;
-      const msg: ChatMsg = { role: 'assistant', content: '' };
-      messages.value.push(msg);
-      let idx = 0;
-      typeWriterTimer.value = setInterval(() => {
-        idx += 2;
-        msg.content = full.slice(0, idx);
-        if (idx >= full.length) {
-          clearInterval(typeWriterTimer.value);
-          typeWriterTimer.value = null;
-          streaming.value = false;
-        }
-        scrollToBottom();
-      }, 20);
-    }
+    // ==================== 会话管理 ====================
 
-    function stopStreaming() {
-      if (typeWriterTimer.value) {
-        clearInterval(typeWriterTimer.value);
-        typeWriterTimer.value = null;
-        streaming.value = false;
-        const last = messages.value[messages.value.length - 1];
-        if (last && last.role === 'assistant') {
-          // 保持当前显示内容
+    async function loadSessions(autoSelect = false) {
+      sessionLoading.value = true;
+      try {
+        const res = await api.HarnessSessionPage({ current: 1, size: 30 });
+        sessions.value = res.records || [];
+        const first = sessions.value[0];
+        if (autoSelect && first && !sessionId.value) {
+          await switchSession(first);
         }
+      } catch {
+        sessions.value = [];
+      } finally {
+        sessionLoading.value = false;
       }
     }
+
+    async function switchSession(s: api.HarnessSession) {
+      closeStream();
+      sessionId.value = s.id;
+      modelApplyId.value = s.modelApplyId;
+      await Promise.all([loadMessages(s.id), ensurePickerOptions()]);
+      mountedItems.value = mountsToItems(s.mounts);
+      scrollToBottom();
+    }
+
+    /** 四口挂载候选拉齐（挂载回显要按 id 匹配名称；use 口径=自建∪授权） */
+    async function ensurePickerOptions() {
+      const jobs: Promise<unknown>[] = [];
+      if (skillOptions.value.length === 0) jobs.push(loadOptions('skill'));
+      if (mcpOptions.value.length === 0) jobs.push(loadOptions('mcp'));
+      if (toolOptions.value.length === 0) jobs.push(loadOptions('tool'));
+      if (kbOptions.value.length === 0) jobs.push(loadOptions('kb'));
+      await Promise.all(jobs);
+    }
+
+    /** 拉一类挂载候选（/api/harness/options/{kind}，失败降级为空） */
+    async function loadOptions(kind: 'kb' | 'mcp' | 'skill' | 'tool') {
+      try {
+        const res = await api.HarnessOptions(kind);
+        const items = res.items || [];
+        if (kind === 'skill') skillOptions.value = items;
+        else if (kind === 'mcp') mcpOptions.value = items;
+        else if (kind === 'tool') toolOptions.value = items;
+        else kbOptions.value = items;
+      } catch {
+        if (kind === 'skill') skillOptions.value = [];
+        else if (kind === 'mcp') mcpOptions.value = [];
+        else if (kind === 'tool') toolOptions.value = [];
+        else kbOptions.value = [];
+      }
+    }
+
+    /** 会话挂载快照 → 已挂载条目（名称按候选列表匹配，找不到用 #id 占位） */
+    function mountsToItems(mounts: Partial<api.HarnessMounts>): MountedItem[] {
+      const items: MountedItem[] = [];
+      const match = (
+        list: api.HarnessOptionItem[],
+        id: number,
+      ): api.HarnessOptionItem | undefined =>
+        list.find((o) => String(o.id) === String(id));
+      (mounts.skillIds || []).forEach((id) => {
+        items.push({
+          key: String(id),
+          name: match(skillOptions.value, id)?.name || `技能#${id}`,
+          source: 'skill',
+        });
+      });
+      (mounts.mcpIds || []).forEach((id) => {
+        items.push({
+          key: String(id),
+          name: match(mcpOptions.value, id)?.name || `MCP#${id}`,
+          source: 'mcp',
+        });
+      });
+      (mounts.toolIds || []).forEach((id) => {
+        items.push({
+          key: String(id),
+          name: match(toolOptions.value, id)?.name || `工具#${id}`,
+          source: 'tool',
+        });
+      });
+      (mounts.kbIds || []).forEach((id) => {
+        items.push({
+          key: String(id),
+          name: match(kbOptions.value, id)?.name || `知识库#${id}`,
+          source: 'kb',
+        });
+      });
+      return items;
+    }
+
+    /** 当前挂载 → 提交用快照（四类各归各位） */
+    function currentMounts(): api.HarnessMounts {
+      return {
+        kbIds: mountedItems.value
+          .filter((i) => i.source === 'kb')
+          .map((i) => Number(i.key)),
+        mcpIds: mountedItems.value
+          .filter((i) => i.source === 'mcp')
+          .map((i) => Number(i.key)),
+        toolIds: mountedItems.value
+          .filter((i) => i.source === 'tool')
+          .map((i) => Number(i.key)),
+        skillIds: mountedItems.value
+          .filter((i) => i.source === 'skill')
+          .map((i) => Number(i.key)),
+      };
+    }
+
+    async function loadMessages(sid: number) {
+      try {
+        const rows = (await api.HarnessSessionMessages(sid)) || [];
+        const list: ChatMsg[] = [];
+        for (const row of rows) {
+          if (row.role === 'USER') {
+            list.push({ role: 'user', content: row.content });
+            continue;
+          }
+          // 历史轮：正文/思考/轨迹都已落库，直接渲染
+          const msg: ChatMsg = {
+            role: 'assistant',
+            content: row.content,
+            thinking: row.thinking || undefined,
+            toolCalls: row.toolCalls || [],
+          };
+          if (row.status === 'RUNNING') {
+            // 刷新撞上执行中：接回实时流续渲染（Redis 频道不回放，丢的只是刷新前帧）
+            msg.running = true;
+            list.push(msg);
+            subscribeTurn(row.turnId, msg);
+          } else {
+            if (row.status === 'FAILED') msg.error = row.error || '执行失败';
+            if (row.status === 'INTERRUPTED') {
+              msg.error = row.error || '本轮已中断';
+            }
+            list.push(msg);
+          }
+        }
+        messages.value = list;
+      } catch {
+        message.error('历史消息加载失败');
+      }
+    }
+
+    function newSession() {
+      closeStream();
+      sessionId.value = 0;
+      messages.value = [];
+      mountedItems.value = [];
+      inputValue.value = '';
+    }
+
+    async function deleteCurrentSession() {
+      if (!sessionId.value) return;
+      try {
+        await api.HarnessSessionDelete(sessionId.value);
+        newSession();
+        await loadSessions(true);
+      } catch {
+        message.error('会话删除失败');
+      }
+    }
+
+    // ==================== 模型 ====================
+
+    async function loadModels() {
+      try {
+        const res = await api.HarnessModels();
+        modelOptions.value = res.items || [];
+      } catch {
+        modelOptions.value = [];
+      }
+    }
+
+    /** 切模型：有会话即落库（下轮生效），草稿态只存本地 */
+    async function changeModel(value: number) {
+      if (sessionId.value && value) {
+        try {
+          await api.HarnessSessionUpdate(sessionId.value, {
+            modelApplyId: value,
+          });
+        } catch {
+          message.error('模型切换失败');
+          return;
+        }
+      }
+      modelApplyId.value = value;
+    }
+
+    // ==================== 对话（ARQ 投递 + SSE 订阅） ====================
 
     async function handleSend() {
       const text = inputValue.value.trim();
-      if (!text || sending.value) return;
       if (streaming.value) {
-        stopStreaming();
+        interruptTurn();
         return;
       }
+      if (!text || sending.value) return;
+      if (!modelApplyId.value) {
+        message.warning('请先在右上角选择一个已授权的模型');
+        return;
+      }
+
+      // 首条消息自动建会话：标题取前 24 字
+      if (!sessionId.value) {
+        try {
+          const s = await api.HarnessSessionCreate({
+            title: text.slice(0, 24),
+            modelApplyId: modelApplyId.value,
+            mounts: currentMounts(),
+          });
+          sessionId.value = s.id;
+        } catch (error: any) {
+          message.error(error?.message || '会话创建失败');
+          return;
+        }
+      }
+
       messages.value.push({ role: 'user', content: text });
       inputValue.value = '';
       sending.value = true;
       scrollToBottom();
       try {
-        const res = await api.SandboxChat(
-          text,
-          mountedItems.value
-            .filter((i) => i.source === 'skill')
-            .map((i) => i.key),
-          mountedItems.value
-            .filter((i) => i.source === 'tool')
-            .map((i) => i.key),
-          mountedItems.value.filter((i) => i.source === 'kb').map((i) => i.key),
-        );
-        typewrite(res.reply || '（沙箱未返回内容）');
-      } catch {
+        const res = await api.HarnessChat({
+          sessionId: sessionId.value,
+          message: text,
+          mounts: currentMounts(),
+        });
+        void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
+        subscribeTurn(res.turnId);
+      } catch (error: any) {
         messages.value.push({
           role: 'assistant',
-          content: '请求失败，沙箱运行服务暂时不可用，请稍后重试。',
+          content: error?.message || '请求失败，深度探索服务暂不可用，请稍后重试。',
         });
         scrollToBottom();
       } finally {
         sending.value = false;
+      }
+    }
+
+    /** 订阅本轮事件流（传 msg = 刷新恢复的执行中历史行，复用同一条气泡） */
+    function subscribeTurn(turnId: string, msg?: ChatMsg) {
+      closeStream();
+      activeTurnId = turnId;
+      // reactive 包装：SSE 回调里改字段才能驱动视图更新（与已入列的普通对象共享底层，
+      // 数组里的同源代理由渲染侧惰性生成，依赖能被同一代理触发）
+      const target: ChatMsg = reactive(
+        msg || {
+          role: 'assistant',
+          content: '',
+          thinking: '',
+          toolCalls: [],
+        },
+      );
+      if (!msg) {
+        target.running = true;
+        messages.value.push(target);
+      }
+      streaming.value = true;
+
+      const es = new EventSource(api.HarnessSubscribeUrl(turnId));
+      eventSource = es;
+      es.onmessage = (ev: MessageEvent) => {
+        let frame: api.HarnessFrame;
+        try {
+          frame = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        applyFrame(target, frame);
+        scrollToBottom();
+      };
+      es.onerror = () => {
+        // 终态帧先到时 closeStream 已把连接关掉，这里只会因异常断流触发：
+        // 关连接防 EventSource 自动重连（重连会重复回放已收帧），结果以刷新后历史为准
+        if (target.running) {
+          target.running = false;
+          target.error = '事件连接已断开，本轮结果稍后刷新查看';
+        }
+        closeStream();
+      };
+      scrollToBottom();
+    }
+
+    /** 协议帧 → 消息条增量渲染（帧字段口径见 api.ts 的 HarnessFrame） */
+    function applyFrame(msg: ChatMsg, frame: api.HarnessFrame) {
+      switch (frame.type) {
+        case 'text.delta': {
+          msg.content += frame.content || '';
+          break;
+        }
+        case 'thinking.delta': {
+          msg.thinking = (msg.thinking || '') + (frame.content || '');
+          break;
+        }
+        case 'tool.started': {
+          msg.toolCalls = msg.toolCalls || [];
+          msg.toolCalls.push({
+            tool: frame.tool || '',
+            toolCallId: frame.toolCallId,
+            arguments: '',
+          });
+          break;
+        }
+        case 'tool.completed': {
+          const calls = msg.toolCalls || [];
+          // 从后往前找同名未闭合的调用补入参（工具名+空入参定位）
+          for (let i = calls.length - 1; i >= 0; i--) {
+            const call = calls[i];
+            if (call && call.tool === frame.tool && !call.arguments) {
+              call.arguments = frame.arguments || '';
+              break;
+            }
+          }
+          break;
+        }
+        case 'turn.completed': {
+          // 终态帧带落库全文：以库为准覆盖（流式拼接与落库的出入以权威结果修正）
+          if (frame.content) msg.content = frame.content;
+          msg.running = false;
+          closeStream();
+          break;
+        }
+        case 'turn.interrupted': {
+          msg.running = false;
+          // HITL 挂起时优先显示智能体的问题（reason 是「等待答复」占位，
+          // 回放路径下 question 已拼进 reason）
+          msg.error = frame.question || frame.reason || '本轮已中断';
+          closeStream();
+          break;
+        }
+        case 'turn.failed': {
+          msg.running = false;
+          msg.error = frame.error || '执行失败';
+          closeStream();
+          break;
+        }
+        default:
+          break; // turn.started 不渲染（气泡已建）
+      }
+    }
+
+    function closeStream() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      activeTurnId = '';
+      streaming.value = false;
+    }
+
+    async function interruptTurn() {
+      if (!activeTurnId) return;
+      try {
+        await api.HarnessInterrupt(activeTurnId);
+        message.info('已请求中断，稍候生效');
+      } catch {
+        message.error('中断请求失败');
       }
     }
 
@@ -184,17 +526,8 @@ export default defineComponent({
       mountedItems.value = mountedItems.value.filter((i) => i.key !== k);
     }
 
-    // ==================== 技能 / 工具 / 知识库选择 ====================
-    async function loadSkills() {
-      try {
-        const res = await api.SandboxSkills();
-        skillOptions.value = res.items || [];
-      } catch {
-        skillOptions.value = [];
-      }
-    }
-
-    async function openPicker(type: 'kb' | 'skill' | 'tool') {
+    // ==================== 四类能力挂载 picker ====================
+    async function openPicker(type: 'kb' | 'mcp' | 'skill' | 'tool') {
       pickerType.value = type;
       pickerSelected.value = mountedItems.value.filter(
         (i) => i.source === type,
@@ -202,21 +535,8 @@ export default defineComponent({
       pickerVisible.value = true;
       pickerLoading.value = true;
       try {
-        if (type === 'skill') {
-          if (skillOptions.value.length === 0) await loadSkills();
-        } else if (type === 'tool') {
-          const res = await api.McpServersPage({ current: 1, size: 100 });
-          toolOptions.value = res.records || [];
-        } else {
-          const res = await api.KbList({ page: 1, page_size: 100 });
-          kbOptions.value = res.items || [];
-        }
-      } catch {
-        if (type === 'kb') {
-          message.error('知识库服务暂不可用');
-        } else {
-          message.error('列表加载失败');
-        }
+        // 每次打开都刷新：use 授权可能刚被授予/收回，缓存的旧口径会误导选择
+        await loadOptions(type);
       } finally {
         pickerLoading.value = false;
       }
@@ -332,6 +652,17 @@ export default defineComponent({
       }
     }
 
+    /** 重置沙箱（清空工作区文件，会话与消息不动） */
+    async function resetSandbox() {
+      try {
+        await api.HarnessWorkspaceReset();
+        message.success('沙箱已重置');
+        await loadSandboxFiles('');
+      } catch {
+        message.error('沙箱重置失败');
+      }
+    }
+
     function pathBreadcrumbClick(part: string, index: number) {
       const parts = currentPath.value.split('/').filter(Boolean);
       loadSandboxFiles(parts.slice(0, index + 1).join('/'));
@@ -339,6 +670,7 @@ export default defineComponent({
     }
 
     return {
+      resetSandbox,
       accessStore,
       messages,
       inputValue,
@@ -348,11 +680,23 @@ export default defineComponent({
       renderMarkdown,
       handleSend,
       removeMounted,
+      // 会话 / 模型
+      sessions,
+      sessionId,
+      sessionLoading,
+      modelApplyId,
+      modelSelectOptions,
+      switchSession,
+      newSession,
+      deleteCurrentSession,
+      changeModel,
+      // 挂载 picker
       openPicker,
       pickerVisible,
       pickerType,
       pickerLoading,
       skillOptions,
+      mcpOptions,
       toolOptions,
       kbOptions,
       pickerSelected,
@@ -380,7 +724,34 @@ export default defineComponent({
 
 <template>
   <div class="hermes-page">
-    <!-- 左侧：深度探索 Hernes 对话框 -->
+    <!-- 左侧：会话列表 -->
+    <aside class="hermes-side">
+      <a-button block ghost size="small" type="primary" @click="newSession">
+        <template #icon><PlusOutlined /></template>
+        新建探索
+      </a-button>
+      <div class="hermes-side-list">
+        <div v-if="sessionLoading" class="hermes-side-empty">加载中…</div>
+        <template v-else>
+          <div
+            v-for="s in sessions"
+            :key="s.id"
+            class="hermes-side-item"
+            :class="{ active: s.id === sessionId }"
+            @click="switchSession(s)"
+          >
+            <span class="hermes-side-title" :title="s.title">{{
+              s.title
+            }}</span>
+          </div>
+          <div v-if="sessions.length === 0" class="hermes-side-empty">
+            暂无历史会话
+          </div>
+        </template>
+      </div>
+    </aside>
+
+    <!-- 中部：深度探索 Hernes 对话框 -->
     <section class="hermes-chat">
       <header class="hermes-chat-header">
         <div class="hermes-logo">
@@ -390,7 +761,19 @@ export default defineComponent({
           <h2>深度探索 Hernes</h2>
           <p>连接云端沙箱运行时，描述你的问题，让 AI 帮你执行</p>
         </div>
-        <a-tag color="purple">沙箱演示模式</a-tag>
+        <a-select
+          class="hermes-model-select"
+          :options="modelSelectOptions"
+          placeholder="选择模型"
+          size="small"
+          :value="modelApplyId || undefined"
+          @change="changeModel"
+        />
+        <a-tooltip v-if="sessionId" title="删除当前会话">
+          <a-button danger ghost size="small" @click="deleteCurrentSession">
+            <template #icon><DeleteOutlined /></template>
+          </a-button>
+        </a-tooltip>
       </header>
 
       <!-- 已挂载能力 -->
@@ -428,9 +811,42 @@ export default defineComponent({
           <div v-if="msg.role === 'assistant'" class="hermes-avatar ai">
             <RobotOutlined />
           </div>
-          <!-- renderMarkdown 已先行转义 HTML 特殊字符，仅输出受控标签 -->
+          <!-- assistant 消息复合体：思考流（折叠）→ 工具轨迹 → 正文 → 运行光标 → 异常提示 -->
+          <div v-if="msg.role === 'assistant'" class="hermes-body">
+            <details v-if="msg.thinking" class="hermes-thinking">
+              <summary>思考过程</summary>
+              <pre>{{ msg.thinking }}</pre>
+            </details>
+            <div
+              v-for="(call, ci) in msg.toolCalls || []"
+              :key="ci"
+              class="hermes-call"
+            >
+              <b>{{ call.tool }}</b>
+              <pre v-if="call.arguments">{{ call.arguments }}</pre>
+            </div>
+            <!-- renderMarkdown 已先行转义 HTML 特殊字符，仅输出受控标签 -->
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <div
+              v-if="msg.content"
+              class="hermes-bubble"
+              v-html="renderMarkdown(msg.content)"
+            ></div>
+            <div v-if="msg.running" class="hermes-running">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+            </div>
+            <div v-if="msg.error" class="hermes-msg-error">
+              <a-tag color="warning">{{ msg.error }}</a-tag>
+            </div>
+          </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
-          <div class="hermes-bubble" v-html="renderMarkdown(msg.content)"></div>
+          <div
+            v-else
+            class="hermes-bubble"
+            v-html="renderMarkdown(msg.content)"
+          ></div>
           <div v-if="msg.role === 'user'" class="hermes-avatar user">我</div>
         </div>
         <div v-if="messages.length === 0" class="hermes-empty">
@@ -458,6 +874,14 @@ export default defineComponent({
             size="small"
             ghost
             type="success"
+            @click="openPicker('mcp')"
+          >
+            <template #icon><PlusOutlined /></template>
+            MCP
+          </a-button>
+          <a-button
+            size="small"
+            ghost
             @click="openPicker('tool')"
           >
             <template #icon><PlusOutlined /></template>
@@ -512,6 +936,15 @@ export default defineComponent({
               上传
             </a-button>
           </a-upload>
+          <a-popconfirm
+            title="清空沙箱里的全部文件？会话与消息不受影响"
+            @confirm="resetSandbox"
+          >
+            <a-button size="small" danger>
+              <template #icon><ClearOutlined /></template>
+              重置
+            </a-button>
+          </a-popconfirm>
         </a-space>
       </header>
 
@@ -582,15 +1015,17 @@ export default defineComponent({
       </div>
     </section>
 
-    <!-- 技能/工具/知识库选择弹窗 -->
+    <!-- 技能/MCP/工具/知识库选择弹窗 -->
     <a-modal
       v-model:open="pickerVisible"
       :title="
         pickerType === 'skill'
           ? '挂载技能'
-          : pickerType === 'tool'
-            ? '挂载工具'
-            : '挂载知识库'
+          : pickerType === 'mcp'
+            ? '挂载 MCP 连接'
+            : pickerType === 'tool'
+              ? '挂载平台工具'
+              : '挂载知识库'
       "
       width="520px"
       @ok="confirmPicker"
@@ -604,15 +1039,43 @@ export default defineComponent({
             v-for="s in skillOptions"
             :key="s.id"
             class="hermes-picker-item"
-            :class="{ active: pickerSelected.some((i) => i.key === s.id) }"
-            @click="togglePick({ key: s.id, name: s.name, source: 'skill' })"
+            :class="{
+              active: pickerSelected.some((i) => i.key === String(s.id)),
+            }"
+            @click="
+              togglePick({
+                key: String(s.id),
+                name: s.name,
+                source: 'skill',
+              })
+            "
           >
             <b>{{ s.name }}</b>
-            <span>{{ s.description }}</span>
+            <span>{{ s.description || '技能' }}</span>
           </div>
           <a-empty
             v-if="skillOptions.length === 0"
-            description="暂无可用技能"
+            description="暂无可用技能（需本人创建或被授权使用）"
+          />
+        </div>
+        <div v-else-if="pickerType === 'mcp'">
+          <div
+            v-for="t in mcpOptions"
+            :key="t.id"
+            class="hermes-picker-item"
+            :class="{
+              active: pickerSelected.some((i) => i.key === String(t.id)),
+            }"
+            @click="
+              togglePick({ key: String(t.id), name: t.name, source: 'mcp' })
+            "
+          >
+            <b>{{ t.name }}</b>
+            <span>{{ t.type }} · {{ t.description || 'MCP 连接' }}</span>
+          </div>
+          <a-empty
+            v-if="mcpOptions.length === 0"
+            description="暂无可挂载的 MCP 连接（需本人创建或被授权使用）"
           />
         </div>
         <div v-else-if="pickerType === 'tool'">
@@ -628,30 +1091,30 @@ export default defineComponent({
             "
           >
             <b>{{ t.name }}</b>
-            <span>{{ t.type }} · {{ t.url || t.command || '本地命令' }}</span>
+            <span>{{ t.description || '平台工具' }}</span>
           </div>
           <a-empty
             v-if="toolOptions.length === 0"
-            description="暂无 MCP 连接，请先到 MCP 连接管理添加"
+            description="暂无可用平台工具（需本人创建或被授权使用）"
           />
         </div>
         <div v-else>
           <div
             v-for="k in kbOptions"
-            :key="k.kb_id"
+            :key="k.id"
             class="hermes-picker-item"
             :class="{
-              active: pickerSelected.some((i) => i.key === String(k.kb_id)),
+              active: pickerSelected.some((i) => i.key === String(k.id)),
             }"
             @click="
               togglePick({
-                key: String(k.kb_id),
-                name: k.kb_name,
+                key: String(k.id),
+                name: k.name,
                 source: 'kb',
               })
             "
           >
-            <b>{{ k.kb_name }}</b>
+            <b>{{ k.name }}</b>
             <span>{{ k.description || '知识库' }}</span>
           </div>
           <a-empty v-if="kbOptions.length === 0" description="暂无可用知识库" />
@@ -685,7 +1148,7 @@ export default defineComponent({
 
 // ==================== 左侧对话框 ====================
 .hermes-chat {
-  flex: 0 0 58%;
+  flex: 0 0 55%;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -716,6 +1179,7 @@ export default defineComponent({
 
     .hermes-title {
       flex: 1;
+      min-width: 0;
       h2 {
         margin: 0;
         font-size: 16px;
@@ -726,6 +1190,11 @@ export default defineComponent({
         font-size: 12px;
         color: var(--text-color-3, #8a9099);
       }
+    }
+
+    .hermes-model-select {
+      width: 190px;
+      flex-shrink: 0;
     }
   }
 
@@ -1052,5 +1521,155 @@ export default defineComponent({
   color: #e2e8f0;
   font-size: 12px;
   line-height: 1.6;
+}
+
+// ==================== 会话侧栏 ====================
+.hermes-side {
+  flex: 0 0 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: var(--layout-header-bg-color, #fff);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+
+  .hermes-side-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .hermes-side-item {
+    padding: 7px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+
+    &:hover {
+      background: var(--hover-color, #f5f7fa);
+    }
+    &.active {
+      background: rgba(22, 119, 255, 0.08);
+
+      .hermes-side-title {
+        color: var(--primary-color, #1677ff);
+      }
+    }
+
+    .hermes-side-title {
+      display: block;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .hermes-side-empty {
+    padding: 18px 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-color-3, #8a9099);
+  }
+}
+
+// ==================== assistant 消息复合体（思考/工具/运行态） ====================
+.hermes-chat .hermes-msg .hermes-body {
+  max-width: 78%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+
+  .hermes-bubble {
+    max-width: 100%;
+  }
+
+  .hermes-thinking {
+    width: 100%;
+    border: 1px dashed var(--border-color, #e4e7ed);
+    border-radius: 8px;
+    padding: 4px 8px;
+
+    summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-color-3, #8a9099);
+      user-select: none;
+    }
+    pre {
+      margin: 6px 0 2px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-color-2, #5e6470);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  }
+
+  .hermes-call {
+    max-width: 100%;
+    border-left: 3px solid #8b5cf6;
+    background: rgba(139, 92, 246, 0.06);
+    border-radius: 4px 8px 8px 4px;
+    padding: 4px 8px;
+
+    b {
+      font-size: 12px;
+    }
+    pre {
+      margin: 4px 0 2px;
+      font-size: 11px;
+      color: var(--text-color-3, #8a9099);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+  }
+
+  .hermes-msg-error {
+    :deep(.ant-tag) {
+      max-width: 100%;
+      white-space: normal;
+      height: auto;
+    }
+  }
+
+  .hermes-running {
+    display: inline-flex;
+    gap: 4px;
+    padding: 6px 2px 2px;
+
+    .dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #8b5cf6;
+      animation: hermes-blink 1.2s infinite;
+
+      &:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      &:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+    }
+  }
+}
+
+@keyframes hermes-blink {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+  }
+
+  30% {
+    opacity: 1;
+  }
 }
 </style>

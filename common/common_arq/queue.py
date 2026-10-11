@@ -30,11 +30,15 @@ PIPELINE_RAG = "ragflow"
 # 图谱构建独立流水线：抽取比文档解析更耗时（一篇全量切片逐批走大模型），单拆一队
 # 避免慢图谱占满解析 worker 的并发槽位；连接与后端复用 arq_ragflow 段（见 get_redis_setting）
 PIPELINE_GRAPH = "graphflow"
+# 深度探索 harness 智能体流水线：对话轮次（turn）任务；Redis 段独立（arq_harness），
+# 未配置时回落 arq_workflow 段（见 get_redis_setting / bootstrap）
+PIPELINE_HARNESS = "harness"
 
 # 队列名常量（分片队列：{基础名}:split_{N}，生产端 enqueue 与消费端 WorkerSettings 共用同一拼法）
 QUEUE_NAME = "workflow_queue"
 RAG_QUEUE_NAME = "ragflow_queue"
 GRAPH_QUEUE_NAME = "graphflow_queue"
+HARNESS_QUEUE_NAME = "harness_queue"
 
 SPLIT_NAME = "split_"
 
@@ -51,12 +55,14 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 DEFAULT_WORKER_NAME = "workflow_worker"
 RAG_WORKER_NAME = "ragflow_worker"
 GRAPH_WORKER_NAME = "graphflow_worker"
+HARNESS_WORKER_NAME = "harness_worker"
 
 # 监控页下拉的展示名（流水线 → 中文名）：只给 UI 用，不参与队列名/ key 拼接
 PIPELINE_LABELS: dict[str, str] = {
     PIPELINE_WORKFLOW: "工作流执行监控",
     PIPELINE_RAG: "知识库解析监控",
     PIPELINE_GRAPH: "知识图谱构建监控",
+    PIPELINE_HARNESS: "深度探索智能体监控",
 }
 
 # 每条流水线的（基础队列名, 切片数配置 key, worker 健康 key 前缀）。
@@ -65,6 +71,7 @@ _PIPELINE_CFG: dict[str, tuple[str, str, str]] = {
     PIPELINE_WORKFLOW: (QUEUE_NAME, "workflow_queue:split_number", DEFAULT_WORKER_NAME),
     PIPELINE_RAG: (RAG_QUEUE_NAME, "ragflow_queue:split_number", RAG_WORKER_NAME),
     PIPELINE_GRAPH: (GRAPH_QUEUE_NAME, "graphflow_queue:split_number", GRAPH_WORKER_NAME),
+    PIPELINE_HARNESS: (HARNESS_QUEUE_NAME, "harness_queue:split_number", HARNESS_WORKER_NAME),
 }
 
 # workflow 流水线的切片数配置 key（值 = 切片数，存在即生效；不存在按默认 1）：
@@ -81,6 +88,7 @@ class CustomRedisSettings:
     """
     yml: dict = {}          # arq_workflow 段（workflow 流水线）
     yml_rag: dict = {}      # arq_ragflow 段（rag 与 graph 流水线共用：图谱只是拆队，不换实例）
+    yml_harness: dict = {}  # arq_harness 段（harness 流水线；为空时回落 arq_workflow 段）
 
     @classmethod
     def get_redis_setting(cls, pipeline: str = PIPELINE_WORKFLOW) -> RedisSettings:
@@ -88,8 +96,16 @@ class CustomRedisSettings:
 
         graphflow 复用 arq_ragflow 这一段 Redis：图谱拆独立队列是为了隔离并发，不是隔离
         存储；多引一份 Nacos data_id 只会多出一次对不上的机会。
+        harness 段为空时回落 arq_workflow 段：生产端（bootstrap）与消费端（worker
+        prepare_config）用同一套回落，两边都不配 arq_harness data_id 也指向同一 Redis，
+        不会出现「任务投了没人消费」。
         """
-        yml = (cls.yml_rag if pipeline in (PIPELINE_RAG, PIPELINE_GRAPH) else cls.yml).get("redis", {}) or {}
+        if pipeline == PIPELINE_HARNESS:
+            yml = (cls.yml_harness.get("redis") or cls.yml.get("redis")) or {}
+        elif pipeline in (PIPELINE_RAG, PIPELINE_GRAPH):
+            yml = cls.yml_rag.get("redis", {}) or {}
+        else:
+            yml = cls.yml.get("redis", {}) or {}
         settings = RedisSettings.from_dsn(yml["url"])
         if yml.get("password"):
             settings.password = yml.get("password")
@@ -184,9 +200,9 @@ async def enqueue_job(function: str,
     )
     if job is None:
         # arq 对已存在的 job_id 返回 None（任务全局去重）
-        log.warning("arq enqueue skipped(duplicated job_id): {} job_id={}", function, job_id)
+        # log.warning("arq enqueue skipped(duplicated job_id): {} job_id={}", function, job_id)
         return False
-    log.info("arq enqueue ok: {} job_id={} queue={}", function, job_id or job.job_id, queue_name)
+    # log.info("arq enqueue ok: {} job_id={} queue={}", function, job_id or job.job_id, queue_name)
     return True
 
 

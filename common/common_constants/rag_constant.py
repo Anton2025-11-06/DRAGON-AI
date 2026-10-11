@@ -638,7 +638,7 @@ OPEN_API_MAX_FILES = 100
 #   text_rerank.max_documents 等         通义 gte-rerank-v2 = 500 条 / 30,000 token、智谱 = 128 条
 #   multimodal/image 向量 的 contents 配额  通义 multimodal-embedding-v1 图片一次只 1 张
 # 比上限大的批量会被分成几次请求，不会把整篇文档的解析打成 400
-EMBEDDING_BATCH_SIZE = 16
+EMBEDDING_BATCH_SIZE = 10
 EMBEDDING_CONCURRENCY = 2
 
 # 侧车产物（解析结果 blocks.jsonl）的格式版本：结构变更即 +1，旧产物读到不匹配就重解析

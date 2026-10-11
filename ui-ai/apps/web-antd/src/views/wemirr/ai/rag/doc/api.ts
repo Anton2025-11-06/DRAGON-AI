@@ -384,16 +384,38 @@ export const DocPageList = (kbId: number, data: DocPageReq) =>
     data,
   );
 
-export const UploadDocuments = (kbId: number, files: File[]) => {
+/**
+ * 一次性整包提交：所有文件一个 multipart 请求发完，不做前端分批。
+ *
+ * 后端是「逐项回执、不整批回滚」，页面上传口也不卡数量上限（开放 API 才限 100），
+ * 整包放一个请求里语义不变。请求级失败（超时/断网）时 multipart 半途断掉、
+ * 后端不会建行，全部文件按被拒出回执，不让上传弹窗直接走 catch 只弹一句
+ * 「上传失败」——回执形状与后端逐项回执同一份。
+ */
+export async function UploadDocuments(
+  kbId: number,
+  files: File[],
+): Promise<UploadResp> {
   const form = new FormData();
   files.forEach((f) => form.append('files', f));
-  // 整批原件传完 + 后端落存储并投递解析任务后才回包，默认的 10s 不够（大文件必挂）
-  return defHttp.post<UploadResp>(
-    `${BASE}/knowledge-bases/${kbId}/documents/upload`,
-    form,
-    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60_000 },
-  );
-};
+  try {
+    // 全部原件上行 + 后端落存储并投递解析任务后才回包：文件多、单文件上限
+    // 200MB，默认的 10s 必挂，整包按 10 分钟给足
+    return await defHttp.post<UploadResp>(
+      `${BASE}/knowledge-bases/${kbId}/documents/upload`,
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600_000 },
+    );
+  } catch (e: any) {
+    const items: UploadItemResp[] = files.map((f) => ({
+      fileName: f.name,
+      docId: 0,
+      status: 'REJECTED',
+      message: `上传请求失败：${e?.message || '请求超时'}`,
+    }));
+    return { kbId, accepted: 0, rejected: items.length, items };
+  }
+}
 
 export const DeleteDocuments = (kbId: number, ids: number[]) =>
   defHttp.post<{ accepted: number }>(

@@ -41,10 +41,10 @@ COPY . .
 # Windows 仓库检出的脚本可能带 CRLF，bash 会当成 "/bin/bash^M: bad interpreter"
 RUN sed -i 's/\r$//' scripts/*.sh && chmod +x scripts/*.sh
 
-# service_system 9001 / service_rag 9002 / service_workflow 9003 / service_login 9004 / gateway 18000
-EXPOSE 9001 9002 9003 9004 18000
+# service_system 9001 / service_rag 9002 / service_workflow 9003 / service_login 9004 / service_harness 9005 / gateway 18000
+EXPOSE 9001 9002 9003 9004 9005 18000
 
-# 必须注入：SERVICE_NAME=service_login|service_system|service_gateway|service_workflow|service_rag|arq_workflow|arq_ragflow|arq_graphflow
+# 必须注入：SERVICE_NAME=service_login|service_system|service_gateway|service_workflow|service_rag|service_harness|arq_workflow|arq_ragflow|arq_graphflow|arq_harness
 # 常用配套变量：NACOS_ADDR NACOS_NAME NACOS_PASSWD NACOS_NS_ID WORKERS ARQ_WORKERS SPLIT_NUMBER
 #               （rag 流水线的 worker 并发/超时看 Nacos 的 arq_ragflow.worker 段，不在这里注入）
 # 不写默认值：漏了 SERVICE_NAME 应该启动失败，而不是静默跑起一个谁都没想到的服务

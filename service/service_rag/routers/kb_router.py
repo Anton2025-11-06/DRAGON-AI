@@ -155,8 +155,6 @@ async def documents_page(request: Request, kb_id: int, body: Optional[DocPageReq
 async def upload_documents(request: Request, kb_id: int,
                            files: List[UploadFile] = File(...)):
     """页面上传：逐文件回执，成 10 个失败 2 个是常态，不整批回滚。
-
-    落存储的对象名带 kb_id 前缀（SPEC §11.2-1），文件本体不在本请求里解析——
     接口只做「收文件 + 建行 + 入队」，解析/分块/向量化由 rag 流水线的 worker 跑。
     """
     result = await RagDocService.upload(await get_login_user(request), kb_id, files)

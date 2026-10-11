@@ -1,12 +1,12 @@
 -- =====================================================================================
 -- DRAGON-AI 数据库初始化（全新部署的唯一入口）
--- 版本：v2 ｜ 覆盖 26 张业务表 + 角色/管理员/部门/菜单/权限种子
+-- 版本：v2 ｜ 覆盖 28 张业务表 + 角色/管理员/部门/菜单/权限种子
 --
 -- 怎么执行：
 --   mysql -h <host> -P 3306 -u <user> -p --default-character-set=utf8mb4 < sql/v2_init.sql
---   1) 整个文件必须用同一个连接跑完：PART 8 用 @会话变量 记菜单 id，换连接会丢。
+--   1) 整个文件必须用同一个连接跑完：PART 9 用 @会话变量 记菜单 id，换连接会丢。
 --   2) 换库名只改 PART 0 的两处（建库 + USE）。
---   3) login / gateway / system / rag / workflow 五个服务共用这一个库，一份文件建全。
+--   3) login / gateway / system / rag / workflow / harness 六个服务共用这一个库，一份文件建全。
 --   4) 重复执行安全：建表 IF NOT EXISTS，种子全部 INSERT IGNORE（行已存在就不动，
 --      不会把现场改过的口令、角色名、菜单排序冲回去）。
 --   5) MySQL 5.7+ / 8.x。JSON 与 TEXT 列一律不写 DEFAULT NULL（5.7 会报 1101，
@@ -310,7 +310,8 @@ CREATE TABLE IF NOT EXISTS `tb_document` (
     KEY `idx_task` (`task_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档表（原件在公共存储，本表存元数据与状态机）';
 
--- 2.3 文档切片表（切片的**完整正文**只在这里；ES 里的 content 是为检索准备的副本）
+-- 2.3 文档切片表（分块正文的唯一存放在 ES 的 content；本表只留元数据：chunk_id 前端契约、
+--   media_url 清理依据、vectorized 断点位，content/embed_text 两列退役为空串占位）
 --   本表是「可再生产物」：构建向量按 doc_id 整批物理替换，不做软删——留着旧行既不参与检索
 --   又会让 uk_doc_chunk 撞车。文档删除时随 doc_id 一起清，ES 侧另走 delete_by_query。
 CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
@@ -319,8 +320,8 @@ CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     `doc_id` BIGINT UNSIGNED NOT NULL,
     `chunk_index` INT NOT NULL DEFAULT 0 COMMENT '切片序号。与 kb_id/doc_id 拼成 ES 文档 _id：{kb_id}_{doc_id}_{chunk_index}，重跑幂等覆盖',
     `chunk_type` VARCHAR(16) NOT NULL DEFAULT 'text' COMMENT 'text/image/audio_video（ES 侧同值，多模态检索按类型过滤）',
-    `content` MEDIUMTEXT NOT NULL COMMENT '切片正文（表格已渲染成文本，图片块存大模型描述）',
-    `embed_text` MEDIUMTEXT COMMENT '实际送向量模型的文本（面包屑 + 正文 + 前后文补齐）。与 content 分开存，页面预览看到的才是原文',
+    `content` MEDIUMTEXT NOT NULL COMMENT '已退役：正文唯一存放在 ES 的 content，本列恒空串（NOT NULL 占位）',
+    `embed_text` MEDIUMTEXT COMMENT '已退役：送向量模型的文本只在解析进程内存里，本列恒空串',
     `title_path` VARCHAR(500) DEFAULT NULL COMMENT '标题层级面包屑（strategy=title 时的归属路径）',
     `sheet_name` VARCHAR(128) DEFAULT NULL COMMENT 'Excel 工作表名',
     `page_num` INT NOT NULL DEFAULT 0 COMMENT '起始页码，0=非分页文档',
@@ -338,7 +339,7 @@ CREATE TABLE IF NOT EXISTS `tb_document_chunk` (
     UNIQUE KEY `uk_doc_chunk` (`doc_id`, `chunk_index`),
     KEY `idx_kb` (`kb_id`),
     KEY `idx_kb_type` (`kb_id`, `chunk_type`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档切片表（分块正文，ES 向量的 MySQL 权威副本）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档切片表（切片元数据，分块正文只在 ES）';
 
 -- 2.4 知识评测运行表（RAGAS）：一次评测的配置快照 + 状态 + 平均耗时
 --   生成/裁判/相似度三个模型全部评测页自选（不依赖库表 chat_model_id）；检索参数落快照，
@@ -355,11 +356,13 @@ CREATE TABLE IF NOT EXISTS `tb_rag_eval_run` (
     `score_threshold` FLOAT NOT NULL DEFAULT 0.2 COMMENT '检索参数快照 得分阈值',
     `retrieval_mode` VARCHAR(16) DEFAULT NULL COMMENT 'VECTOR/KEYWORD/HYBRID，NULL=库默认',
     `with_graph` TINYINT NOT NULL DEFAULT 0 COMMENT '是否开启图谱增强召回',
+    `graph_depth` INT NOT NULL DEFAULT 2 COMMENT '图谱增强邻域深度（快照，1-3；仅 with_graph 开启时生效）',
+    `graph_scale` INT NOT NULL DEFAULT 10 COMMENT '图谱增强每一路召回规模（快照，1-50）',
     `graph_source_chunks` INT NOT NULL DEFAULT 0 COMMENT '图谱一路回捞的原文规模（0=默认）',
     `total_pairs` INT NOT NULL DEFAULT 0 COMMENT '问答对总数',
     `done_pairs` INT NOT NULL DEFAULT 0 COMMENT '已完成条项数（逐对回填递增）',
     `status` VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/DONE/FAILED',
-    `avg_latency_ms` INT NOT NULL DEFAULT 0 COMMENT '平均逐对延迟（召回+生成，不含打分）',
+    `total_latency_ms` INT NOT NULL DEFAULT 0 COMMENT '总耗时（worker 取到任务到收口的墙钟差，含召回+生成+打分）',
     `error` VARCHAR(1000) DEFAULT NULL COMMENT '整体失败原因',
     `is_deleted` TINYINT NOT NULL DEFAULT 0,
     `created_by` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人用户ID（运行历史归属判定列）',
@@ -695,7 +698,48 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='工作流API Key表';
 
 -- =====================================================================================
--- PART 7  种子：角色 / 管理员 / 根部门
+-- PART 7  深度探索 Harness 智能体（service_harness + arq harness worker）
+--   ReAct 智能体只有会话/消息两张表；运行态（AgentState 记忆窗口/HITL 待答上下文/
+--   沙箱绑定）在 Redis（agentscope RedisStorage，user/agent/session 三级 key），
+--   沙箱文件在 OpenSandbox（每用户一个 workspace_id），均不在 MySQL。
+-- =====================================================================================
+
+-- 7.1 深度探索-会话表（挂载快照与模型偏好切会话时恢复；发消息时以此组装 toolkit）
+CREATE TABLE IF NOT EXISTS `tb_harness_session` (
+    `id`             BIGINT          NOT NULL AUTO_INCREMENT,
+    `user_id`        BIGINT          NOT NULL COMMENT '所属用户（数据隔离边界：会话/沙箱/AgentState 三处都以它为界）',
+    `title`          VARCHAR(128) NOT NULL DEFAULT '新会话' COMMENT '会话标题',
+    `model_apply_id` BIGINT          NOT NULL DEFAULT 0 COMMENT '授权记录 apply_id（模型广场审批通过后签发，模型密钥从这行取）',
+    `model_name`     VARCHAR(128) DEFAULT NULL COMMENT '模型标识快照（展示用，调用以 apply 行为准）',
+    `mounts`         JSON         COMMENT '挂载快照 {kbIds:[],mcpIds:[],toolIds:[],skillIds:[]}（执行侧另有 ACL 二次校验，见 worker）',
+    `status`         VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE' COMMENT '状态 ACTIVE/ARCHIVED（归档后不再出现在列表）',
+    `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `update_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_hs_user` (`user_id`, `update_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='深度探索-会话';
+
+-- 7.2 深度探索-消息表（一轮对话 = USER 行 + ASSISTANT 行同 turn_id；turn_id 同时是
+--     arq job_id 与 harness:evt:{turn_id} 频道后缀，幂等投递与发布订阅共用这一个键）
+CREATE TABLE IF NOT EXISTS `tb_harness_message` (
+    `id`          BIGINT       NOT NULL AUTO_INCREMENT,
+    `session_id`  BIGINT          NOT NULL COMMENT '会话 id',
+    `turn_id`     VARCHAR(64)  NOT NULL COMMENT '轮次 UUID（一轮两行共用；SSE 订阅回放按它聚合）',
+    `role`        VARCHAR(16)  NOT NULL COMMENT '角色 USER/ASSISTANT',
+    `content`     MEDIUMTEXT   COMMENT '消息正文（ASSISTANT 为最终回复全文）',
+    `thinking`    MEDIUMTEXT   COMMENT '思考流全文（仅 ASSISTANT）',
+    `tool_calls`  JSON         COMMENT '工具调用轨迹 [{tool,arguments,result}]（result 裁剪口径同工作流 hide_tool_call_results）',
+    `status`      VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '轮次状态（ASSISTANT 行权威）RUNNING/COMPLETED/FAILED/INTERRUPTED（INTERRUPTED=HITL 挂起等用户答复）',
+    `error`       TEXT         COMMENT '失败原因（status=FAILED 时）',
+    `model_name`  VARCHAR(128) DEFAULT NULL COMMENT '本轮实际使用的模型标识（ASSISTANT 行）',
+    `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_hm_turn` (`turn_id`, `role`),
+    KEY `idx_hm_session` (`session_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='深度探索-消息（按轮 turn 组织）';
+
+-- =====================================================================================
+-- PART 8  种子：角色 / 管理员 / 根部门
 -- =====================================================================================
 
 -- 内置角色：靠 uk_role_code 幂等。已存在就什么都不改，因为 role_name/data_scope
@@ -717,12 +761,12 @@ WHERE u.`username` = 'admin' AND r.`role_code` = 'ADMIN';
 INSERT IGNORE INTO `tb_dept` (`dept_id`, `parent_id`, `dept_name`, `node_type`, `org_root_id`, `sort`) VALUES (1, 0, '总公司', 2, 1, 1);
 
 -- =====================================================================================
--- PART 8  种子：菜单与按钮权限（前端 vben 路由规范：目录 component='BasicLayout'，
+-- PART 9  种子：菜单与按钮权限（前端 vben 路由规范：目录 component='BasicLayout'，
 --   菜单 component='views/wemirr/xx/index.vue'，按钮 menu_type=3 且 perm 非空）
 --   父级 id 用 @会话变量记，所以本文件必须整份在同一个连接里执行。
 -- =====================================================================================
 
--- 8.1 一级目录
+-- 9.1 一级目录
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (0, '首页',       1, '/home',        'BasicLayout', 'lucide:home',      0),
 (0, '知识库',     1, '/kb',          'BasicLayout', 'lucide:book-open', 2),
@@ -739,7 +783,7 @@ SET @d_model_factory = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = 0 AN
 SET @d_dataset = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = 0 AND `menu_name` = '数据集工厂');
 SET @d_system = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = 0 AND `menu_name` = '系统管理');
 
--- 8.2 系统管理下的页面菜单
+-- 9.2 系统管理下的页面菜单
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (@d_system, '用户管理',   2, 'user',       'views/wemirr/system/user/index.vue',          'lucide:users',       1),
 (@d_system, '角色管理',   2, 'role',       'views/wemirr/system/auth/role/index.vue',     'lucide:shield',      2),
@@ -760,7 +804,7 @@ SET @m_log = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND 
 SET @m_arq = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '队列监控');
 SET @m_usergroup = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_system AND `menu_name` = '用户组管理');
 
--- 8.3 首页 / 知识库 / 模型工厂 / 数据集工厂 下的页面菜单
+-- 9.3 首页 / 知识库 / 模型工厂 / 数据集工厂 下的页面菜单
 --     知识库下四页：知识维护（库列表 + 文档）、知识检索、图谱检索、知识评测（RAGAS）；
 --     「知识库对话」页与旧「知识库检索」页已取消（检索/图谱从列表行内按钮提升为独立菜单）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
@@ -780,7 +824,7 @@ SET @m_kb_retrieve = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb 
 SET @m_kb_graph = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '图谱检索');
 SET @m_kb_eval = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_kb AND `menu_name` = '知识评测');
 
--- 8.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
+-- 9.4 智能体下的四个页面菜单（技能/MCP/工具已与工作流编排同级，不再有「工具目录」中间层）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (@d_agent, '工作流编排', 2, 'workflow', 'views/wemirr/ai/workflow/list/index.vue', 'lucide:workflow', 1),
 (@d_agent, '技能管理',   2, 'skill',    'views/wemirr/ai/agent/skill/index.vue',   'lucide:sparkles', 2),
@@ -791,7 +835,7 @@ SET @m_skill = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_agent AND
 SET @m_mcp = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_agent AND `menu_name` = 'MCP连接');
 SET @m_tool = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_agent AND `menu_name` = '工具管理');
 
--- 8.5 模型广场下的页面菜单
+-- 9.5 模型广场下的页面菜单
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
 (@d_plaza, '模型列表', 2, 'model',      'views/wemirr/ai/model-plaza/index.vue',                'lucide:box',             1),
 (@d_plaza, '申请审批', 2, 'apply',      'views/wemirr/ai/model-plaza/apply.vue',                'lucide:clipboard-check', 2),
@@ -799,7 +843,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `co
 SET @m_model = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_plaza AND `menu_name` = '模型列表');
 SET @m_model_apply = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_plaza AND `menu_name` = '申请审批');
 
--- 8.6 按钮权限点：系统管理（与 service_system 各路由的 @has_permission 一一对应）
+-- 9.6 按钮权限点：系统管理（与 service_system 各路由的 @has_permission 一一对应）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
 (@m_user, '用户查询', 3, 'system:user:list',   1),
 (@m_user, '用户新增', 3, 'system:user:add',    2),
@@ -834,7 +878,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_usergroup, '用户组删除', 3, 'system:usergroup:delete', 4),
 (@m_usergroup, '成员维护',   3, 'system:usergroup:member', 5);
 
--- 8.7 按钮权限点：模型广场与智能体（与 service_workflow 各路由的 @has_permission 一一对应；
+-- 9.7 按钮权限点：模型广场与智能体（与 service_workflow 各路由的 @has_permission 一一对应；
 --     模型列表查询 system:model:list 后端暂未挂装饰器，留作页面按钮显隐与后续启用）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
 (@m_model, '模型列表查询', 3, 'system:model:list',   1),
@@ -880,7 +924,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_tool, '工具删除',    3, 'workflow:tool:delete', 4),
 (@m_tool, '工具测试运行', 3, 'workflow:tool:test',  5);
 
--- 8.8 按钮权限点：资源授权（ACL）入口。它只决定「能不能打开授权弹窗/调用授权接口」，
+-- 9.8 按钮权限点：资源授权（ACL）入口。它只决定「能不能打开授权弹窗/调用授权接口」，
 --     具体到某条资源能不能授，另由该资源上的 share 动作决定（两层 AND）
 INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
 (@m_workflow, '工作流授权', 3, 'workflow:workflow:grant', 16),
@@ -891,7 +935,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_kb_doc,   '知识库授权', 3, 'ai:kb:grant',             1),
 (@m_kb_doc,   '文档授权',   3, 'ai:doc:grant',            2);
 
--- 8.9 功能权限点：知识库（SPEC §3.1：RBAC 只管菜单可见、页面准入、新建知识库这三类全局入口）
+-- 9.9 功能权限点：知识库（SPEC §3.1：RBAC 只管菜单可见、页面准入、新建知识库这三类全局入口）
 --     行级按钮不再挂功能权限：能不能改这个库、能不能删这份文档，全部由 ACL 的资源动作判定
 --     （knowledge_base / document 两类，见 resource_guard.RESOURCE_SPECS），两层各管一段不打架
 --     「知识库查询」/「新建知识库」两个按钮位就列在知识维护页下，由系统管理-菜单管理直接控制
@@ -903,7 +947,7 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_kb_eval, '知识评测', 3, 'ai:kb:eval',     1);
 
 -- =====================================================================================
--- PART 9  种子：角色授权
+-- PART 10  种子：角色授权
 -- =====================================================================================
 
 -- ADMIN 授予全部菜单与权限点（新增菜单后重跑本文件即可补授权，uk_role_menu 保证幂等）
@@ -921,10 +965,10 @@ WHERE r.`role_code` = 'USER'
                       (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_plaza AND `menu_name` = '模型体验'));
 
 -- =====================================================================================
--- PART 10  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
+-- PART 11  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 28 张；菜单 119 行 = 目录 7 + 页面 27 + 权限点 85；ADMIN 授权应覆盖这 119 行
-SELECT '表数量（应为 28）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+-- 表 30 张；菜单 119 行 = 目录 7 + 页面 27 + 权限点 85；ADMIN 授权应覆盖这 119 行
+SELECT '表数量（应为 30）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
 SELECT '菜单行数（应为 119）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
 SELECT '菜单分层（应为 1:7 / 2:27 / 3:85）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;

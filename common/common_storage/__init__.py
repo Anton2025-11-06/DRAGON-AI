@@ -200,8 +200,7 @@ async def init_storage(config: Optional[dict] = None) -> StorageBackend:
             url_expires=url_expires,
         )
     else:
-        raise ValueError(f"不支持的 storage.type={backend_type}（可选 local | oss；"
-                         f"S3/MinIO 后端已移除）")
+        raise ValueError(f"不支持的 storage.type={backend_type}（可选 local | oss；")
     log.info(f"storage backend selected: {_default.backend_name}")
     return _default
 

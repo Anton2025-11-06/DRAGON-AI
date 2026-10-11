@@ -84,10 +84,13 @@ def _run_to_resp(run: RagEvalRun, *, metric_avgs: Optional[dict] = None) -> Eval
         generation_model_id=run.generation_model_id, judge_model_id=run.judge_model_id,
         embed_model_id=run.embed_model_id, top_k=run.top_k,
         score_threshold=float(run.score_threshold or 0.0), retrieval_mode=run.retrieval_mode,
-        with_graph=bool(run.with_graph), graph_source_chunks=bool(run.graph_source_chunks),
+        with_graph=bool(run.with_graph),
+        graph_depth=int(run.graph_depth or RC.KG_RETRIEVE_DEFAULT_DEPTH),
+        graph_scale=int(run.graph_scale or RC.KG_RETRIEVE_DEFAULT_SCALE),
+        graph_source_chunks=bool(run.graph_source_chunks),
         total_pairs=run.total_pairs, done_pairs=run.done_pairs,
         status=run.status, status_label=RC.EVAL_STATUS_LABELS.get(run.status, run.status),
-        avg_latency_ms=run.avg_latency_ms, error=run.error, created_by=run.created_by,
+        total_latency_ms=run.total_latency_ms, error=run.error, created_by=run.created_by,
         create_time=_fmt_dt(run.create_time), update_time=_fmt_dt(run.update_time),
         metric_avgs=metric_avgs or {},
     )
@@ -200,6 +203,9 @@ class RagEvalService:
                 top_k=top_k, score_threshold=score_threshold,
                 retrieval_mode=(req.retrieval_mode or None),
                 with_graph=1 if req.with_graph else 0,
+                # 图谱增强的深度/规模也落快照：页面显式给了用给的，否则落默认（2 跳 / 每路 10 条）
+                graph_depth=int(req.graph_depth or RC.KG_RETRIEVE_DEFAULT_DEPTH),
+                graph_scale=int(req.graph_scale or RC.KG_RETRIEVE_DEFAULT_SCALE),
                 graph_source_chunks=1 if req.graph_source_chunks else 0,
                 total_pairs=len(pairs), done_pairs=0,
                 status=RC.EVAL_STATUS_PENDING,
@@ -291,4 +297,51 @@ class RagEvalService:
             await session.commit()
         log.info("知识评测记录已删除: run_id={}", run_id)
         return True
+
+    # ==================== 六、重新执行 ====================
+    @staticmethod
+    async def rerun_run(login_user: dict, run_id: int) -> dict:
+        """一场已收口的评测原样重跑：配置快照沿用，答案/指标/耗时全部清零重来。
+
+        卡点：
+        - 归属同详情/删除（个人资产）；
+        - 还在排队/跑动中的不重跑：同一场两个任务会互相踩状态（execute 只挑 PENDING
+          条项，第二条会空跑一遍再收口一次，进度与耗时全乱）。
+        """
+        async with mysql_client.get_session() as session:
+            run = (await session.execute(
+                select(RagEvalRun).where(RagEvalRun.run_id == int(run_id),
+                                         RagEvalRun.is_deleted == 0))).scalar_one_or_none()
+            if not run:
+                raise ValueError("评测记录不存在")
+            if not is_admin(login_user) and run.created_by != int(login_user.get("user_id") or 0):
+                raise ValueError("无权重新执行这条评测记录")
+            if run.status in (RC.EVAL_STATUS_PENDING, RC.EVAL_STATUS_RUNNING):
+                raise ValueError("这场评测还在排队/执行中，等它收口后才能重新执行")
+            total_pairs = int(run.total_pairs or 0)
+            # 逐条项清零：答案/召回片段/五指标/三段耗时/失败原因全部抹掉，状态回 PENDING
+            await session.execute(update(RagEvalItem).where(
+                RagEvalItem.run_id == run.run_id).values(
+                generated_answer=None, contexts=None,
+                faithfulness=None, answer_relevancy=None,
+                context_precision=None, context_recall=None, answer_correctness=None,
+                took_recall_ms=0, took_generate_ms=0, took_score_ms=0,
+                status=RC.EVAL_ITEM_PENDING, error=None))
+            await session.execute(update(RagEvalRun).where(
+                RagEvalRun.run_id == run.run_id).values(
+                status=RC.EVAL_STATUS_PENDING, done_pairs=0,
+                total_latency_ms=0, error=None))
+            await session.commit()
+
+        # 重跑必须换新 job_id（unique=True）：arq 会保留已完成任务的结果一段时间，
+        # 沿用 create 那次的 id 会被判成重复投递静默跳过，页面就是「点了重跑一直排队中」
+        try:
+            job_id = await RagTaskService.enqueue(
+                RC.RAG_TASK_EVAL, [int(run_id)], job_key=f"eval:{run_id}", unique=True)
+        except Exception as enqueue_error:  # noqa: BLE001  收口后原样上抛，让接口照报错
+            log.error("知识评测重新入队失败，运行置为失败: run_id={}: {}", run_id, enqueue_error)
+            await _fail_run(run_id, f"评测任务入队失败：{enqueue_error}")
+            raise
+        log.info("知识评测已重新投递: run_id={} pairs={} job={}", run_id, total_pairs, job_id)
+        return {"runId": int(run_id), "totalPairs": total_pairs}
 

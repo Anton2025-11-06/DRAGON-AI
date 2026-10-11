@@ -164,13 +164,45 @@ const canDeleteRow = (d: DocumentResp) => canAction(d, 'delete');
 // 重跑解析链路的动作码，现在只有媒体行上的「重试」图标用它：doc 型的行操作定死为四项
 // （需求 9），工具栏的批量重试位也一并撤了 —— doc 型要重跑走「构建向量」，它底层是同一个投递
 const canRetryRow = (d: DocumentResp) => canAction(d, 'reparse');
-// 查看解析后文档不新开动作码：它就是看这篇文档的内容，与详情同源（后端给 view）
-const canViewRow = (d: DocumentResp) => canAction(d, 'view');
+/**
+ * 查看解析后内容 = 知识库「库内文件」那一组的 content 权限（授权弹窗里这一项的标签就叫「查看解析后内容」）。
+ * 不能用文档行的 view 判定：行上的 view 只表示「这行可见、能点开看归属人」，decorate_actions 在一条动作都没
+ * 命中时也会兜底恒下发 view，同组织仅拿到数据范围档（scope）的 B，行上照样带 view —— 拿 view 当内容门禁
+ * 等于对越权放行。content 既不在 document.scope 也不在 knowledge_base.scope（scope 只给 view/use），
+ * 必须显式授权才拿得到，正是这一条按钮应有的门槛。整库语义走父库那一行：勾一次「库内文件」全库文档都放行。
+ */
+const canContentRow = () => canAction(props.kb, 'content');
 
 const canUploadToKb = computed(() => canAction(props.kb, 'upload'));
 
-/** 勾选态如今只决定工具栏要不要出「删除」位（批量重试/取消位已撤，构建向量与图谱直接读 selectedIds） */
-const hasSelection = computed(() => selectedIds.value.length > 0);
+/** 勾选中的文档行对象（工具栏批量位按这些行的后端 actions 判定，不看整库） */
+const selectedDocs = computed(() =>
+  docs.value.filter((d) => selectedIds.value.includes(d.id)),
+);
+
+/**
+ * 工具栏三个批量位（构建向量/构建图谱/批量删除）同样只认后端下发的 actions，与行内按钮同口径。
+ * 这三个是「勾选文档后整批发起」的入口，reparse/graph/delete 都不在数据范围档（scope 只给 view），
+ * 同组织未获授权的人手里这些码恒为空 —— 早先这里只判断 isDoc/是否勾选，等于给越权开了个不经过
+ * ACL 的旁路：同组织的 B 明明只能 view，却在工具栏看到构建与批量删除。现按「选中行全部持有该动作」
+ * 出按钮：没勾或勾了没权限的行都不出，杜绝「按钮亮着点了必 403」与越权入口两种错。
+ */
+const canReparseSel = computed(
+  () =>
+    selectedDocs.value.length > 0 &&
+    selectedDocs.value.every((d) => canAction(d, 'reparse')),
+);
+const canGraphSel = computed(
+  () =>
+    isDoc.value &&
+    selectedDocs.value.length > 0 &&
+    selectedDocs.value.every((d) => canAction(d, 'graph')),
+);
+const canDeleteSel = computed(
+  () =>
+    selectedDocs.value.length > 0 &&
+    selectedDocs.value.every((d) => canAction(d, 'delete')),
+);
 
 function formatSize(bytes: number) {
   if (!bytes) return '0 B';
@@ -534,15 +566,19 @@ const rowSelection = computed<any>(() => ({
           <template #icon><UploadOutlined /></template>
           上传
         </Button>
-        <!-- 批量位对三类库都给（媒体库一样能重跑向量）；只有图谱是 doc 型专属 -->
-        <Tooltip title="先删除这些文档已有的向量数据，再按当前分块配置重新分块并向量化（旧名「重新分块」）">
+        <!-- 批量位对三类库都给（媒体库一样能重跑向量）；只有图谱是 doc 型专属。
+             三个位都只在「选中行全部持有该动作」时出，不再无条件显示（越权入口修复） -->
+        <Tooltip
+          v-if="canReparseSel"
+          title="先删除这些文档已有的向量数据，再按当前分块配置重新分块并向量化（旧名「重新分块」）"
+        >
           <Button size="small" @click="doBuildVectors">
             <template #icon><ScissorOutlined /></template>
             构建向量
           </Button>
         </Tooltip>
         <Tooltip
-          v-if="isDoc"
+          v-if="canGraphSel"
           title="先删除这些文档已有的图谱数据，再重新抽取实体与关系（需库上开了图谱并配了抽取模型）"
         >
           <Button size="small" @click="doBuildGraph">
@@ -550,7 +586,7 @@ const rowSelection = computed<any>(() => ({
             构建图谱
           </Button>
         </Tooltip>
-        <Button v-if="hasSelection" size="small" danger @click="doBatchDelete">
+        <Button v-if="canDeleteSel" size="small" danger @click="doBatchDelete">
           删除({{ selectedIds.length }})
         </Button>
         <Tooltip
@@ -692,9 +728,10 @@ const rowSelection = computed<any>(() => ({
                   <template #icon><FileSearchOutlined /></template>
                 </Button>
               </Tooltip>
-              <!-- 媒体型没有「解析后内容」与「切片」这两个概念，两个位只对 doc 型出现 -->
+              <!-- 媒体型没有「解析后内容」与「切片」这两个概念，两个位只对 doc 型出现；
+                   内容位按整库的 content 权限显隐（见 canContentRow），不再用行 view 兜底 -->
               <Tooltip
-                v-if="isDoc && canViewRow(record as DocumentResp)"
+                v-if="isDoc && canContentRow()"
                 title="查看解析后内容"
               >
                 <Button

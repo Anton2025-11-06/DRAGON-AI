@@ -145,7 +145,9 @@ class Document(Base):
 
 
 class DocumentChunk(Base):
-    """文档切片表：切片的**完整正文**只在这里（ES 的 content 是为检索准备的副本）。
+    """文档切片表：切片的**元数据**在这里（chunk_id 前端契约 + media_url 清理依据 +
+    vectorized 断点位），分块正文的唯一存放在 ES 的 content（本表 content/embed_text
+    两列已退役为空串占位——NOT NULL 不允许删列，留作回滚口子）。
 
     与 ES 文档的关系：ES ``_id = {kb_id}_{doc_id}_{chunk_index}``，本表的
     uk_doc_chunk(doc_id, chunk_index) 与之对应，重跑幂等覆盖、不断点错位。
@@ -162,9 +164,10 @@ class DocumentChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chunk_type: Mapped[str] = mapped_column(String(16), nullable=False, default=RC.CHUNK_TYPE_TEXT,
                                             comment="text/image/audio_video（ES 侧同值）")
-    content: Mapped[str] = mapped_column(Text, nullable=False, comment="切片正文（页面预览看到的才是原文）")
+    content: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="已退役：正文唯一存放在 ES 的 content，本列恒空串（NOT NULL 占位）")
     embed_text: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True, comment="实际送向量模型的文本（面包屑 + 正文 + 前后文补齐）")
+        Text, nullable=True, comment="已退役：送向量模型的文本只在解析进程内存里，本列恒空串")
     title_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, comment="标题层级面包屑")
     sheet_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, comment="Excel 工作表名")
     page_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="起始页码，0=非分页文档")
@@ -220,14 +223,22 @@ class RagEvalRun(Base):
                                                           comment="VECTOR/KEYWORD/HYBRID，NULL=库默认")
     with_graph: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                             comment="是否开启图谱增强召回")
+    graph_depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=RC.KG_RETRIEVE_DEFAULT_DEPTH,
+        comment="图谱增强邻域深度（快照，1-3；仅 with_graph 开启时生效）")
+    graph_scale: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=RC.KG_RETRIEVE_DEFAULT_SCALE,
+        comment="图谱增强每一路召回规模（快照，1-50）")
     graph_source_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                                      comment="图谱一路回捞的原文规模（0=默认）")
     total_pairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="问答对总数")
     done_pairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="已完成条项数")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=RC.EVAL_STATUS_PENDING,
                                         index=True, comment="PENDING/RUNNING/DONE/FAILED")
-    avg_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
-                                                comment="平均逐对延迟（召回+生成，不含打分）")
+    # 总耗时：worker 从队列取到任务起到收口的墙钟差（含召回+生成+打分），取代旧口径的「平均逐对延迟」
+    total_latency_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="总耗时（worker 取到任务到收口的墙钟差，含召回+生成+打分，ms）")
     error: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, comment="整体失败原因")
     is_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0,

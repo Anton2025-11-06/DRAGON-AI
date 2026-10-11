@@ -110,3 +110,4 @@ openai==2.54.0
 arq==0.28.0
 # MCP 官方 SDK（ClientSession：initialize / tools.list / tools.call）
 mcp>=1.8.0
+opensandbox>=1.1.1

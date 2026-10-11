@@ -39,9 +39,11 @@ import { useRoute } from 'vue-router';
 import { useAccess } from '@vben/access';
 
 import {
+  DownOutlined,
   FileSearchOutlined,
   PictureOutlined,
   SearchOutlined,
+  UpOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons-vue';
 import {
@@ -55,7 +57,6 @@ import {
   message,
   Select,
   Slider,
-  Space,
   Spin,
   Switch,
   TabPane,
@@ -126,6 +127,9 @@ const graphDepth = ref(2);
 const graphScale = ref(10);
 // 需求 9（选 A）：默认只出精炼的实体+关系，不让图谱反查原文 chunk（会把上下文撑大、模型失焦）
 const graphSourceChunks = ref(false);
+
+/** 参数区折叠态：搜索行常驻，参数一收起来检索结果立刻上移一大截（调优时再展开） */
+const paramsExpanded = ref(true);
 
 const loading = ref(false);
 const searched = ref(false);
@@ -672,6 +676,10 @@ function fitKg(width: number) {
   );
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
+  // 9 元素 gl-matrix 列主序 mat3（末位齐次位必须为 1）：最初这里多写了两个数，第 9 位
+  // 落成 0，矩阵奇异——平移（translate 里 T·A ≡ A）与命中（invert 回退单位阵）全废，
+  // 而渲染不看末位、图照样正常，就成了「图好好的但拖不动、点不中」。详见图谱检索页
+  // fitToView 同一处修复的源码核对注释。
   g.get('group').setMatrix([
     ratio,
     0,
@@ -681,8 +689,6 @@ function fitKg(width: number) {
     0,
     width / 2 - ratio * cx,
     KG_MINI_HEIGHT / 2 - ratio * cy,
-    0,
-    0,
     1,
   ]);
   g.autoPaint();
@@ -840,28 +846,96 @@ onBeforeUnmount(() => {
     />
 
     <Card :bordered="false" class="param-card mb-2">
-      <Space direction="vertical" :size="10" style="width: 100%">
-        <!-- 参数行 1：库 + 检索方式（需求 7：勾选召回路，两路都勾才按百分比分配） -->
-        <Space wrap :size="12">
+      <!-- 主搜索行：输入框 + 动作按钮一排到头。检索入口放在最顶上（问一句话是这页的第一
+           动作），选了图片库时图搜图上传挂同一行右端，参数区怎么展开收起都不会把它推跑 -->
+      <div class="search-row">
+        <Input
+          v-model:value="query"
+          class="search-input"
+          size="large"
+          placeholder="输入查询内容，回车即检索…"
+          @press-enter="doSearch"
+        >
+          <template #prefix><SearchOutlined /></template>
+        </Input>
+        <Button
+          size="large"
+          type="primary"
+          :loading="loading || answering"
+          @click="doSearch"
+        >
+          {{ chatModelId ? '检索并问答' : '检索' }}
+        </Button>
+        <Button size="large" @click="reset">清空</Button>
+        <!-- 图搜图：选了图片库才出现，上传后回显缩略图，点缩略图旁「移除」可撤掉 -->
+        <template v-if="hasImageKb">
+          <span class="search-sep"></span>
+          <Upload
+            :before-upload="onUploadImage"
+            :show-upload-list="false"
+            accept="image/*"
+          >
+            <Button size="large" :loading="uploading">
+              <template #icon><PictureOutlined /></template>
+              上传查询图片（图搜图）
+            </Button>
+          </Upload>
+          <template v-if="imageUrl">
+            <img :src="imageUrl" alt="query" class="query-thumb" />
+            <Button size="small" type="link" @click="imageUrl = ''">
+              移除
+            </Button>
+          </template>
+        </template>
+        <!-- 参数区折叠开关：搜内容是这页的高频动作，参数只在调优时才要看——一收起来
+             检索结果立刻上移一屏。警告行（graphWithoutChat）不跟着藏：它拦的是动作
+             本身，收起参数也该看得见 -->
+        <Button
+          class="params-toggle"
+          size="large"
+          type="text"
+          @click="paramsExpanded = !paramsExpanded"
+        >
+          {{ paramsExpanded ? '收起参数' : '展开参数' }}
+          <UpOutlined v-if="paramsExpanded" />
+          <DownOutlined v-else />
+        </Button>
+      </div>
+
+      <!-- 参数区：12 列栅格统一列距行距。原先两行 Space 的自然折行让「标签 + 控件」各自为政，
+           行与行之间没有一条对齐线；栅格把换行点交还给列宽，每个字段独占一格、纵向居中，
+           TopK 这类小控件与下拉这类长控件也能落在同一条基线上。v-show 而不是 v-if：
+           折叠只是藏起来，表单状态全保留，展开不用重选 -->
+      <div v-show="paramsExpanded" class="param-grid">
+        <!-- 行 1 的范围位：多选库 + 检索方式（需求 7：勾选召回路，两路都勾才按百分比分配） -->
+        <div class="param-item item-kb">
+          <span class="param-label">知识库</span>
           <Select
             v-model:value="kbIds"
             mode="multiple"
             :options="kbSelectOptions"
-            placeholder="知识库（留空 = 全部可用库）"
-            style="min-width: 300px"
+            placeholder="留空 = 全部可用库"
+            class="grow"
             :max-tag-count="2"
             option-filter-prop="label"
             allow-clear
           />
-          <Tooltip
-            title="只勾一路就只走那一路（那一路 100%）；两路都勾才按下面的百分比融合；都不勾 = 各库沿用自己的检索配置"
-          >
-            <span class="param-label">检索方式</span>
-          </Tooltip>
-          <CheckboxGroup
-            v-model:value="recallModes"
-            :options="recallModeOptions"
-          />
+        </div>
+        <div class="param-item item-recall">
+          <div class="recall-line">
+            <Tooltip
+              title="只勾一路就只走那一路（那一路 100%）；两路都勾才按下面的百分比融合；都不勾 = 各库沿用自己的检索配置"
+            >
+              <span class="param-label">检索方式</span>
+            </Tooltip>
+            <CheckboxGroup
+              v-model:value="recallModes"
+              :options="recallModeOptions"
+            />
+            <span v-if="!weights" class="param-label recall-hint">
+              未勾选：各库沿用自己的配置
+            </span>
+          </div>
           <!-- 权重条：两段加起来永远是 100%，滑块只在两路都勾时可拖 -->
           <div v-if="weights" class="weight-box">
             <div class="weight-track">
@@ -874,7 +948,7 @@ onBeforeUnmount(() => {
                 :style="{ width: `${weights.vector}%` }"
               ></div>
             </div>
-            <Space :size="8" align="center">
+            <div class="weight-ctrl">
               <span class="weight-num">关键词 {{ weights.keyword }}%</span>
               <Slider
                 v-if="bothRecall"
@@ -882,20 +956,16 @@ onBeforeUnmount(() => {
                 :max="100"
                 :min="0"
                 :step="5"
-                style="width: 140px"
                 tooltip-placement="top"
               />
               <span v-else class="weight-lock">单选一路，不可分配</span>
               <span class="weight-num">向量 {{ weights.vector }}%</span>
-            </Space>
+            </div>
           </div>
-          <span v-else class="param-label">
-            未勾检索方式：各库沿用自己的配置
-          </span>
-        </Space>
+        </div>
 
-        <!-- 参数行 2：条数与阈值、（需求 8）重排模型、（需求 9）对话模型与图谱增强 -->
-        <Space wrap :size="12">
+        <!-- 行 2 的参数位：条数与阈值、（需求 8）重排模型、（需求 9）对话模型 -->
+        <div class="param-item item-topk">
           <span class="param-label">TopK</span>
           <InputNumber
             v-model:value="topK"
@@ -903,6 +973,8 @@ onBeforeUnmount(() => {
             :max="100"
             style="width: 78px"
           />
+        </div>
+        <div class="param-item item-threshold">
           <Tooltip
             title="低于该相似度的命中直接丢掉，留空 = 用知识库自己的配置"
           >
@@ -916,6 +988,8 @@ onBeforeUnmount(() => {
             placeholder="默认"
             style="width: 92px"
           />
+        </div>
+        <div class="param-item item-rerank">
           <Tooltip
             title="选了才重排，不选就不重排：这一项只对本次请求生效，不沿用库上的重排配置"
           >
@@ -925,11 +999,13 @@ onBeforeUnmount(() => {
             v-model:value="rerankModelId"
             :options="rerankOptions"
             placeholder="不重排"
+            class="grow"
             allow-clear
             show-search
             :filter-option="(i: string, o: any) => o.label.includes(i)"
-            style="min-width: 200px"
           />
+        </div>
+        <div class="param-item item-chat">
           <Tooltip
             title="选了才有右栏「模型回答」（流式、不做记忆）；不选就只列检索结果。开启知识图谱增强时必填"
           >
@@ -939,86 +1015,48 @@ onBeforeUnmount(() => {
             v-model:value="chatModelId"
             :options="chatOptions"
             placeholder="只列检索结果，不问答"
+            class="grow"
             allow-clear
             show-search
             :filter-option="(i: string, o: any) => o.label.includes(i)"
-            style="min-width: 200px"
           />
-          <template v-if="graphAvailable">
-            <Tooltip
-              title="叠加图谱检索那一路：先让大模型从问题里抽出实体和关系，再按实体、关系各查一路向量，按深度扩邻域、按规模取数，带出的原文叠加到上面的召回结果里（LightRAG 式）。开启必须选对话模型"
-            >
-              <span class="param-label">知识图谱增强</span>
-            </Tooltip>
-            <Switch v-model:checked="withGraph" />
-            <template v-if="withGraph">
-              <span class="param-label">深度</span>
-              <InputNumber
-                v-model:value="graphDepth"
-                :min="KG_DEPTH_MIN"
-                :max="KG_DEPTH_MAX"
-                style="width: 66px"
-              />
-              <span class="param-label">规模</span>
-              <InputNumber
-                v-model:value="graphScale"
-                :min="KG_SCALE_MIN"
-                :max="KG_SCALE_MAX"
-                style="width: 78px"
-              />
-              <Tooltip
-                title="默认关：图谱那一路只贡献精炼的实体+关系，原文交给关键词+向量那一路——反查 chunk 会把上下文撑大、容易让模型失焦。打开才顺命中实体把原文切片叠进结果（recall=图谱）"
-              >
-                <span class="param-label">反查原文</span>
-              </Tooltip>
-              <Switch v-model:checked="graphSourceChunks" size="small" />
-            </template>
-          </template>
-        </Space>
-        <div v-if="graphWithoutChat" class="warn-line">
-          开启知识图谱增强必须选择对话模型：图谱那一路要先让大模型从问题里抽出实体和关系
         </div>
 
-        <Space.Compact style="width: 100%">
-          <Input
-            v-model:value="query"
-            size="large"
-            placeholder="输入查询内容，回车即检索…"
-            @press-enter="doSearch"
+        <!-- 行 3：图谱增强（需求 9）只服务 doc 型；开了以后深度/规模/反查原文同一行排开 -->
+        <div v-if="graphAvailable" class="param-item item-graph">
+          <Tooltip
+            title="叠加图谱检索那一路：先让大模型从问题里抽出实体和关系，再按实体、关系各查一路向量，按深度扩邻域、按规模取数，带出的原文叠加到上面的召回结果里（LightRAG 式）。开启必须选对话模型"
           >
-            <template #prefix><SearchOutlined /></template>
-          </Input>
-          <Button
-            size="large"
-            :loading="loading || answering"
-            type="primary"
-            @click="doSearch"
-          >
-            {{ chatModelId ? '检索并问答' : '检索' }}
-          </Button>
-          <Button size="large" @click="reset">清空</Button>
-        </Space.Compact>
-
-        <!-- 图搜图：选了图片库才出现，上传后回显缩略图，点缩略图旁「移除」可撤掉 -->
-        <Space v-if="hasImageKb" align="center">
-          <Upload
-            :before-upload="onUploadImage"
-            :show-upload-list="false"
-            accept="image/*"
-          >
-            <Button :loading="uploading">
-              <template #icon><PictureOutlined /></template>
-              上传查询图片（图搜图）
-            </Button>
-          </Upload>
-          <template v-if="imageUrl">
-            <img :src="imageUrl" alt="query" class="query-thumb" />
-            <Button size="small" type="link" @click="imageUrl = ''">
-              移除
-            </Button>
+            <span class="param-label">知识图谱增强</span>
+          </Tooltip>
+          <Switch v-model:checked="withGraph" />
+          <template v-if="withGraph">
+            <span class="param-label">深度</span>
+            <InputNumber
+              v-model:value="graphDepth"
+              :min="KG_DEPTH_MIN"
+              :max="KG_DEPTH_MAX"
+              style="width: 66px"
+            />
+            <span class="param-label">规模</span>
+            <InputNumber
+              v-model:value="graphScale"
+              :min="KG_SCALE_MIN"
+              :max="KG_SCALE_MAX"
+              style="width: 78px"
+            />
+            <Tooltip
+              title="默认关：图谱那一路只贡献精炼的实体+关系，原文交给关键词+向量那一路——反查 chunk 会把上下文撑大、容易让模型失焦。打开才顺命中实体把原文切片叠进结果（recall=图谱）"
+            >
+              <span class="param-label">反查原文</span>
+            </Tooltip>
+            <Switch v-model:checked="graphSourceChunks" size="small" />
           </template>
-        </Space>
-      </Space>
+        </div>
+      </div>
+      <div v-if="graphWithoutChat" class="warn-line">
+        开启知识图谱增强必须选择对话模型：图谱那一路要先让大模型从问题里抽出实体和关系
+      </div>
     </Card>
 
     <div class="result-wrap">
@@ -1306,6 +1344,106 @@ onBeforeUnmount(() => {
   background: var(--component-background, #fff);
 }
 
+/* ===== 搜索栏（重构）===== */
+/* 主搜索行：输入框优先占满、动作按钮按内容收缩；窄窗口时整行折行而不是把输入框压扁 */
+.search-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.search-row .search-input {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+/* 参数折叠开关推到行尾：与动作按钮之间空开，读作「整块参数区的开关」而不是又一个
+   动作按钮；窄屏折行时它单独一行也靠右，不会卡在中间 */
+.params-toggle {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-color-secondary, #888);
+}
+
+/* 主按钮组与图搜图上传之间的一道细分隔：不加的话两串按钮连成一片，分不出主次 */
+.search-sep {
+  flex: none;
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border-color, #e5e7eb);
+}
+
+/* 参数区：12 列栅格统一列距行距，每格「标签 + 控件」同一基线 */
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.param-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 长控件（下拉）吃满格子剩余宽度：原先各写各的 min-width，行内忽宽忽窄 */
+.param-item .grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.item-kb {
+  grid-column: span 5;
+}
+
+/* 召回方式整格：勾选一行 + 权重条一行，先把标签与勾选框对齐再谈权重 */
+.item-recall {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  grid-column: span 7;
+}
+
+.item-topk {
+  grid-column: span 2;
+}
+
+.item-threshold {
+  grid-column: span 2;
+}
+
+.item-rerank {
+  grid-column: span 4;
+}
+
+.item-chat {
+  grid-column: span 4;
+}
+
+/* 图谱增强子项放不下时行内折行（比整行换页更连贯） */
+.item-graph {
+  flex-wrap: wrap;
+  grid-column: span 12;
+}
+
+.recall-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 未勾选时的占位说明：格子宽窄不一，超长就地省略 */
+.recall-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .param-label {
   font-size: 12px;
   color: var(--text-color-secondary, #888);
@@ -1355,12 +1493,26 @@ onBeforeUnmount(() => {
   color: var(--text-color-secondary, #999);
 }
 
-/* 需求 7：关键词/向量的占比条 —— 比一个光泳滑块更能说明「总和 100%」 */
+/* 需求 7：关键词/向量的占比条 —— 比一个光泳滑块更能说明「总和 100%」；
+   宽度交给召回方式那一格（100%），不再自带 260 的最小宽 */
 .weight-box {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 260px;
+  width: 100%;
+}
+
+/* 数字与滑杆一行排开，滑杆吃满剩余宽度（antd 给滑杆自带上下留白，会顶高这一行） */
+.weight-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.weight-ctrl :deep(.ant-slider) {
+  flex: 1 1 120px;
+  min-width: 120px;
+  margin: 0;
 }
 
 .weight-track {
@@ -1400,9 +1552,10 @@ onBeforeUnmount(() => {
   color: #d46b08;
 }
 
+/* 缩略图与大号按钮同高（40px），主搜索行才不被它顶高一截 */
 .query-thumb {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   object-fit: cover;
   border: 1px solid #eee;
   border-radius: 4px;
@@ -1680,5 +1833,22 @@ onBeforeUnmount(() => {
 .tip-note {
   margin-top: 2px;
   color: var(--text-color-secondary, #999);
+}
+
+/* 窄窗口：栅格退成两档（6 列一行两个），整行的字段保持整行——12 列均分到这个宽度
+   每格只剩一百出头，标签与数字框会被压到换行 */
+@media (max-width: 1150px) {
+  .item-kb,
+  .item-recall,
+  .item-graph {
+    grid-column: 1 / -1;
+  }
+
+  .item-topk,
+  .item-threshold,
+  .item-rerank,
+  .item-chat {
+    grid-column: span 6;
+  }
 }
 </style>

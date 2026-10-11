@@ -38,6 +38,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import select, update
 
 from common.common_constants import rag_constant as RC
+from common.common_es import es_client
 from common.common_es.index_mapping import es_doc_id
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -45,7 +46,7 @@ from common.common_neo4j import kg_store, neo4j_client
 from common.common_permission.resource_guard import (
     ACTION_GRAPH, ACTION_VIEW, ensure_action, maybe_session,
 )
-from service.service_rag.models.kb_entity import Document, DocumentChunk, KnowledgeBase
+from service.service_rag.models.kb_entity import Document, KnowledgeBase
 from service.service_rag.schemas.rag_schema import (
     GraphBuildReq, GraphEdgeResp, GraphNodeResp, GraphQueryReq, GraphResp,
 )
@@ -104,7 +105,7 @@ class RagGraphService:
             await RagTaskService.set_progress(
                 doc_id, scope=RC.PROGRESS_SCOPE_GRAPH, stage="graph_load", reset=True,
                 total=0, done=0, message="读取切片准备抽取实体")
-            rows = await _load_chunks(doc_id)
+            rows = await _load_chunks(doc_id, kb_id)
             if not rows:
                 raise ValueError("该文档没有可用切片（先完成向量化，"
                                  "或在切片管理里启用若干切片后重试）")
@@ -566,22 +567,22 @@ def _fail_message(error: Any, progressed: dict) -> str:
             f"下次构建从第 {done + 1} 批接着抽）")[:500]
 
 
-async def _load_chunks(doc_id: int) -> list[dict]:
+async def _load_chunks(doc_id: int, kb_id: int) -> list[dict]:
     """按 chunk_index 顺序取该文档**全部**可用切片（不再封顶片数，所有切片都要进抽取）。
 
     只取 available=1 的：人工停用的切片不该再进图谱，否则页面刚把一段错别字原文
     停用掉，图上还挂着从它抽出来的实体。
 
-    分批粒度（一次调用喂几片）在调用方，见 rag_settings.graph_extract_batch_chunks。
+    只读 ES：分块正文的唯一存放处就是 ES 的 content（MySQL 切片行只剩元数据，
+    不再存正文）。分批粒度（一次调用喂几片）在调用方，见
+    rag_settings.graph_extract_batch_chunks。
     """
-    async with mysql_client.get_session() as session:
-        rows = (await session.execute(
-            select(DocumentChunk.chunk_index, DocumentChunk.content,
-                   DocumentChunk.title_path)
-            .where(DocumentChunk.doc_id == int(doc_id),
-                   DocumentChunk.available == 1)
-            .order_by(DocumentChunk.chunk_index.asc()))).mappings().all()
-    return [dict(r) for r in rows if str(r.get("content") or "").strip()]
+    hits = await es_client.list_by_doc(int(doc_id), int(kb_id), available=True)
+    rows = [{"chunk_index": int((h.get("_source") or {}).get(RC.ES_FIELD_INDEX) or 0),
+             "content": str((h.get("_source") or {}).get(RC.ES_FIELD_CONTENT) or ""),
+             "title_path": str((h.get("_source") or {}).get(RC.ES_FIELD_TITLE_PATH) or "")}
+            for h in hits]
+    return [r for r in rows if r["content"].strip()]
 
 
 def _merge_batches(drawn: Sequence[tuple[list[dict], list[dict], list[str]]]

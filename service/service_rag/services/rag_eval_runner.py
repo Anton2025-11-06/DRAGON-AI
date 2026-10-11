@@ -79,6 +79,8 @@ async def _recall_and_generate(run: RagEvalRun, item: RagEvalItem, login_user: d
         kb_ids=[run.kb_id], query=item.question, top_k=run.top_k,
         score_threshold=float(run.score_threshold or 0.0), mode=run.retrieval_mode,
         with_graph=bool(run.with_graph), chat_model_id=run.generation_model_id,
+        graph_depth=int(run.graph_depth or 0) or None,
+        graph_scale=int(run.graph_scale or 0) or None,
         graph_source_chunks=bool(run.graph_source_chunks))
     runner = RagRetrievalService._runner(login_user, req)
     rows = await runner.execute()
@@ -132,7 +134,14 @@ async def _score_samples(samples: list[dict], judge_config, embed_config) -> lis
 
 
 async def execute(run_id: int) -> None:
-    """跑一次评测运行：召回+生成（并发）→ ragas 打分 → 逐 item 回填 → run 收口。"""
+    """跑一次评测运行：召回+生成（并发）→ ragas 打分 → 逐 item 回填 → run 收口。
+
+    总耗时口径：进本函数即 worker 已把任务从 Redis 取走，started 到收口的墙钟差
+    落 run.total_latency_ms（含整段执行：并发召回+生成、ragas 打分、回填落库），
+    成功与意外失败两条收口路径都落；worker 外的兜底失败（runner 没起来）不落，
+    保持 0 与「根本没跑过」一致。
+    """
+    started = time.perf_counter()
     async with mysql_client.get_session() as session:
         run = (await session.execute(
             select(RagEvalRun).where(RagEvalRun.run_id == int(run_id)))).scalar_one_or_none()
@@ -149,14 +158,15 @@ async def execute(run_id: int) -> None:
         run_ref = run
 
     try:
-        await _run(run=run_ref, items=items)
+        await _run(run=run_ref, items=items, started=started)
     except Exception as e:  # noqa: BLE001  整体兜底：把意外写成 run 级 FAILED，不让 worker 任务裸抛
         log.error("评测运行整体失败: run_id={}: {}", run_id, e)
         reason = str(e)[:1000]
         async with mysql_client.get_session() as session:
             await session.execute(update(RagEvalRun).where(
                 RagEvalRun.run_id == int(run_id)).values(
-                status=RC.EVAL_STATUS_FAILED, error=reason))
+                status=RC.EVAL_STATUS_FAILED, error=reason,
+                total_latency_ms=int((time.perf_counter() - started) * 1000)))
             # 还没跑到的条项一并收口：详情里留着一行 PENDING 看着像还在排队，
             # 而这一场其实已经不会再有人去跑它了
             await session.execute(update(RagEvalItem).where(
@@ -166,7 +176,7 @@ async def execute(run_id: int) -> None:
             await session.commit()
 
 
-async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
+async def _run(*, run: RagEvalRun, items: list[RagEvalItem], started: float) -> None:
     run_id = run.run_id
     login_user = _sys_login_user(run)
     gen_config = await RagModelService.require_config(run.generation_model_id, "生成答案的对话模型")
@@ -221,7 +231,6 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
 
     # 回填：逐 item 落五指标 + 三段耗时 + 状态，再按实底的条项状态收 run 的终态
     scored_idx = 0
-    latencies: list[int] = []
     async with mysql_client.get_session() as session:
         for w in work:
             item = w["item"]
@@ -256,7 +265,6 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
             }
             await session.execute(update(RagEvalItem).where(
                 RagEvalItem.item_id == item.item_id).values(**values))
-            latencies.append(int(w.get("took_recall_ms") or 0) + int(w.get("took_generate_ms") or 0))
         # 计数以库里这一场实际的条项状态为准（含本次未重跑的历史结果），不拿本轮 work 累加
         counts = {str(st): int(cnt) for st, cnt in (await session.execute(
             select(RagEvalItem.status, func.count()).where(
@@ -265,7 +273,7 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
         failed_pairs = counts.get(RC.EVAL_ITEM_FAILED, 0)
         # 总数用 run 行上的快照（建 run 时就落定），拿不到才回落到实际条项数
         total = int(run.total_pairs or 0) or sum(counts.values())
-        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        total_latency_ms = int((time.perf_counter() - started) * 1000)
         first_error = next((str(w["error"]) for w in work
                             if w.get("status") == RC.EVAL_ITEM_FAILED and w.get("error")), "")
         reason = f"：{first_error}"[:900] if first_error else "（条项没有留下原因）"
@@ -283,7 +291,7 @@ async def _run(*, run: RagEvalRun, items: list[RagEvalItem]) -> None:
         await session.execute(update(RagEvalRun).where(
             RagEvalRun.run_id == run_id).values(
             status=run_status, done_pairs=done_pairs,
-            avg_latency_ms=avg_latency, error=(run_error[:1000] or None)))
+            total_latency_ms=total_latency_ms, error=(run_error[:1000] or None)))
         await session.commit()
-    log.info("评测运行收口: run_id={} 出分={}/{} 失败={} 终态={} 平均延迟={}ms",
-             run_id, done_pairs, total, failed_pairs, run_status, avg_latency)
+    log.info("评测运行收口: run_id={} 出分={}/{} 失败={} 终态={} 总耗时={}ms",
+             run_id, done_pairs, total, failed_pairs, run_status, total_latency_ms)

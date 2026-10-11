@@ -24,6 +24,12 @@ SERVICE_GATEWAY_PORT = 18000
 SERVICE_AGENT = "service_agent"
 SERVICE_AGENT_PORT = 9005
 
+# 深度探索 harness 智能体（AgentScope ReAct + OpenSandbox 云端沙箱）：
+# 端口沿用当年给 service_agent 预留的 9005（该服务从未上线无历史包袱，
+# 注册名按实际职责取 service_harness，Nacos data_id 同名）
+SERVICE_HARNESS = "service_harness"
+SERVICE_HARNESS_PORT = SERVICE_AGENT_PORT
+
 SERVICE_SKILL = "service_skill"
 SERVICE_SKILL_PORT = 9006
 
@@ -74,6 +80,7 @@ MODULES = [
     {"bucket": "system", "name": "系统管理", "default": {"limit": 300, "window": 60}},
     {"bucket": "rag", "name": "知识库", "default": {"limit": 300, "window": 60}},
     {"bucket": "workflow", "name": "智能体编排", "default": {"limit": 300, "window": 60}},
+    {"bucket": "harness", "name": "深度探索", "default": {"limit": 300, "window": 60}},
     {"bucket": "datasets", "name": "数据集", "default": {"limit": 300, "window": 60}},
     {"bucket": "train", "name": "模型训练", "default": {"limit": 300, "window": 60}},
     {"bucket": "inference", "name": "模型推理", "default": {"limit": 300, "window": 60}},
@@ -91,6 +98,7 @@ SERVICE_ALIASES = {
     "login": "service_login",
     "rag": "service_rag",
     "workflow": "service_workflow",
+    "harness": "service_harness",
     "datasets": "service_datasets",
     "train": "service_train",
     "inference": "service_inference",

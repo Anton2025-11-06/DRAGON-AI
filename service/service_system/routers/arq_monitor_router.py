@@ -23,7 +23,7 @@ from service.service_system.services.arq_monitor_service import ArqMonitorServic
 router = APIRouter(prefix="/arq", tags=["ARQ任务监控"])
 
 # pipeline 参数的接口说明(三个接口口径一致,写一处免得各说各话)
-_PIPELINE_DESC = "arq 流水线:workflow(工作流执行)|ragflow(知识库解析)|graphflow(图谱构建)"
+_PIPELINE_DESC = "arq 流水线:workflow(工作流执行)|ragflow(知识库解析)|graphflow(图谱构建)|harness(深度探索智能体)"
 
 
 @router.get("/pipelines", summary="可监控的 arq 流水线清单(页面下拉)")

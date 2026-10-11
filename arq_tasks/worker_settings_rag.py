@@ -64,8 +64,7 @@ class WorkerSettingsRag:
     # 连接参数与生产端同源（common_arq 按流水线索引，rag 读 arq_ragflow 段）
     redis_settings = CustomRedisSettings.get_redis_setting(PIPELINE_RAG)
 
-    # ---------- 并发与超时 ----------
-    max_jobs = 100  # 进程内并发上限(0=不限)
+    max_jobs = 10
     job_timeout = 7200  # 2小时
     poll_delay = 0.2  # 空闲时轮询队列间隔(秒),越小任务启动越快
 

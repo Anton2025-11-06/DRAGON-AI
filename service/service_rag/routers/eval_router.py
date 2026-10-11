@@ -13,6 +13,8 @@
 --------
 ``POST /runs`` 落库后立即投 ARQ ragflow 队列并返回 runId，**HTTP 不同步跑评测**；前端不轮询，
 靠手动刷新 ``POST /page`` / ``GET /runs/{id}`` 看状态与结果（需求决策：后台任务 + 手动刷新）。
+``POST /runs/{id}/rerun`` 是已收口场次的「重新执行」：配置快照沿用，库里结果/耗时/指标清零后
+重新投队列（换新 job_id，避免被 arq 的结果保留期判成重复投递）。
 
 模板与导入
 ----------
@@ -137,6 +139,15 @@ async def import_pairs(request: Request, file: UploadFile = File(...)):
 async def run_detail(request: Request, run_id: int):
     return ApiResponse.success(data=await RagEvalService.run_detail(
         await get_login_user(request), run_id))
+
+
+@router.post("/runs/{run_id}/rerun", summary="重新执行一场评测（配置快照沿用，结果清零重跑）")
+@has_permission("ai:kb:eval")
+async def rerun_run(request: Request, run_id: int):
+    """终态 run 重置后重新投队列：状态/耗时/指标在库里清零，等 worker 重跑。"""
+    data = await RagEvalService.rerun_run(await get_login_user(request), run_id)
+    return ApiResponse.success(
+        data=data, message="已重新投递，稍后点「刷新」查看结果")
 
 
 @router.delete("/runs/{run_id}", summary="删除评测记录（软删）")

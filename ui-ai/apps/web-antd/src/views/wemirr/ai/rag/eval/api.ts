@@ -87,6 +87,10 @@ export interface EvalRunCreateReq {
   scoreThreshold?: number;
   retrievalMode?: string;
   withGraph?: boolean;
+  /** 图谱增强邻域深度（1-3；仅 withGraph 开启时生效，缺省 = 后端默认 2） */
+  graphDepth?: number;
+  /** 图谱增强每一路向量召回条数（1-50；缺省 = 后端默认 10） */
+  graphScale?: number;
   graphSourceChunks?: boolean;
 }
 
@@ -137,12 +141,15 @@ export interface EvalRunResp {
   scoreThreshold: number;
   retrievalMode?: string;
   withGraph: boolean;
+  graphDepth: number;
+  graphScale: number;
   graphSourceChunks: boolean;
   totalPairs: number;
   donePairs: number;
   status: string;
   statusLabel?: string;
-  avgLatencyMs: number;
+  /** 总耗时：worker 取到任务到收口的墙钟差（含召回+生成+打分全程） */
+  totalLatencyMs: number;
   error?: string;
   createdBy: number;
   createTime?: string;
@@ -182,6 +189,12 @@ export const EvalRunDetail = (runId: number) =>
 /** 删除评测记录（软删） */
 export const DeleteEvalRun = (runId: number) =>
   defHttp.delete<boolean>(`${EVAL_BASE}/runs/${runId}`);
+
+/** 重新执行一场已收口的评测（配置快照沿用，结果/耗时/指标清零后重新投队列） */
+export const RerunEvalRun = (runId: number) =>
+  defHttp.post<{ runId: number; totalPairs: number }>(
+    `${EVAL_BASE}/runs/${runId}/rerun`,
+  );
 
 /** 下载问答对模板（走带鉴权头的 blob 下载，不是裸 window.open） */
 export const DownloadEvalTemplate = () =>

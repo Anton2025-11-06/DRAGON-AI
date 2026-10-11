@@ -63,10 +63,8 @@ class WorkerSettingsGraph:
     # 连接参数与生产端同源（common_arq 按流水线索引，graph 与 rag 都读 arq_ragflow 段）
     redis_settings = CustomRedisSettings.get_redis_setting(PIPELINE_GRAPH)
 
-    # ---------- 并发与超时 ----------
-    # 图谱是这批任务里最慢的一类：单篇可能几十分钟到数小时，job_timeout 给到 4 小时
-    # （比解析的 2 小时更长），免得被 arq 层中途判死而留下一半已写进 Neo4j 的子图。
-    max_jobs = 100  # 进程内并发上限(0=不限)
+
+    max_jobs = 10
     job_timeout = 14400  # 4小时
     poll_delay = 0.2  # 空闲时轮询队列间隔(秒)
 

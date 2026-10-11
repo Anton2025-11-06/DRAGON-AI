@@ -512,19 +512,54 @@ class AsyncEsClient:
                 for d in resp.get("docs") or [] if d.get("found")]
 
     async def list_by_doc(self, doc_id: int, kb_id: Optional[int] = None, *,
-                          size: int = 2000) -> list[dict]:
-        """列出一个文档的全部切片（按 chunk_index 升序），供图谱抽取与 sidecar 重建。
+                          size: int = 2000, available: Optional[bool] = None) -> list[dict]:
+        """列出一个文档的全部切片（按 chunk_index 升序），供图谱抽取与正文预览。
 
-        这里不卡 available：图谱要基于文档的全部切片抽实体，屏蔽掉的块也属于这篇文档的语义。
+        默认不卡 available：图谱要基于文档的全部切片抽实体，屏蔽掉的块也属于这篇文档的语义；
+        需要按可用性筛（图谱抽取只要 available=1 的）由调用方传 ``available``。
         """
         conds: list[dict] = [{"term": {RC.ES_FIELD_DOC: int(doc_id)}}]
         if kb_id is not None:
             conds.append(kb_filter([kb_id]))
+        if available is not None:
+            conds.append({"term": {RC.ES_FIELD_AVAILABLE: bool(available)}})
         resp = await self._search({
             "index": self._index, "size": min(max(1, int(size)), 10000),
             "query": {"bool": {"filter": conds}},
             "sort": [{RC.ES_FIELD_INDEX: {"order": "asc"}}], "_source": True})
         return _hits_of(resp)
+
+    async def page_by_doc(self, doc_id: int, kb_id: Optional[int] = None, *, current: int = 1,
+                          size: int = 20, chunk_type: Optional[str] = None,
+                          keyword: Optional[str] = None,
+                          available: Optional[bool] = None) -> tuple[int, list[dict]]:
+        """按文档分页读切片（切片管理页）：过滤/排序/总数都在 ES 一边算完。
+
+        分块正文的唯一存放处就是 ES（MySQL 切片行只剩元数据），关键词过滤必须与
+        分页同源，否则「这一页有 20 条」和「关键词命中 3 条」会各说各话。
+        :param keyword: 正文关键词，match_phrase——分词后的连续序列，最接近旧版
+            MySQL like 子串匹配的语义（中文未装 ik 时 standard 分成单字，短语匹配≈子串）。
+        :param available: 过滤可用性（切片管理页的停用/启用筛选项）；None=不过滤。
+        :return: ``(total, hits)``，total 来自 track_total_hits 的精确值。
+        """
+        conds: list[dict] = [{"term": {RC.ES_FIELD_DOC: int(doc_id)}}]
+        if kb_id is not None:
+            conds.append(kb_filter([kb_id]))
+        if chunk_type:
+            conds.append({"term": {RC.ES_FIELD_TYPE: str(chunk_type)}})
+        if available is not None:
+            conds.append({"term": {RC.ES_FIELD_AVAILABLE: bool(available)}})
+        bool_body: dict = {"filter": conds}
+        kw = str(keyword or "").strip()
+        if kw:
+            bool_body["must"] = [{"match_phrase": {RC.ES_FIELD_CONTENT: {"query": kw}}}]
+        resp = await self._search({
+            "index": self._index, "query": {"bool": bool_body},
+            "sort": [{RC.ES_FIELD_INDEX: {"order": "asc"}}],
+            "from": max(0, (int(current) - 1) * int(size)),
+            "size": max(1, int(size)), "_source": True, "track_total_hits": True})
+        total = int((((resp or {}).get("hits") or {}).get("total") or {}).get("value") or 0)
+        return total, _hits_of(resp)
 
     # ---------- 检索 ----------
     async def keyword_search(self, kb_ids: Sequence[int], query_text: str, *, size: int = 20,

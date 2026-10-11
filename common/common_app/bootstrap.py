@@ -11,8 +11,10 @@ from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 
-from common.common_arq.queue import PIPELINE_RAG, CustomRedisSettings, get_arq_redis
-from common.common_constants.constant import ARQ_RAGFLOW, ARQ_WORKFLOW
+from common.common_arq.queue import (
+    PIPELINE_HARNESS, PIPELINE_RAG, CustomRedisSettings, get_arq_redis,
+)
+from common.common_constants.constant import ARQ_HARNESS, ARQ_RAGFLOW, ARQ_WORKFLOW
 from common.common_log.log_init import log
 from common.common_middleware.exception_handler import register_exception_handlers
 from common.common_middleware.request_log_middleware import RequestLogMiddleware
@@ -102,6 +104,7 @@ def create_app(service_name: str,
                enable_storage: bool = False,
                enbale_arq_workflow_redis: bool = False,
                enable_arq_ragflow_redis: bool = False,
+               enable_arq_harness_redis: bool = False,
                enable_es: bool = False,
                enable_neo4j: bool = False,
                on_ready: Optional[Callable[[dict], Awaitable[None]]] = None
@@ -124,6 +127,8 @@ def create_app(service_name: str,
     :param enbale_arq_workflow_redis: 是否建工作流投递队列的连接池（读 Nacos 的 arq_workflow 段）
     :param enable_arq_rag_redis: 是否建知识库解析队列的连接池（读 arq_ragflow 段）。
         生产者与 rag worker 必须读到同一段的 redis.url，否则任务投了没人消费
+    :param enable_arq_harness_redis: 是否建深度探索智能体队列的连接池（读 arq_harness 段；
+        未配置该 data_id 时回落 arq_workflow 段，与 worker 侧 prepare_config 同一套回落）
     :param enable_es: 是否初始化 Elasticsearch 全局单例（读 Nacos 的 es 段）
     :param enable_neo4j: 是否初始化 Neo4j 全局单例（读 Nacos 的 neo4j 段）
     :param on_ready: 全部依赖初始化成功后的回调，收到本服务的 Nacos 配置字典。
@@ -176,6 +181,13 @@ def create_app(service_name: str,
                 CustomRedisSettings.yml_rag = await nacos_client.get_config_content(ARQ_RAGFLOW)
                 await get_arq_redis(PIPELINE_RAG)
                 log.info("Arq rag Redis initialized")
+            if enable_arq_harness_redis:
+                # 与 harness worker 同一段配置（arq_harness）；data_id 未配置（读不到
+                # 会抛 RuntimeError）时回落 arq_workflow 段：两侧不建 data_id 也能对上
+                # 同一 Redis；其它异常（网络等）照常往外抛阻断启动
+                CustomRedisSettings.yml_harness = await nacos_client.get_config_content(ARQ_HARNESS)
+                await get_arq_redis(PIPELINE_HARNESS)
+                log.info("Arq harness Redis initialized")
             if enable_es:
                 # 单索引 rag_knowledge_chunk 承载全部知识库；建索引与探测分词器在 init_es 里做
                 await _init_es(yml_config.get("es", {}))
@@ -218,7 +230,7 @@ def create_app(service_name: str,
             if enable_es or enable_neo4j:
                 # 两个向量/图后端都是异步连接池，不关会在进程退出时报未关闭告警
                 await _close_vector_backends(enable_es, enable_neo4j)
-            if enbale_arq_workflow_redis or enable_arq_ragflow_redis:
+            if enbale_arq_workflow_redis or enable_arq_ragflow_redis or enable_arq_harness_redis:
                 # 按已建的池全部释放（未建过的流水线是空操作）
                 from common.common_arq.queue import close_arq_redis
 

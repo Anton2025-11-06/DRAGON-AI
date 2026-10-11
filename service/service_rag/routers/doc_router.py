@@ -99,8 +99,7 @@ async def original(request: Request, doc_id: int):
 
 @router.get("/{doc_id}/content", summary="查看解析后文档（拼接全部切片，不截断）")
 async def content(request: Request, doc_id: int):
-    """只读 MySQL 的切片表：预览要看的是「我们存下来的原文」，
-    而 ES 那份是为检索准备的副本（可能被截断、也可能还没刷盘）。"""
+    """只读 ES：分块正文的唯一存放处就是 ES 的 content（MySQL 切片行不再存正文）。"""
     return ApiResponse.success(data=await RagDocService.content_preview(
         await get_login_user(request), doc_id))
 

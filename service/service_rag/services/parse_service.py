@@ -922,12 +922,16 @@ async def _replace_chunks(kb: KnowledgeBase, doc_id: int, chunks: Sequence[Any],
             embed_text = (chunk.embed_text or chunk.content or "").strip()
             if not content and not media:
                 continue      # 空正文且无图片引用的块没有任何可检索内容
+            # 有图无文的块用占位词（[图片]/[音频]/[视频]）——正文只进 ES（下方 out 字典），
+            # 预览与切片管理都看它
+            es_content = content or RC.MEDIA_KIND_PLACEHOLDERS.get(
+                media_kind, RC.MEDIA_KIND_PLACEHOLDER_DEFAULT)
             row = DocumentChunk(
                 kb_id=kb.kb_id, doc_id=int(doc_id), chunk_index=int(chunk.index),
                 chunk_type=chunk.chunk_type or RC.CHUNK_TYPE_TEXT,
-                content=content or RC.MEDIA_KIND_PLACEHOLDERS.get(
-                    media_kind, RC.MEDIA_KIND_PLACEHOLDER_DEFAULT),
-                embed_text=embed_text,
+                # 分块正文的唯一存放处是 ES 的 content：这两列退役写空串占位（NOT NULL），
+                # MySQL 只留切片元数据（chunk_id 契约、media_url 清理依据、断点位）
+                content="", embed_text="",
                 title_path=(chunk.title_path or "")[:500],
                 sheet_name=(chunk.sheet or "")[:128], page_num=int(chunk.page or 0),
                 block_id=",".join(chunk.block_ids or [])[:64] or None,
@@ -939,25 +943,23 @@ async def _replace_chunks(kb: KnowledgeBase, doc_id: int, chunks: Sequence[Any],
                        "image_description": (getattr(image, "description", "") or "")},
                 created_by=kb.created_by)
             session.add(row)
-            rows.append({"row": row, "chunk": chunk})
+            rows.append({"row": row, "es_content": es_content, "embed_text": embed_text})
         await session.flush()
         out = []
         for item in rows:
-            chunk = item["chunk"]
-            image = getattr(chunk, "image", None)
+            # 向量化与写 ES 读的是这份内存字典（不回 MySQL 列——列里已不存正文）
             out.append({
                 "chunk_id": item["row"].chunk_id,
-                "chunk_index": int(chunk.index),
-                "chunk_type": chunk.chunk_type or RC.CHUNK_TYPE_TEXT,
-                "content": item["row"].content,
-                "embed_text": item["row"].embed_text or item["row"].content,
+                "chunk_index": int(item["row"].chunk_index or 0),
+                "chunk_type": item["row"].chunk_type or RC.CHUNK_TYPE_TEXT,
+                "content": item["es_content"],
+                "embed_text": item["embed_text"] or item["es_content"],
                 "title_path": item["row"].title_path or "",
                 "sheet_name": item["row"].sheet_name or "",
                 "page_num": item["row"].page_num or 0,
                 "media_url": item["row"].media_url or "",
                 "available": 1,
                 "extra": item["row"].extra or {},
-                "image_ref": image,
             })
         await session.commit()
     return out
@@ -977,8 +979,10 @@ async def _insert_media_chunk(kb: KnowledgeBase, doc: Document, chunk_type: str,
     async with mysql_client.get_session() as session:
         row = DocumentChunk(
             kb_id=kb.kb_id, doc_id=int(doc.doc_id), chunk_index=0,
-            chunk_type=chunk_type, content=(content or doc.doc_name or "[媒体]")[:RC.MAX_CHUNK_CHARS],
-            embed_text=content or "",
+            chunk_type=chunk_type,
+            # 同 _replace_chunks：正文只在 ES（调用方拿局部变量直写索引），
+            # 这两列退役写空串占位（NOT NULL）
+            content="", embed_text="",
             title_path="", page_num=0, media_url=media_url,
             media_type=doc.file_ext or chunk_type,
             token_count=len(content or ""), available=1, vectorized=0,

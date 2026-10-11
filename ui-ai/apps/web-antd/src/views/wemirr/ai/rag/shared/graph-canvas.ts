@@ -41,8 +41,9 @@ interface CanvasInteractionOptions extends PickOptions {
   onHover?: (hit: GraphHit | null, event: MouseEvent | null) => void;
   /** 每次平移之后回调：钉在节点上的详情卡得跟着重算位置 */
   onPan?: () => void;
-  /** 位移在容差内的一次按下 = 点实体；不传就只做平移与 hover（关系小图没有点选） */
-  onPick?: (hit: GraphHit, event: MouseEvent) => void;
+  /** 位移在容差内的一次按下 = 点实体，点在空白处回调 null（页面自己决定收不收详情）；
+   *  不传就只做平移与 hover（关系小图没有点选） */
+  onPick?: (hit: GraphHit | null, event: MouseEvent) => void;
   /** 平移中光标类名，挂在容器本身上 */
   panClass?: string;
   /** Shift 是否留给 G6 的 drag-node 摆单个节点；留着的页面 Shift+按下就不平移 */
@@ -174,9 +175,9 @@ export function attachCanvasInteractions(
     el.classList.remove(panClass);
     // 拖过容差 = 这一趟是平移画布，不是点实体
     if (!onPick || moved > CLICK_MOVE_TOLERANCE) return;
-    const hit = pick(ev);
-    // 一个都没命中时什么都不做：点在空白处不该把刚打开的详情抹掉
-    if (hit) onPick(hit, ev);
+    // 空白处回 null 由页面自己决定抹不抹：图谱页拿它把详情与浮卡一起收掉
+    // （点开的东西点一下空白能收，是最符合直觉的关法），不传 onPick 的页面不受影响
+    onPick(pick(ev), ev);
   };
 
   const onHoverMove = (ev: MouseEvent) => {

@@ -321,7 +321,7 @@ class ChunkUpdateReq(CamelModel):
 
 
 class ChunkResp(CamelModel):
-    """切片行（tb_document_chunk 是完整正文的唯一存放处）。"""
+    """切片行（分块正文的唯一存放处在 ES 的 content，本结构从 ES 文档直读拼装）。"""
 
     id: int
     kb_id: int
@@ -336,7 +336,7 @@ class ChunkResp(CamelModel):
     page_num: int = 0
     block_id: Optional[str] = None
     media_url: Optional[str] = Field(
-        None, description="本切片在公共存储里的媒体句柄（多个按换行分隔，不是可直接打开的 URL）")
+        None, description="本切片覆盖的全部媒体地址（ES 里存匿名可访问 URL，多个按换行分隔，可直接渲染）")
     media_type: Optional[str] = None
     token_count: int = 0
     available: bool = True
@@ -528,6 +528,10 @@ class EvalRunCreateReq(CamelModel):
     score_threshold: Optional[float] = Field(None, ge=0, le=1, description="相似度阈值，空=库默认")
     retrieval_mode: Optional[str] = Field(None, description="VECTOR/KEYWORD/HYBRID，空=库默认")
     with_graph: Optional[bool] = Field(False, description="是否开启图谱增强召回（仅 doc 型）")
+    graph_depth: Optional[int] = Field(
+        None, ge=1, le=3, description="图谱增强邻域深度（空=默认 2；仅 with_graph 开启时生效）")
+    graph_scale: Optional[int] = Field(
+        None, ge=1, le=50, description="图谱增强每一路的向量召回条数（空=默认 10）")
     graph_source_chunks: Optional[bool] = Field(False, description="图谱一路是否回捞原文切片")
 
 
@@ -574,12 +578,14 @@ class EvalRunResp(CamelModel):
     score_threshold: float = 0.0
     retrieval_mode: Optional[str] = None
     with_graph: bool = False
+    graph_depth: int = 2
+    graph_scale: int = 10
     graph_source_chunks: bool = False
     total_pairs: int = 0
     done_pairs: int = 0
     status: str = "PENDING"
     status_label: Optional[str] = None
-    avg_latency_ms: int = 0
+    total_latency_ms: int = 0
     error: Optional[str] = None
     created_by: int = 0
     create_time: Optional[str] = None

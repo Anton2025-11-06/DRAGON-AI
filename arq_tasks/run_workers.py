@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""多进程启动 arq worker（按 -t 分派 workflow / ragflow / graphflow 三条流水线）。
+"""多进程启动 arq worker（按 -t 分派 workflow / ragflow / graphflow / harness 四条流水线）。
 
-三条流水线各用自己的 WorkerSettings 与队列（workflow_queue:split_{N} /
-rag_queue:split_{N} / graphflow_queue:split_{N}），同一个切片号在各自队列里是独立分片，
-部署可以分开拉（图谱比文档解析更耗时，单独成队后可各自扩缩容、互不抢占 worker）。
+各流水线各用自己的 WorkerSettings 与队列（workflow_queue:split_{N} /
+rag_queue:split_{N} / graphflow_queue:split_{N} / harness_queue:split_{N}），
+同一个切片号在各自队列里是独立分片，部署可以分开拉（图谱比文档解析更耗时、
+harness 每任务占一条模型流+一个沙箱，均单独成队后可各自扩缩容、互不抢占 worker）。
 """
 import argparse
 import os
@@ -13,6 +14,7 @@ import time
 
 from common.common_arq.queue import (
     PIPELINE_GRAPH,
+    PIPELINE_HARNESS,
     PIPELINE_RAG,
     PIPELINE_WORKFLOW,
     queue_name_of,
@@ -26,6 +28,7 @@ _PIPELINES = {
     "workflow": (PIPELINE_WORKFLOW, "arq_tasks.worker_settings.WorkerSettings"),
     "ragflow": (PIPELINE_RAG, "arq_tasks.worker_settings_rag.WorkerSettingsRag"),
     "graphflow": (PIPELINE_GRAPH, "arq_tasks.worker_settings_graph.WorkerSettingsGraph"),
+    "harness": (PIPELINE_HARNESS, "arq_tasks.worker_settings_harness.WorkerSettingsHarness"),
 }
 
 
@@ -33,8 +36,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="启动多个worker 进程（arq CLI 单进程，需自行拉多进程）")
     parser.add_argument(
-        "-t", type=str, required=True, choices=["ragflow", "workflow", "graphflow"],
-        help="业务类型：ragflow|workflow|graphflow")
+        "-t", type=str, required=True,
+        choices=["ragflow", "workflow", "graphflow", "harness"],
+        help="业务类型：ragflow|workflow|graphflow|harness")
     parser.add_argument(
         "-n", type=int, required=True,
         help="worker 进程数")
