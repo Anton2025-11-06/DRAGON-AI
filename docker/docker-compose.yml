@@ -157,24 +157,24 @@ services:
   # 首次部署先冒烟：docker compose run --rm opensandbox uvx opensandbox-server --help
   # 确认端口/启动参数与 client 大版本匹配（opensandbox 迭代快，两端不一致
   # 会在 workspace 建连时报错）。
-  opensandbox:
-    image: python:3.11-slim
-    command: >
-      sh -c "pip install --no-cache-dir uv
-      && uvx opensandbox-server"
-    networks:
-      - dragon-ai
-    init: true
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    volumes:
-      - opensandbox-data:/data
-    ports:
-      - "${OPENSANDBOX_PORT:-8006}:8006"
+#  opensandbox:
+#    image: python:3.11-slim
+#    command: >
+#      sh -c "pip install --no-cache-dir uv
+#      && uvx opensandbox-server"
+#    networks:
+#      - dragon-ai
+#    init: true
+#    restart: unless-stopped
+#    logging:
+#      driver: json-file
+#      options:
+#        max-size: "20m"
+#        max-file: "3"
+#    volumes:
+#      - opensandbox-data:/data
+#    ports:
+#      - "${OPENSANDBOX_PORT:-8006}:8006"
 
   ui:
     build:
