@@ -27,8 +27,9 @@ class MountBundle:
 
     tools: list[Any] = field(default_factory=list)
     skill_paths: list[str] = field(default_factory=list)
-    # 挂载摘要（挂载了什么给模型看）：kbNames / mcpNames / toolNames / skillNames
-    summary: dict[str, list[str]] = field(default_factory=dict)
+    # 挂载摘要（挂载了什么给模型看）：kbNames / kbList / mcpNames / toolNames / skillNames
+    # kbList 比 kbNames 多带 id 与真实描述，供系统提示如实列举、并给 kb_search 的 kb_ids 供参
+    summary: dict[str, Any] = field(default_factory=dict)
 
 
 async def _visible_ids(kind: str, login_user: dict) -> dict[int, str]:
@@ -104,6 +105,17 @@ async def load_mounted(login_user: dict, mounts: dict) -> MountBundle:
             login_user, kb_effective, kb_names,
             kb_descriptions=kb_desc_parts))
         bundle.summary["kbNames"] = [kb_meta[i]["name"] for i in kb_effective]
+        # 带 id 与真实描述的清单：既让模型如实回答「有哪些库」（不给就会瞎编
+        # kb_id/描述），也让它知道 kb_search 的 kb_ids 该填什么（多库想限定某个
+        # 库才有依据，瞎猜必被白名单拒）
+        bundle.summary["kbList"] = [
+            {
+                "id": i,
+                "name": kb_meta[i]["name"],
+                "description": kb_meta[i].get("description") or "",
+            }
+            for i in kb_effective
+        ]
 
     # ---- MCP 连接 → 每个远端工具一个实例 ----
     mcp_visible = await _visible_ids("mcp", login_user)

@@ -46,6 +46,11 @@ BASE_SYSTEM_PROMPT = (
     "产出文件给用户时给出沙箱内路径。\n"
     "- 复杂任务先用 TaskCreate 拆解计划，边执行边用 TaskUpdate 更新状态。\n"
     "- 需要用户补充信息时用 AskUser 提问，不要自行猜测关键前提。\n"
+    "- 自主连续推进：你是能独立干完一个任务的智能体，不是问一句答一句的聊天"
+    "机器人。接到任务后就一步接一步地调用工具直到真正完成——绝不要把「我接下来"
+    "打算做 X」这种计划当成回复的结尾停下来等用户催「继续」。每一步要么当场发起"
+    "工具调用去执行 X，要么（仅当任务已全部完成时）才给出最终结论；工具报错就换个"
+    "方法接着做，中途不要停下来征求许可或等用户再说继续。\n"
     "- 回答使用中文，结论先行；涉及数据与文件时给出可核对的来源。"
 )
 
@@ -72,20 +77,24 @@ async def build_toolkit(workspace: Any, mounted_tools: list | None = None) -> To
     技能（技能 zip 挂载路径，种入由 workspace_factory 的 skill_paths 完成）
     在这里自动可用。
     """
+    # 内置执行/文件工具必须显式绑到沙箱 backend：裸构造时 agentscope 会回落
+    # LocalBackend，Bash/Read 等就在 worker 进程（本 app 镜像）里执行——表现为
+    # ls /workspace 报 No such file、却能看见 /app 源码（工具根本没进沙箱）。
+    backend = workspace.get_backend()
     return Toolkit(
         [
             # 向用户提问（外部工具，HITL：挂起等答复）
             AskUser(),
             # 文件读取与检索
-            Read(),
-            Glob(),
-            Grep(),
+            Read(backend=backend),
+            Glob(backend=backend),
+            Grep(backend=backend),
             # 文件写入与就地编辑
-            Write(),
-            Edit(),
+            Write(backend=backend),
+            Edit(backend=backend),
             # 命令执行
-            Bash(),
-            PowerShell(),
+            Bash(backend=backend),
+            PowerShell(backend=backend),
             # 多步任务的计划与跟踪
             TaskCreate(),
             TaskUpdate(),
@@ -105,7 +114,15 @@ def _mount_section(summary: dict | None) -> str:
     """
     summary = summary or {}
     lines: list[str] = []
-    if summary.get("kbNames"):
+    kb_list = summary.get("kbList")
+    if kb_list:
+        lines.append(
+            "- 知识库：可用 kb_search 检索。按下列清单如实作答，不要编造库名/kb_id/"
+            "描述；要把检索限定到某个库时，kb_search 的 kb_ids 就填括号里的 kb_id：")
+        for kb in kb_list:
+            desc = str(kb.get("description") or "").strip() or "（无描述）"
+            lines.append(f"    · {kb.get('name')}（kb_id={kb.get('id')}）：{desc}")
+    elif summary.get("kbNames"):
         kbs = "、".join(summary["kbNames"])
         lines.append(f"- 知识库：可用 kb_search 工具检索（挂载：{kbs}）。")
     if summary.get("mcpNames"):

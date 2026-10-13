@@ -52,6 +52,7 @@ def _new_manager():
     if not opts["domain"]:
         raise ValueError("OpenSandbox Server 地址未配置")
     from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager
+    log.info(opts)
     return OpenSandboxWorkspaceManager(
         isolation=IsolationPolicy.PER_USER,
         image=opts["image"] if opts["image"] else DEFAULT_IMAGE,

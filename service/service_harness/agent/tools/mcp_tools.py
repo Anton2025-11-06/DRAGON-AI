@@ -58,6 +58,9 @@ def make_mcp_tool(mcp_id: int, server_name: str, tool: dict) -> ToolBase:
     """一个 MCP 远端工具 → 一个 ToolBase 实例（闭包捕获连接与工具标识）。"""
     tool_name = str(tool.get("name") or "").strip()
     description = str(tool.get("description") or "").strip()
+    # 先算成类体不会重名的局部变量：类体里 `description: str = description or ...`
+    # 会触发 Python 类作用域陷阱——同名自赋值时右侧读不到外层函数局部，报 NameError
+    desc_text = description or f"MCP 连接「{server_name}」上的工具 {tool_name}。"
     schema = _sanitize_schema(tool.get("inputSchema"))
     display = f"{server_name}/{tool_name}"
 
@@ -66,8 +69,7 @@ def make_mcp_tool(mcp_id: int, server_name: str, tool: dict) -> ToolBase:
 
         name: str = f"mcp_{_slug(server_name, str(mcp_id))}_{_NAME_SANITIZE.sub('_', tool_name).strip('_')}"
 
-        description: str = description or (
-            f"MCP 连接「{server_name}」上的工具 {tool_name}。")
+        description: str = desc_text
 
         input_schema: dict[str, Any] = schema
 

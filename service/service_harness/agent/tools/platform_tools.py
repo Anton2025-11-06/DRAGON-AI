@@ -80,6 +80,9 @@ def make_platform_tool(row: dict, parameters: list[dict]) -> ToolBase:
     tool_id = int(row.get("id") or 0)
     tool_name = str(row.get("name") or f"tool{tool_id}")
     description = str(row.get("description") or "").strip()
+    # 先算成类体不会重名的局部变量：类体里 `description: str = description or ...`
+    # 会触发 Python 类作用域陷阱——同名自赋值时右侧读不到外层函数局部，报 NameError
+    desc_text = description or f"平台工具「{tool_name}」（动态 Python 工具）。"
     function_code = row.get("function_code") or ""
     timeout_ms = int(row.get("timeout") or 0)
     schema = params_to_schema(parameters)
@@ -90,8 +93,7 @@ def make_platform_tool(row: dict, parameters: list[dict]) -> ToolBase:
 
         name: str = f"tool_{tool_id}_{''.join(ch for ch in tool_name if ch.isalnum() or ch == '_')}"
 
-        description: str = description or (
-            f"平台工具「{tool_name}」（动态 Python 工具）。")
+        description: str = desc_text
 
         input_schema: dict[str, Any] = schema
 

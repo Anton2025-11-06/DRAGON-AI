@@ -190,7 +190,8 @@ async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
 
         try:
             items = json.loads(out.strip().splitlines()[-1])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as e:
+            log.info(e)
             raise HarnessSandboxError("沙箱目录读取失败") from None
         if isinstance(items, dict) and items.get("error") == "not_dir":
             raise HarnessSandboxError("目录不存在")
