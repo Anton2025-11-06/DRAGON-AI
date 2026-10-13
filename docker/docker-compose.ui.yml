@@ -1,0 +1,46 @@
+# 前端编排：只有 ui 一个容器（nginx 托管静态产物 + 把 /api 反代到网关）。
+#
+# 为什么单独成文件：前端镜像构建要跑 pnpm build（node 大堆），和后端一起
+# --build、再一起拉起容易把服务器内存打爆。这里让后端先 up，前端错峰单独 build/up。
+#
+# 前提：docker-compose.backend.yml 已经起好。两个文件都挂在同一个 external
+# 网络 dragon-ai 上，网关在该网络里按服务名 gateway 解析，所以
+# GATEWAY_URL 默认 http://gateway:18000 直接可用。nginx 只在启动时解析一次
+# GATEWAY_URL，跨文件已没有 depends_on 保证顺序——务必先后端、再前端。
+#
+#   cd docker
+#   docker compose -f docker-compose.ui.yml up -d --build
+#
+# 常用覆盖：TAG、UI_PORT、GATEWAY_URL（网关不在本网络时才需改，例如指到外部地址）
+
+
+## docker network create dragon-ai
+
+name: dragon-ai-ui
+
+networks:
+  dragon-ai:
+    external: true
+
+services:
+  ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ui
+    image: dragon-ai-ui:${TAG:-latest}
+    networks:
+      - dragon-ai
+    init: true
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    environment:
+      # 走 compose 网络，用服务名访问网关；nginx 只在启动时解析一次，
+      # 所以后端 docker-compose.backend.yml 必须先起来（跨文件无 depends_on 排序）
+      GATEWAY_URL: ${GATEWAY_URL:-http://gateway:18000}
+      LISTEN_PORT: "80"
+    ports:
+      - "${UI_PORT:-8080}:80"
