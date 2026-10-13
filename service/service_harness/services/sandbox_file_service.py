@@ -12,14 +12,14 @@
 - 上传/下载走 base64-over-exec（与 agentscope 快照机制同款通道），分块
   绕开 Linux 单命令行参数 ~128KiB 的上限。
 
-workspace 生命周期（与 worker 的轮次执行共享同一个沙箱）：
-- workspace 由 workspace_factory 经 manager 分配/复用，attach 幂等（沙箱还在
-  时走 reattach+resume 快路径）；
-- 本服务不做进程级缓存——workspace 由 manager 持有（自带 TTL），本地缓存只会
-  攥着可能已过期的死引用，每次直接 build_workspace 取用；
-- 只回收引用、**不调 close**——close 可能是销毁性语义（OpenSandboxWorkspace 没有
-  pause 方法，沙箱本体靠服务端 timeout_seconds 自然暂停，worker 轮次收尾中的
-  _release_workspace 也只探 teardown/close，不存在就只丢引用）。
+workspace 生命周期（每请求临时 attach，作用域结束即释放）：
+- workspace 由 workspace_factory.workspace_scope 经临时 manager 分配：
+  assign_workspace_id（PER_USER 幂等，与 arq 轮次指向同一只沙箱）+ get_workspace
+  （内部已 initialize，沙箱还在时走 reattach+resume 快路径）；
+- 本服务不做进程级缓存；四口各自 `async with _sandbox_entry(...)`，作用域退出由
+  manager.__aexit__ close_all（pause 本轮沙箱、文件系统保留，下次请求 reattach）；
+- PER_USER 下 session_id 只是 manager 定位入参、不参与 workspace 归属，
+  文件浏览无会话上下文时留空即可。
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ import base64
 import posixpath
 import secrets
 import shlex
+from contextlib import asynccontextmanager
 
 from common.common_log.log_init import log
 
@@ -48,33 +49,36 @@ _UPLOAD_CHUNK = 64 * 1024           # 单条命令携带的 base64 字符数（<
 # ==================== workspace 连接 ====================
 
 
-async def _get_entry(user_id: int) -> dict:
-    """构建当前用户的沙箱执行入口：Bash 工具 + workdir。
+@asynccontextmanager
+async def _sandbox_entry(user_id: int, session_id=None):
+    """临时 attach 当前用户沙箱，包成一个 async with 作用域（与对话轮次同一套模型）。
 
-    不做进程级缓存——workspace 由 manager 持有（自带 TTL），本地缓存只会攥着
-    可能已过期的死引用；build_workspace 幂等（reattach 快路径），每次直接取用。
+    走 workspace_factory.workspace_scope：进入时建临时 manager、assign_workspace_id
+    （PER_USER 幂等，与 arq 轮次指向同一 workspace）+ get_workspace（已 initialize），
+    退出自动 close_all 释放本轮沙箱。session_id 仅 manager 定位入参，PER_USER
+    下不影响归属，文件浏览无会话上下文时留空按固定值处理。
     """
     from agentscope.tool import Bash
 
     from service.service_harness.agent.workspace_factory import (
-        build_workspace, workspace_id_of,
+        workspace_scope, workspace_id_of,
     )
 
-    workspace = await build_workspace({"user_id": user_id})
-    backend = workspace.get_backend()
-    workdir = str(getattr(workspace, "workdir", "") or "")
-    # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
-    # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
-    ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
-    if not workdir:
-        raise HarnessSandboxError(
-            f"沙箱 workdir 为空，无法执行文件操作（workspace_id={ws_id}）")
-    return {
-        "workspace_id": ws_id,
-        "workspace": workspace,
-        "bash": Bash(backend=backend),
-        "workdir": workdir,
-    }
+    async with workspace_scope({"user_id": user_id}, session_id) as workspace:
+        backend = workspace.get_backend()
+        workdir = str(getattr(workspace, "workdir", "") or "")
+        # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
+        # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
+        ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
+        if not workdir:
+            raise HarnessSandboxError(
+                f"沙箱 workdir 为空，无法执行文件操作（workspace_id={ws_id}）")
+        yield {
+            "workspace_id": ws_id,
+            "workspace": workspace,
+            "bash": Bash(backend=backend),
+            "workdir": workdir,
+        }
 
 
 async def _run(entry: dict, command: str) -> str:
@@ -174,75 +178,75 @@ else:
 # ==================== 四口实现 ====================
 
 
-async def list_dir(login_user: dict, path: str = "") -> dict:
+async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
     """目录列表（响应形状与旧沙箱口一致，前端零改动）。"""
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    rel = _safe_rel(path)
-    out = await _run(
-        entry,
-        f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_LS_SCRIPT)}",
-    )
-    import json
+    async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
+        rel = _safe_rel(path)
+        out = await _run(
+            entry,
+            f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_LS_SCRIPT)}",
+        )
+        import json
 
-    try:
-        items = json.loads(out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        raise HarnessSandboxError("沙箱目录读取失败") from None
-    if isinstance(items, dict) and items.get("error") == "not_dir":
-        raise HarnessSandboxError("目录不存在")
-    return {
-        "workspace": entry["workspace_id"],
-        "current_path": rel,
-        "parent_path": posixpath.dirname(rel),
-        "items": items,
-    }
+        try:
+            items = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise HarnessSandboxError("沙箱目录读取失败") from None
+        if isinstance(items, dict) and items.get("error") == "not_dir":
+            raise HarnessSandboxError("目录不存在")
+        return {
+            "workspace": entry["workspace_id"],
+            "current_path": rel,
+            "parent_path": posixpath.dirname(rel),
+            "items": items,
+        }
 
 
-async def read_text_file(login_user: dict, path: str) -> dict:
+async def read_text_file(login_user: dict, path: str, session_id=None) -> dict:
     """查看文件：文本截断预览；二进制只回标记（内容走下载口）。"""
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    rel = _safe_rel(path)
-    out = await _run(
-        entry,
-        f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_READ_SCRIPT)}",
-    )
-    body = out[4:] if out[:4] in ("TXT:", "BIN:") else ""
-    if out.startswith("ERR:"):
-        raise HarnessSandboxError("文件不存在")
-    if out.startswith("BIN:"):
+    async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
+        rel = _safe_rel(path)
+        out = await _run(
+            entry,
+            f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_READ_SCRIPT)}",
+        )
+        body = out[4:] if out[:4] in ("TXT:", "BIN:") else ""
+        if out.startswith("ERR:"):
+            raise HarnessSandboxError("文件不存在")
+        if out.startswith("BIN:"):
+            return {"path": rel, "name": posixpath.basename(rel),
+                    "size": int(body or 0), "truncated": False,
+                    "content": "（二进制文件，请下载后查看）", "binary": True}
         return {"path": rel, "name": posixpath.basename(rel),
-                "size": int(body or 0), "truncated": False,
-                "content": "（二进制文件，请下载后查看）", "binary": True}
-    return {"path": rel, "name": posixpath.basename(rel),
-            "size": len(body.encode("utf-8", "replace")),
-            "truncated": "[文件较大，已截断]" in body,
-            "content": body, "binary": False}
+                "size": len(body.encode("utf-8", "replace")),
+                "truncated": "[文件较大，已截断]" in body,
+                "content": body, "binary": False}
 
 
 async def save_file(login_user: dict, dir_path: str, filename: str,
-                    content: bytes) -> dict:
+                    content: bytes, session_id=None) -> dict:
     """上传：base64 分块写临时文件再解码落位（绕开单参数 128KiB 上限）。"""
     if len(content) > UPLOAD_MAX:
         raise HarnessSandboxError(f"文件超过 {UPLOAD_MAX // 1024 // 1024}MB 限制")
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    target = _join_rel(dir_path, filename)
-    parent = posixpath.dirname(target)
-    b64 = base64.b64encode(content).decode("ascii")
-    tmp = f".harness_up_{secrets.token_hex(8)}"
-    cd = f"cd {_q(entry['workdir'])}"
-    try:
-        for i in range(0, len(b64), _UPLOAD_CHUNK):
-            part = b64[i:i + _UPLOAD_CHUNK]
-            await _run(entry, f"{cd} && printf '%s' {part} >> {tmp}")
-        mkdir = f"mkdir -p {_q(parent)}" if parent else "true"
-        await _run(entry, f"{cd} && {mkdir} && base64 -d {tmp} > {_q(target)}")
-    finally:
-        # 幂等清理：成功失败都删临时文件（失败只记日志不掩盖原异常）
+    async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
+        target = _join_rel(dir_path, filename)
+        parent = posixpath.dirname(target)
+        b64 = base64.b64encode(content).decode("ascii")
+        tmp = f".harness_up_{secrets.token_hex(8)}"
+        cd = f"cd {_q(entry['workdir'])}"
         try:
-            await _run(entry, f"{cd} && rm -f {tmp}")
-        except HarnessSandboxError as e:
-            log.warning("harness sandbox temp cleanup failed: {}", e)
-    return {"name": posixpath.basename(target), "size": len(content)}
+            for i in range(0, len(b64), _UPLOAD_CHUNK):
+                part = b64[i:i + _UPLOAD_CHUNK]
+                await _run(entry, f"{cd} && printf '%s' {part} >> {tmp}")
+            mkdir = f"mkdir -p {_q(parent)}" if parent else "true"
+            await _run(entry, f"{cd} && {mkdir} && base64 -d {tmp} > {_q(target)}")
+        finally:
+            # 幂等清理：成功失败都删临时文件（失败只记日志不掩盖原异常）
+            try:
+                await _run(entry, f"{cd} && rm -f {tmp}")
+            except HarnessSandboxError as e:
+                log.warning("harness sandbox temp cleanup failed: {}", e)
+        return {"name": posixpath.basename(target), "size": len(content)}
 
 
 async def _stat_size(entry: dict, rel: str) -> int:
@@ -255,15 +259,11 @@ async def _stat_size(entry: dict, rel: str) -> int:
         return 0
 
 
-async def read_bytes(login_user: dict, path: str) -> tuple[bytes, str, bool]:
-    """下载单文件：base64 回传（size 检查在先）。
+async def _read_bytes(entry: dict, rel: str) -> tuple[bytes, str, bool]:
+    """下载单文件：base64 回传（size 检查在先）。在已连接的 entry 作用域内调用。
 
-    返回 (字节, 文件名, 是否目录)——目录场景由 pack_dir 走 zip。
+    返回 (字节, 文件名, 是否目录)——目录场景由 _pack_dir 走 zip。
     """
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    rel = _safe_rel(path)
-    if not rel:
-        raise HarnessSandboxError("非法路径")
     if await _stat_size(entry, rel) > DOWNLOAD_MAX:
         raise HarnessSandboxError(f"文件超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
     out = await _run(entry,
@@ -277,12 +277,8 @@ async def read_bytes(login_user: dict, path: str) -> tuple[bytes, str, bool]:
     return data, posixpath.basename(rel), False
 
 
-async def pack_dir(login_user: dict, path: str) -> tuple[bytes, str, bool]:
-    """下载目录：tar.gz + base64 回传（响应头按 zip 呈现给浏览器）。"""
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    rel = _safe_rel(path)
-    if not rel:
-        raise HarnessSandboxError("非法路径")
+async def _pack_dir(entry: dict, rel: str) -> tuple[bytes, str, bool]:
+    """下载目录：tar.gz + base64 回传（响应头按 zip 呈现给浏览器）。在已连接 entry 内调用。"""
     full = await _run(entry,
                       f"cd {_q(entry['workdir'])} && tar cz {_q(rel)} 2>/dev/null "
                       f"| base64")
@@ -295,27 +291,28 @@ async def pack_dir(login_user: dict, path: str) -> tuple[bytes, str, bool]:
     return data, f"{posixpath.basename(rel)}.zip", True
 
 
-async def download(login_user: dict, path: str) -> tuple[bytes, str, bool]:
+async def download(login_user: dict, path: str, session_id=None) -> tuple[bytes, str, bool]:
     """下载分流：文件回原样字节，目录打包 tar.gz（文件名带 .zip）。
 
-    判型在沙箱内一条 test 完成（D=目录/F=文件/N=不存在），避免本地猜测
-    与沙箱真实状态不一致。返回 (字节, 下载名, 是否目录)。
+    判型与读取/打包全在同一 _sandbox_entry 作用域内一次完成（避免重复
+    attach/reattach）；判型在沙箱内一条 test 完成（D=目录/F=文件/N=不存在）。
+    返回 (字节, 下载名, 是否目录)。
     """
-    entry = await _get_entry(int(login_user.get("user_id") or 0))
-    rel = _safe_rel(path)
-    if not rel:
-        raise HarnessSandboxError("非法路径")
-    kind = await _run(
-        entry,
-        f"cd {_q(entry['workdir'])} && (test -d {_q(rel)} && echo D "
-        f"|| (test -f {_q(rel)} && echo F || echo N))",
-    )
-    marker = (kind.strip().splitlines() or ["N"])[-1][-1:]
-    if marker == "D":
-        return await pack_dir(login_user, path)
-    if marker == "F":
-        return await read_bytes(login_user, path)
-    raise HarnessSandboxError("文件或目录不存在")
+    async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
+        rel = _safe_rel(path)
+        if not rel:
+            raise HarnessSandboxError("非法路径")
+        kind = await _run(
+            entry,
+            f"cd {_q(entry['workdir'])} && (test -d {_q(rel)} && echo D "
+            f"|| (test -f {_q(rel)} && echo F || echo N))",
+        )
+        marker = (kind.strip().splitlines() or ["N"])[-1][-1:]
+        if marker == "D":
+            return await _pack_dir(entry, rel)
+        if marker == "F":
+            return await _read_bytes(entry, rel)
+        raise HarnessSandboxError("文件或目录不存在")
 
 
 

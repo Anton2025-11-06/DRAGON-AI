@@ -211,7 +211,8 @@ sandbox_router = APIRouter(prefix="/sandbox", tags=["深度探索-沙箱文件"]
 
 
 @sandbox_router.get("/files", summary="沙箱工作区目录列表")
-async def harness_sandbox_files(request: Request, path: str = ""):
+async def harness_sandbox_files(request: Request, path: str = "",
+                               session_id: str = ""):
     """每用户独立云沙箱（harness-{user_id}），文件跨会话保留。
 
     首次访问若沙箱从未建过会触发分钟级 bootstrap；正常路径是先对话后浏览
@@ -220,18 +221,19 @@ async def harness_sandbox_files(request: Request, path: str = ""):
     """
     login_user = await get_login_user(request)
     try:
-        data = await sandbox_file_service.list_dir(login_user, path)
+        data = await sandbox_file_service.list_dir(login_user, path, session_id)
         return ApiResponse.success(data=data)
     except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
 
 
 @sandbox_router.get("/file", summary="查看沙箱文件内容")
-async def harness_sandbox_file(request: Request, path: str = ""):
+async def harness_sandbox_file(request: Request, path: str = "",
+                              session_id: str = ""):
     """文本截断预览；二进制只回标记（内容走下载口）。"""
     login_user = await get_login_user(request)
     try:
-        data = await sandbox_file_service.read_text_file(login_user, path)
+        data = await sandbox_file_service.read_text_file(login_user, path, session_id)
         return ApiResponse.success(data=data)
     except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
@@ -239,24 +241,27 @@ async def harness_sandbox_file(request: Request, path: str = ""):
 
 @sandbox_router.post("/upload", summary="上传文件到沙箱工作区")
 async def harness_sandbox_upload(request: Request, path: str = Form(""),
+                                 session_id: str = Form(""),
                                  file: UploadFile = File(...)):
     """base64 分块写入（跟 agentscope 快照同款通道，单次≤20MB）。"""
     login_user = await get_login_user(request)
     content = await file.read()
     try:
-        data = await sandbox_file_service.save_file(login_user, path, file.filename or "", content)
+        data = await sandbox_file_service.save_file(login_user, path, file.filename or "",
+                                                   content, session_id)
         return ApiResponse.success(data=data, message="上传成功")
     except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
 
 
 @sandbox_router.get("/download", summary="下载沙箱文件或目录(zip)")
-async def harness_sandbox_download(request: Request, path: str = ""):
+async def harness_sandbox_download(request: Request, path: str = "",
+                                  session_id: str = ""):
     import urllib.parse
 
     login_user = await get_login_user(request)
     try:
-        data, name, is_dir = await sandbox_file_service.download(login_user, path)
+        data, name, is_dir = await sandbox_file_service.download(login_user, path, session_id)
     except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
     quoted = urllib.parse.quote(name)

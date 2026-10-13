@@ -223,12 +223,16 @@ docker run -d --name ui --init -p 8080:80 \
   dragon-ai-ui:latest
 ```
 
-All of them at once:
+All of them, split into two compose files (bring the back end up first, then build/run
+the front end separately so a single --build never compiles both at once and OOMs the host):
 
 ```bash
 cp docker/.env.example docker/.env   # fill in NACOS_ADDR
-docker compose -f docker/docker-compose.yml up -d --build
-# open http://<host>:8080
+# 1) Back end: six services + four worker pipelines (+ optional OpenSandbox)
+docker compose -f docker/docker-compose.backend.yml up -d --build
+# 2) Front end: build/up on its own after the back end is up (lower memory peak)
+docker compose -f docker/docker-compose.ui.yml up -d --build
+# open http://<host>:8080 (UI_PORT)
 ```
 
 | Variable | Purpose | Default |

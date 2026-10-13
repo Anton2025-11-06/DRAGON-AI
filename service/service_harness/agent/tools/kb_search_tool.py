@@ -23,7 +23,7 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.permission import (
     PermissionBehavior, PermissionContext, PermissionDecision,
 )
-from agentscope.tool import ToolBase
+from agentscope.tool import ToolBase, ToolChunk
 from pydantic import BaseModel, Field
 
 # 检索后端可用标记：tasks/harness.py bootstrap 成功装载 rag 段后置 True

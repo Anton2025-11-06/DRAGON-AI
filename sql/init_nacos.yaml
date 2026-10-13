@@ -249,7 +249,7 @@ service_harness:
     echo: False
   # OpenSandbox 云沙箱（智能体的执行环境，每用户一个 workspace，文件跨会话
   # 保留）。domain 留空 = 未部署：发消息时报「沙箱未配置」，不连陌生默认
-  # 地址；自托管容器（docker-compose 的 opensandbox 服务）填 http://opensandbox:8006。
+  # 地址；自托管容器（docker-compose.backend.yml 的 opensandbox 服务）填 http://opensandbox:8006。
   opensandbox:
     domain: ''
     api_key: ''                    # server 开了鉴权才填

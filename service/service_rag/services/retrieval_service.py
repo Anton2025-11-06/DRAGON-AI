@@ -227,7 +227,7 @@ class _SearchRunner:
                  chunk_type: Optional[str] = None, mode: Optional[str] = None,
                  top_k: int = 0, score_threshold: Optional[float] = None,
                  rerank: Optional[bool] = None, vector_weight: Optional[float] = None,
-                 with_graph: bool = False, metadata_filters: Optional[Sequence[dict]] = None,
+                 with_graph: bool = True, metadata_filters: Optional[Sequence[dict]] = None,
                  total_limit: int = 0, rerank_model_id: int = 0, chat_model_id: int = 0,
                  graph_depth: Any = None, graph_scale: Any = None,
                  graph_source_chunks: bool = False):

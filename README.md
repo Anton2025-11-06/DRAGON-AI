@@ -207,12 +207,16 @@ docker run -d --name ui --init -p 8080:80 \
   dragon-ai-ui:latest
 ```
 
-一键起全部：
+一键起全部（前后端拆成两个 compose 文件，先起后端、前端错峰再 build/up，
+避免一次 --build 同时编译前后端把服务器内存打爆）：
 
 ```bash
 cp docker/.env.example docker/.env   # 填 NACOS_ADDR
-docker compose -f docker/docker-compose.yml up -d --build
-# 浏览器开 http://<host>:8080
+# 1) 后端：六个服务 + 四条 worker 流水线（+ 可选 OpenSandbox 沙箱）
+docker compose -f docker/docker-compose.backend.yml up -d --build
+# 2) 前端：等后端起来后再单独 build/up（错峰，内存峰值更低）
+docker compose -f docker/docker-compose.ui.yml up -d --build
+# 浏览器开 http://<host>:8080（UI_PORT）
 ```
 
 | 变量 | 作用 | 默认 |

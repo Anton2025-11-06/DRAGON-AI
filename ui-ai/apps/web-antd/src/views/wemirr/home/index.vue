@@ -18,6 +18,7 @@ import {
   DeleteOutlined,
   FileTextFilled,
   FolderFilled,
+  MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -58,6 +59,7 @@ export default defineComponent({
     DeleteOutlined,
     FileTextFilled,
     FolderFilled,
+    MoreOutlined,
     PlusOutlined,
     ReloadOutlined,
     RobotOutlined,
@@ -315,11 +317,12 @@ export default defineComponent({
       inputValue.value = '';
     }
 
-    async function deleteCurrentSession() {
-      if (!sessionId.value) return;
+    async function deleteSession(id: number) {
+      if (!id) return;
       try {
-        await api.HarnessSessionDelete(sessionId.value);
-        newSession();
+        await api.HarnessSessionDelete(id);
+        // 删的是当前会话才回到新建草稿；删侧栏里的历史项不打断当前对话
+        if (sessionId.value === id) newSession();
         await loadSessions(true);
       } catch {
         message.error('会话删除失败');
@@ -352,7 +355,7 @@ export default defineComponent({
       }
       if (!text || sending.value) return;
       if (!modelId.value) {
-        message.warning('请先在右上角选择一个已授权的模型');
+        message.warning('请先在下方选择一个已授权的模型');
         return;
       }
 
@@ -675,7 +678,7 @@ export default defineComponent({
       modelSelectOptions,
       switchSession,
       newSession,
-      deleteCurrentSession,
+      deleteSession,
       changeModel,
       // 挂载 picker
       openPicker,
@@ -730,6 +733,18 @@ export default defineComponent({
             <span class="hermes-side-title" :title="s.title">{{
               s.title
             }}</span>
+            <a-dropdown :trigger="['click']" placement="bottomRight">
+              <span class="hermes-side-more" @click.stop>
+                <MoreOutlined />
+              </span>
+              <template #overlay>
+                <a-menu>
+                  <a-menu-item key="delete" danger @click="deleteSession(s.id)">
+                    <DeleteOutlined /> 删除对话
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
           </div>
           <div v-if="sessions.length === 0" class="hermes-side-empty">
             暂无历史会话
@@ -748,19 +763,6 @@ export default defineComponent({
           <h2>深度探索 Hernes</h2>
           <p>连接云端沙箱运行时，描述你的问题，让 AI 帮你执行</p>
         </div>
-        <a-select
-          class="hermes-model-select"
-          :options="modelSelectOptions"
-          placeholder="选择模型"
-          size="small"
-          :value="modelId || undefined"
-          @change="changeModel"
-        />
-        <a-tooltip v-if="sessionId" title="删除当前会话">
-          <a-button danger ghost size="small" @click="deleteCurrentSession">
-            <template #icon><DeleteOutlined /></template>
-          </a-button>
-        </a-tooltip>
       </header>
 
       <!-- 已挂载能力（始终可见的清单条；模型/工具每轮可切换，这份 composer 状态随每次发消息传给后端） -->
@@ -880,6 +882,14 @@ export default defineComponent({
           <span v-if="mountedItems.length > 0" class="hermes-add-count">
             已挂载 {{ mountedItems.length }} 项
           </span>
+          <a-select
+            class="hermes-model-select"
+            size="small"
+            :options="modelSelectOptions"
+            placeholder="选择模型"
+            :value="modelId || undefined"
+            @change="changeModel"
+          />
         </div>
         <div class="hermes-input-row">
           <a-textarea
@@ -1171,11 +1181,6 @@ export default defineComponent({
         color: var(--text-color-3, #8a9099);
       }
     }
-
-    .hermes-model-select {
-      width: 190px;
-      flex-shrink: 0;
-    }
   }
 
   .hermes-mounted {
@@ -1368,9 +1373,14 @@ export default defineComponent({
       }
 
       .hermes-add-count {
-        margin-left: auto;
         font-size: 12px;
         color: var(--text-color-3, #8a9099);
+      }
+
+      .hermes-model-select {
+        margin-left: auto;
+        width: 160px;
+        flex-shrink: 0;
       }
     }
 
@@ -1597,6 +1607,9 @@ export default defineComponent({
   }
 
   .hermes-side-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     padding: 7px 8px;
     border-radius: 8px;
     cursor: pointer;
@@ -1604,6 +1617,10 @@ export default defineComponent({
 
     &:hover {
       background: var(--hover-color, #f5f7fa);
+
+      .hermes-side-more {
+        opacity: 1;
+      }
     }
     &.active {
       background: rgba(22, 119, 255, 0.08);
@@ -1614,11 +1631,35 @@ export default defineComponent({
     }
 
     .hermes-side-title {
-      display: block;
+      flex: 1;
+      min-width: 0;
       font-size: 12px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .hermes-side-more {
+      display: inline-flex;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      color: var(--text-color-3, #8a9099);
+      opacity: 0;
+      transition: opacity 0.15s;
+
+      .anticon {
+        transform: rotate(90deg);
+        font-size: 14px;
+      }
+
+      &:hover {
+        background: rgba(0, 0, 0, 0.06);
+        color: var(--text-color-2, #4e5969);
+      }
     }
   }
 

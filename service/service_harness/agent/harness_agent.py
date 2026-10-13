@@ -124,7 +124,7 @@ def _mount_section(summary: dict | None) -> str:
 
 def _build_system_prompt_sync(workspace: Any, mount_summary: dict | None = None) -> str:
     """拼系统提示词的基础段 + 挂载能力说明（同步部分，不含沙箱自述）。"""
-    prompt = BASE_SYSTEM_PROMPT.format(workdir=str(getattr(workspace, "workdir", "")))
+    prompt = BASE_SYSTEM_PROMPT.format(workdir=str(getattr(workspace, "workdir", "/workspace")))
     return prompt + _mount_section(mount_summary)
 
 

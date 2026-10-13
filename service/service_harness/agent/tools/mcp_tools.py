@@ -24,7 +24,7 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.permission import (
     PermissionBehavior, PermissionContext, PermissionDecision,
 )
-from agentscope.tool import ToolBase
+from agentscope.tool import ToolBase, ToolChunk
 
 # 单个 MCP 连接最多注册的工具数（超过截断，见模块 docstring）
 MAX_TOOLS_PER_SERVER = 30

@@ -24,7 +24,7 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.permission import (
     PermissionBehavior, PermissionContext, PermissionDecision,
 )
-from agentscope.tool import ToolBase
+from agentscope.tool import ToolBase, ToolChunk
 
 # 参数定义 type → JSON Schema type 的折算表；认不出的回落 string
 #（严格拒掉会让「定义里 type 拼错」的工具直接不可用，宽松回落只是少一层校验）
