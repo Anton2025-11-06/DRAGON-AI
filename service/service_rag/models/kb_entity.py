@@ -67,6 +67,12 @@ class KnowledgeBase(Base):
         JSON, nullable=True, comment="分块策略与参数（8 种策略全前端可配）")
     retrieve_config: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True, comment="top_k/score_threshold/向量权重/rerank/keyword_boost")
+    # 知识图谱自定义实体范围（仅 doc 型且 graph_enabled=1 生效）：
+    #   {"customEnabled": 1, "entityTypes": [{"name", "description"}]}；NULL/未开启=按系统默认
+    #   KG_ENTITY_TYPES 抽取。单独一列而不并进 parse_config：实体范围只影响图谱抽取，
+    #   不该像解析/分块配置那样一改就把 version +1、提示存量文档重解析（切片与实体范围无关）。
+    graph_config: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="图谱自定义实体范围 {customEnabled,entityTypes}，NULL=系统默认")
     graph_enabled: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="图谱库级开关：开了还要按文档手动构建")
     doc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -108,7 +114,12 @@ class Document(Base):
     file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment="上传时原始文件名")
     file_path: Mapped[str] = mapped_column(
         String(500), nullable=False,
-        comment="原件在公共存储中的句柄（raw/{kb_id}/{doc_id}.{ext}，相对 storage.path_prefix=rag/）")
+        comment="原件在公共存储中的句柄（raw/{kb_id}/{doc_id}.{ext}，相对 storage.path_prefix=rag/）；"
+                "url 模式存文件本身的可访问 URL")
+    # 原件来源模式（rag_constant.DOC_MODE_*）：决定 worker 取原件与列表看原文件走哪条路。
+    source_mode: Mapped[str] = mapped_column(
+        String(8), nullable=False, default=RC.DOC_MODE_FILE,
+        comment="file=上传落公共存储（file_path 是对象名）；url=外部地址（file_path 存 URL 本身）")
     file_ext: Mapped[Optional[str]] = mapped_column(String(16), nullable=True,
                                                      comment="小写、不含点，决定解析链路与分块默认策略")
     file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

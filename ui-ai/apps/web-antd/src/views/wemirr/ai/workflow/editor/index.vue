@@ -225,6 +225,10 @@ async function handleSave() {
     message.warning('请输入工作流名称');
     return;
   }
+  if (!workflowDescription.value.trim()) {
+    message.warning('请输入工作流描述（智能体据此选择该工作流工具）');
+    return;
+  }
 
   saving.value = true;
   try {
@@ -660,6 +664,15 @@ onBeforeUnmount(() => {
             class="workflow-name-input"
             placeholder="请输入工作流名称"
             :bordered="false"
+          />
+          <a-textarea
+            v-model:value="workflowDescription"
+            class="workflow-desc-input"
+            :auto-size="{ minRows: 1, maxRows: 1 }"
+            :maxlength="500"
+            placeholder="请输入工作流描述（智能体据此选择该工具）"
+            :bordered="false"
+            style="max-width: 360px"
           />
           <Tag
             v-if="currentWorkflow?.status"

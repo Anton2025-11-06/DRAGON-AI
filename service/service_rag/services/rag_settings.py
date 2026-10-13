@@ -51,7 +51,8 @@ DEFAULT_VIDEO_DESC_PROMPT = (
 # 改这段常量时只要混进一个孤立大括号，format 就会抛 KeyError 把整次抽取带倒
 DEFAULT_GRAPH_EXTRACT_PROMPT = (
     "你是知识图谱抽取助手。阅读下面的文档片段，抽取出实体与实体之间的关系。\n"
-    "实体类型只能从这些里选：{entity_types}；归类不出的统一写成「其他」。\n"
+    "实体类型只能从这些里选：{entity_types}。\n"
+    "{type_rule}\n"
     "宁缺毋滥——原文里没有的关系不要推测，出现了多少组关系就输出多少组。\n"
     "只输出 JSON，不要任何解释文字，结构严格为：\n"
     '{"entities": [{"name": "实体名", "type": "实体类型", '
@@ -233,17 +234,24 @@ def build_rag_qa_prompt(question: str, context: str) -> str:
 
 
 def build_extract_prompt(rows: Sequence[Sequence[Any]], *,
-                         entity_types: Optional[Sequence[str]] = None) -> str:
+                         entity_types: Optional[Sequence[str]] = None,
+                         type_rule: Optional[str] = None) -> str:
     """拼一次图谱抽取的完整提示词。
 
     :param rows: ``[(chunk_index, content), ..]``——编号用切片在本文档内的 chunk_index，
         与 ES/Neo4j 里那个列同一个口径；换成批次内序号会让模型返回的 chunk_indexes
         指向错的切片，页面上就是「点实体跳到不相干的一段」。
+    :param entity_types: 自定义实体类型清单（已带描述的展示串）；留空按系统默认 KG_ENTITY_TYPES。
+    :param type_rule: 越界兜底那一句话；留空用默认「归类不出的统一写成「其他」」。
+        自定义且不含「其他」时由 graph_extract_types 换成「一律不要输出」，避免提示词
+        与下游的严格丢弃口径相左（提示词让模型写「其他」，实体却被丢弃）。
     """
     body = "\n\n".join(f"[切片{int(idx)}] {str(text or '').strip()}"
                        for idx, text in rows if str(text or "").strip())
     return (graph_extract_prompt()
             .replace("{entity_types}", "、".join(entity_types or RC.KG_ENTITY_TYPES))
+            .replace("{type_rule}", type_rule
+                     or f"归类不出的统一写成「{RC.KG_ENTITY_OTHER}」。")
             .replace("{content}", body))
 
 
@@ -323,6 +331,92 @@ def normalize_graph_enabled(kb_type: Optional[str], enable_graph: Any) -> int:
     if not RC.KB_TYPE_GRAPH_SUPPORTED.get(str(kb_type or "").strip().lower(), False):
         return 0
     return 1 if _as_bool(enable_graph) else 0
+
+
+def normalize_graph_config(kb_type: Optional[str], enable_graph: Any,
+                           graph_config: Optional[dict]) -> Optional[dict]:
+    """自定义实体范围归一 → 落库 dict 或 None（None=按系统默认 KG_ENTITY_TYPES 抽取）。
+
+    只在 doc 型且图谱开关打开时才可能有值：非 doc / 图谱未开 / customEnabled 未勾 / 类型名全空，
+    一律回 None（不存一个“开了但没内容”的脏配置）。开启时逐条校验：
+    名称必填（去空后非空、截长度）、描述选填、名称去重、总数封顶 KG_CUSTOM_ENTITY_TYPES_MAX。
+    前端传驼峰 customEnabled/entityTypes，兼容 snake；落库统一驼峰，与 KnowledgeBaseResp 回显同口径。
+    """
+    if str(kb_type or "").strip().lower() != RC.KB_TYPE_DOC:
+        return None
+    if not _as_bool(enable_graph):
+        return None
+    raw = graph_config if isinstance(graph_config, dict) else {}
+    enabled = raw.get("customEnabled")
+    if enabled is None:
+        enabled = raw.get("custom_enabled")
+    if not _as_bool(enabled):
+        return None
+    items = raw.get("entityTypes")
+    if items is None:
+        items = raw.get("entity_types")
+    if not isinstance(items, list):
+        items = []
+    types: list[dict] = []
+    seen: set[str] = set()
+    for one in items:
+        if not isinstance(one, dict):
+            continue
+        name = str(one.get("name") or "").strip()[:RC.KG_ENTITY_NAME_MAX]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        desc = str(one.get("description") or one.get("desc") or "").strip()
+        desc = desc[:RC.KG_ENTITY_DESC_MAX]
+        types.append({"name": name, "description": desc})
+        if len(types) >= RC.KG_CUSTOM_ENTITY_TYPES_MAX:
+            break
+    if not types:
+        return None
+    return {"customEnabled": 1, "entityTypes": types}
+
+
+def graph_extract_types(graph_config: Optional[dict]
+                        ) -> tuple[Optional[list[str]], Optional[list[str]], Optional[str]]:
+    """库配置 → 抽取时的 (allowed_names, prompt_types, type_rule)；全 None=用系统默认。
+
+    三个返回只供 worker 侧（run_build）：
+    * allowed_names：受控实体类型名集合，None 表示不限制（用 kg_store.entity_type_of 的默认）；
+      非空时 _normalize 会丢弃不在此集合内的实体（严格过滤）。
+    * prompt_types：写进提示词的展示串（名称 + 可选描述），帮模型正确归类。
+    * type_rule：越界兜底那句话；含「其他」时“归类不出的归其他”，不含时“一律不要输出”，
+      与 allowed_names 的丢弃口径保持一致。
+    没开自定义、或开了但无合法类型名 → 全 None（回退系统默认抽取）。
+    """
+    cfg = graph_config if isinstance(graph_config, dict) else {}
+    enabled = cfg.get("customEnabled")
+    if enabled is None:
+        enabled = cfg.get("custom_enabled")
+    if not _as_bool(enabled):
+        return None, None, None
+    items = cfg.get("entityTypes")
+    if items is None:
+        items = cfg.get("entity_types")
+    if not isinstance(items, list):
+        return None, None, None
+    allowed: list[str] = []
+    prompt_types: list[str] = []
+    for one in items:
+        if not isinstance(one, dict):
+            continue
+        name = str(one.get("name") or "").strip()
+        if not name or name in allowed:
+            continue
+        allowed.append(name)
+        desc = str(one.get("description") or "").strip()
+        prompt_types.append(f"{name}（{desc}）" if desc else name)
+    if not allowed:
+        return None, None, None
+    if RC.KG_ENTITY_OTHER in allowed:
+        rule = f"只能从上面这些类型里选，归类不出的统一写成「{RC.KG_ENTITY_OTHER}」。"
+    else:
+        rule = "只能从上面这些类型里选，凡不属于这些类型的实体一律不要输出。"
+    return allowed, prompt_types, rule
 
 
 def _as_bool(value: Any) -> bool:
@@ -443,5 +537,6 @@ __all__ = [
     "rag_qa_prompt", "build_rag_qa_prompt",
     "mineru_options", "mineru_configured", "chunk_index", "kg_vector_index",
     "check_kb_type", "check_parser_engine", "normalize_graph_enabled",
+    "normalize_graph_config", "graph_extract_types",
     "normalize_parse_config", "normalize_chunk_config", "normalize_retrieve_config",
 ]

@@ -68,14 +68,19 @@ async def skill_preview(request: Request, skill_id: int):
 @router.post("/upload", summary="上传 SKILL.zip 技能包")
 @has_permission("workflow:skill:add")
 async def upload_skill(request: Request, name: str = Form(...), code: str = Form(...),
-                       file: UploadFile = File(...), description: str = Form(""),
+                       file: UploadFile = File(...),
+                       description: str = Form(..., min_length=1, max_length=500),
                        category: str = Form(""), icon: str = Form(""), tags: str = Form("")):
     login_user = await get_login_user(request)
     data = await file.read()
+    # 描述必填：harness agent 挂载技能时直接拿它做工具 description，
+    # 空描述智能体无法判断技能能力，因此入口层先卡住。
+    if not (description or "").strip():
+        return ApiResponse.error(400, "技能描述不能为空")
     try:
         new_id = await svc.SkillService.upload(
             name=name, code=code, data=data,
-            description=description or None, category=category or None, icon=icon or None,
+            description=description.strip(), category=category or None, icon=icon or None,
             tags=_parse_tags_form(tags), created_by=login_user.get("user_id") or 0,
             original_name=file.filename)
         return ApiResponse.success(data={"id": new_id}, message="技能上传成功")
@@ -86,13 +91,17 @@ async def upload_skill(request: Request, name: str = Form(...), code: str = Form
 @router.put("/{skill_id}/upload", summary="zip 替换技能目录（清空原目录后解压）")
 @has_permission("workflow:skill:replace")
 async def replace_skill(request: Request, skill_id: int, file: UploadFile = File(...),
-                        name: str = Form(""), description: str = Form(""),
+                        name: str = Form(""),
+                        description: str = Form(..., min_length=1, max_length=500),
                         category: str = Form(""), icon: str = Form(""), tags: str = Form("")):
     data = await file.read()
+    # 同 upload：harness 工具选择依据，描述非空硬性要求（编辑弹窗必须带上现有描述）。
+    if not (description or "").strip():
+        return ApiResponse.error(400, "技能描述不能为空")
     try:
         await svc.SkillService.replace(
             await get_login_user(request), skill_id, data,
-            name=name or None, description=description or None,
+            name=name or None, description=description.strip(),
             category=category or None, icon=icon or None, tags=_parse_tags_form(tags),
             original_name=file.filename)
         return ApiResponse.success(message="技能目录已替换")

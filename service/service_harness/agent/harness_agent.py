@@ -122,19 +122,29 @@ def _mount_section(summary: dict | None) -> str:
     return "\n\n【本轮挂载的平台能力】\n" + "\n".join(lines)
 
 
-def _build_system_prompt(workspace: Any, mount_summary: dict | None = None) -> str:
-    """拼系统提示词：基础段 + 沙箱自述 + 挂载能力说明。"""
+def _build_system_prompt_sync(workspace: Any, mount_summary: dict | None = None) -> str:
+    """拼系统提示词的基础段 + 挂载能力说明（同步部分，不含沙箱自述）。"""
     prompt = BASE_SYSTEM_PROMPT.format(workdir=str(getattr(workspace, "workdir", "")))
+    return prompt + _mount_section(mount_summary)
+
+
+async def _build_system_prompt(workspace: Any, mount_summary: dict | None = None) -> str:
+    """拼系统提示词：基础段 + 沙箱自述 + 挂载能力说明。
+
+    注意：OpenSandboxWorkspace.get_instructions 是 async 方法，必须 await。
+    沙箱自述取不到不影响对话（降级为基础提示词）。
+    """
+    prompt = _build_system_prompt_sync(workspace, mount_summary)
     instructions = getattr(workspace, "get_instructions", None)
     if callable(instructions):
         try:
-            extra = instructions()
+            extra = await instructions()
             if extra:
                 prompt = f"{prompt}\n\n{extra}"
         except Exception:  # noqa: BLE001
             # 沙箱自述是锦上添花，取不到不影响对话
             pass
-    return prompt + _mount_section(mount_summary)
+    return prompt
 
 
 async def build_agent(state: AgentState, workspace: Any, model: Any,
@@ -148,7 +158,7 @@ async def build_agent(state: AgentState, workspace: Any, model: Any,
     apply_permission_policy(state, str(getattr(workspace, "workdir", "")))
     return Agent(
         name=AGENT_NAME,
-        system_prompt=_build_system_prompt(workspace, mount_summary),
+        system_prompt=await _build_system_prompt(workspace, mount_summary),
         model=model,
         state=state,
         toolkit=await build_toolkit(workspace, mounted_tools),

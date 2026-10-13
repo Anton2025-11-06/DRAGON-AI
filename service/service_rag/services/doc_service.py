@@ -34,6 +34,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Optional, Sequence
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import delete, func, or_, select, update
 
@@ -53,7 +54,7 @@ from common.common_utils.creator_util import attach_creator
 from service.service_rag.models.kb_entity import Document, DocumentChunk, KnowledgeBase
 from service.service_rag.schemas.rag_schema import (
     ChunkPageReq, ChunkResp, ChunkUpdateReq, BuildVectorReq, DocPageReq, DocProgressResp,
-    DocumentResp,
+    DocUrlItem, DocumentResp,
 )
 from service.service_rag.services import rag_settings as settings
 from service.service_rag.services.parse_service import obj_raw_name
@@ -71,6 +72,8 @@ OWNER_KEY = "createdBy"
 TITLE_MAX = 255
 FILE_NAME_MAX = 255
 MIME_MAX = 128
+# file_path 列宽：url 模式整个 URL 落在这列，落库前按它截断（入参 schema 已卡到 500）
+FILE_PATH_MAX = 500
 
 
 class RagDocService:
@@ -82,6 +85,8 @@ class RagDocService:
         resp = DocumentResp(
             id=row.doc_id, kb_id=row.kb_id, title=row.doc_name, file_name=row.file_name,
             file_ext=row.file_ext, file_size=int(row.file_size or 0),
+            source_mode=(str(row.source_mode or RC.DOC_MODE_FILE)
+                         if getattr(row, "source_mode", None) else RC.DOC_MODE_FILE),
             content_type=row.content_type, media_type=row.media_type,
             parser_engine=row.parser_engine, parse_version=int(row.parse_version or 0),
             status=row.status,
@@ -450,6 +455,102 @@ class RagDocService:
                 "message": message[:500] or None}
 
     @staticmethod
+    async def upload_by_urls(login_user: dict, kb_id: int, items: Sequence[DocUrlItem], *,
+                             open_api: bool = False) -> dict:
+        """批量按 URL 导入知识：校验 URL → 一次建行（file_path=URL、source_mode=url，不落存储）
+        → 一次提交 → 并发入队（mode=url）。逐项回执、不整批回滚，与文件上传同一套鉴权与回执形状。
+
+        与文件上传唯一的区别：原件不进 OSS，file_path 直接存 URL，worker 解析时按 mode GET 取字节。
+        """
+        urls = [one for one in (items or []) if getattr(one, "url", "")]
+        if not urls:
+            raise ValueError("没有收到任何 URL")
+        async with mysql_client.get_session() as session:
+            kb = await RagDocService._require_kb(login_user, kb_id, ACTION_UPLOAD, session)
+        if open_api:
+            limit = settings.open_api_max_files()
+            if len(urls) > limit:
+                raise ValueError(f"开放 API 单次最多导入 {limit} 条 URL（当前 {len(urls)} 条）")
+        allowed = [str(e).lower() for e in RC.KB_TYPE_ALLOWED_EXTS.get(kb.kb_type, [])]
+        results = await RagDocService._save_urls(kb, urls, allowed, login_user)
+        accepted = sum(1 for r in results if r.get("docId"))
+        message = "；".join(f"{r['fileName']}: {r['message']}"
+                           for r in results if r.get("message"))
+        return {"kbId": int(kb.kb_id), "accepted": accepted,
+                "rejected": len(results) - accepted, "items": results,
+                "message": message[:500] or None}
+
+    @staticmethod
+    async def _save_urls(kb: KnowledgeBase, items: Sequence[DocUrlItem], allowed: Sequence[str],
+                         login_user: dict) -> list[dict]:
+        """URL 导入的批处理：零成本校验 → 一次建行拿齐 doc_id → 一次提交 → 并发入队（mode=url）。
+
+        与 _save_more 同一节奏，只是少了「读流 + 落存储」那一段：原件不进 OSS，file_path 存 URL
+        本身，字节到 worker 解析时现取。大小要取回才知道，行上先记 0（解析收尾回写真实字节数）。
+        """
+        creator = int(login_user.get("user_id") or 0)
+        media_type = RC.KB_TYPE_MEDIA_TYPE.get(kb.kb_type, RC.MEDIA_TYPE_TEXT)
+        receipts: dict[int, dict] = {}
+        pending: list[dict] = []
+        for idx, one in enumerate(items):
+            raw_url = str(getattr(one, "url", "") or "").strip()
+            name = _url_display_name(raw_url)
+            reason = RagDocService._reject_reason_url(kb, raw_url, allowed)
+            if reason:
+                receipts[idx] = RagDocService._reject(name or "untitled", reason)
+                continue
+            title = (str(getattr(one, "title", "") or "").strip()
+                     or _url_title(raw_url) or "untitled")
+            file_name = (str(getattr(one, "file_name", "") or "").strip()
+                         or name or title)
+            pending.append({
+                "idx": idx, "url": raw_url, "ext": _url_ext(raw_url),
+                "name": file_name, "title": title,
+                "mediaType": RC.doc_media_type_of(_url_ext(raw_url)) or media_type,
+                "mode": RC.DOC_MODE_URL,
+            })
+        if not pending:
+            return [receipts[i] for i in range(len(items))]
+        try:
+            async with mysql_client.get_session() as session:
+                for p in pending:
+                    doc = Document(
+                        kb_id=int(kb.kb_id), doc_name=p["title"][:TITLE_MAX],
+                        file_name=p["name"][:FILE_NAME_MAX],
+                        file_path=p["url"][:FILE_PATH_MAX],
+                        source_mode=RC.DOC_MODE_URL,
+                        file_ext=p["ext"][:16],
+                        file_size=0,
+                        content_type=None, media_type=p["mediaType"],
+                        status=RC.DOC_STATUS_PENDING, parse_version=int(kb.version or 0),
+                        created_by=creator)
+                    session.add(doc)
+                    p["doc"] = doc
+                await session.flush()  # 一批 INSERT 拿齐自增 doc_id
+                for p in pending:
+                    p["docId"] = int(p["doc"].doc_id)
+                await session.commit()
+        except Exception as e:  # noqa: BLE001  批级兜底：没走完的每条 URL 都给失败回执
+            log.exception(f"URL 导入落库失败 kb={kb.kb_id} 批={len(pending)}")
+            # 只建了行、没落存储，回滚即干净（不存在孤儿对象要清），直接逐条给失败回执
+            for p in pending:
+                receipts[p["idx"]] = RagDocService._reject(p["name"], f"保存失败：{str(e)[:150]}")
+            return [receipts[i] for i in range(len(items))]
+
+        # 入队放在提交之后：worker 拉起任务时文档行必须已可读（URL 模式没有落存储那一步）
+        await asyncio.gather(*(RagDocService._enqueue_one(kb, p) for p in pending))
+        for p in pending:
+            if p.get("queueError"):
+                receipts[p["idx"]] = {"docId": p["docId"], "fileName": p["name"],
+                                      "taskId": None, "status": RC.DOC_STATUS_FAILED,
+                                      "message": p["queueError"]}
+            else:
+                receipts[p["idx"]] = {"docId": p["docId"], "fileName": p["name"],
+                                      "taskId": p.get("taskId"),
+                                      "status": RC.DOC_STATUS_PENDING, "message": None}
+        return [receipts[i] for i in range(len(items))]
+
+    @staticmethod
     async def _save_more(kb: KnowledgeBase, files: Sequence[Any], allowed: Sequence[str],
                          login_user: dict) -> list[dict]:
         """批量上传：校验 → 一次建行拿齐 doc_id → 并发落存储 → 一次提交回写路径 → 并发入队。
@@ -584,6 +685,31 @@ class RagDocService:
         return None
 
     @staticmethod
+    def _reject_reason_url(kb: KnowledgeBase, url: str, allowed: Sequence[str]) -> Optional[str]:
+        """建行前的零成本校验（不 GET 文件）：不是 http(s) / 没扩展名 / 格式不合库型。
+
+        URL 长度已由入参 schema 卡到 500；单文件大小只在 worker GET 回来时按 MAX_FILE_SIZE 兜，
+        建行时拿不到 Content-Length 不据此拒收（拒了也不准，很多直链不给长度头）。
+        """
+        if not url:
+            return "URL 为空"
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return "URL 非法，无法解析"
+        if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+            return "只接受 http/https 的可访问 URL"
+        ext = _url_ext(url)
+        if not ext:
+            return "URL 路径没有文件扩展名，无法判定解析链路"
+        if ext not in allowed:
+            shown = ("/".join(allowed) if len(allowed) <= 10
+                     else f"{'/'.join(allowed[:10])} 等 {len(allowed)} 种")
+            return (f"{RC.KB_TYPE_LABELS.get(kb.kb_type, kb.kb_type)}只接受 "
+                    f"{shown}（当前 .{ext}）")
+        return None
+
+    @staticmethod
     async def _store_one(kb: KnowledgeBase, p: dict) -> None:
         """读流 + 落存储。失败只记在 p 上，不外抛牵连同批。"""
         t_store = time.perf_counter()
@@ -632,7 +758,8 @@ class RagDocService:
         try:
             t_queue = time.perf_counter()
             p["taskId"] = await RagTaskService.enqueue_document(
-                int(p["docId"]), kb.kb_type)
+                int(p["docId"]), kb.kb_type,
+                mode=str(p.get("mode") or RC.DOC_MODE_FILE))
             p["queueMs"] = int((time.perf_counter() - t_queue) * 1000)
         except Exception as e:  # noqa: BLE001
             # 文件已在存储里、行也建好了，只是没排上队：标失败让用户在列表里点重试
@@ -684,7 +811,8 @@ class RagDocService:
                 doc = await RagDocService.require(login_user, doc_id, ACTION_REPARSE)
                 kb = await RagDocService._kb_of(doc.kb_id)
                 task_id = await RagTaskService.enqueue_document(
-                    doc_id, kb.kb_type, retry=True, sidecar=sidecar)
+                    doc_id, kb.kb_type, retry=True, sidecar=sidecar,
+                    mode=str(getattr(doc, "source_mode", "") or RC.DOC_MODE_FILE))
                 items.append({"docId": doc_id, "fileName": doc.doc_name, "taskId": task_id,
                               "status": RC.DOC_STATUS_PENDING, "message": None})
             except Exception as e:  # noqa: BLE001  一篇重跑不动其它篇
@@ -1013,6 +1141,38 @@ class RagDocService:
             RC.ES_FIELD_CREATE_TIME: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             RC.ES_FIELD_SOURCE: to_json(row.extra or {}),
         }
+
+
+def _url_stem(url: str) -> tuple[str, str]:
+    """URL 路径末段（剥掉 ?query/#fragment、percent-解码）→ (去扩展名的名字, 含扩展名完整名)。
+
+    签名直链的名字常藏在 query 里而非 path 末段，取不到时两个都为空串，调用方自给的 title 兜。
+    """
+    try:
+        path = unquote(urlsplit(url).path or "")
+    except ValueError:
+        return "", ""
+    base = os.path.basename(path).strip()
+    root, _ext = os.path.splitext(base)
+    return (root or "").strip(), base
+
+
+def _url_ext(url: str) -> str:
+    """URL 路径末段的小写扩展名（不含点）；取不到回空串。"""
+    base = _url_stem(url)[1]
+    _root, ext = os.path.splitext(base)
+    return ext.lstrip(".").lower()
+
+
+def _url_display_name(url: str) -> str:
+    """展示用原始文件名（URL 路径末段带扩展名）。"""
+    return _url_stem(url)[1]
+
+
+def _url_title(url: str) -> str:
+    """缺省标题：URL 去掉扩展名的名字部分。"""
+    return _url_stem(url)[0]
+
 
 async def _sign(name: str) -> Optional[str]:
     """对象名 → 匿名可访问地址；拿不到就返回 None（页面显示占位，不整体报错）。

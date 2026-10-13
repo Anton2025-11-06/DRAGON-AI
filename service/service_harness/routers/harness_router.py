@@ -36,7 +36,7 @@ from service.service_harness.services.harness_pubsub import stream_turn_frames
 from service.service_harness.services.options_service import (
     OPTIONS_KINDS, HarnessOptionsService,
 )
-from service.service_harness.services import sandbox_file_service as sfs
+from service.service_harness.services import sandbox_file_service 
 from service.service_harness.services.session_service import HarnessSessionService
 
 # arq 任务函数（worker_settings_harness.functions 里注册同一个模块路径）
@@ -65,7 +65,7 @@ async def page_sessions(request: Request, current: int = Query(1, ge=1),
     return ApiResponse.success(data=data)
 
 
-@router.get("/{session_id}", summary="会话详情（含挂载快照）")
+@router.get("/{session_id}", summary="会话详情")
 async def get_session(request: Request, session_id: int):
     login_user = await get_login_user(request)
     data = await HarnessSessionService.detail(login_user, session_id)
@@ -83,15 +83,12 @@ async def get_messages(request: Request, session_id: int):
     return ApiResponse.success(data=data)
 
 
-@router.patch("/{session_id}", summary="编辑会话（标题/挂载/模型/归档）")
+@router.patch("/{session_id}", summary="编辑会话（标题/归档）")
 async def update_session(request: Request, session_id: int, body: SessionUpdateReq):
     login_user = await get_login_user(request)
-    # 只把请求体里真出现过的字段交下去，区分「没传」与「传 null」（后者=清空挂载）
+    # 只把请求体里真出现过的字段交下去，区分「没传」与「传 null」
     changes = {key: value for key, value in body.model_dump().items()
                if key in body.model_fields_set}
-    if "mounts" in changes:
-        # MountsReq.model_dump 出来就是四键齐全的 dict，直接落挂载快照
-        changes["mounts"] = changes["mounts"] or {}
     ok = await HarnessSessionService.update(login_user, session_id, changes)
     if not ok:
         return ApiResponse.error(400, "会话不存在")
@@ -123,7 +120,7 @@ async def send_chat(request: Request, body: ChatReq):
     login_user = await get_login_user(request)
     try:
         turn = await HarnessSessionService.create_turn(
-            login_user, body.sessionId, body.message, body.mounts)
+            login_user, body.sessionId, body.message, body.modelId, body.mounts)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 
@@ -223,9 +220,9 @@ async def harness_sandbox_files(request: Request, path: str = ""):
     """
     login_user = await get_login_user(request)
     try:
-        data = await sfs.list_dir(login_user, path)
+        data = await sandbox_file_service.list_dir(login_user, path)
         return ApiResponse.success(data=data)
-    except sfs.HarnessSandboxError as e:
+    except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
 
 
@@ -234,9 +231,9 @@ async def harness_sandbox_file(request: Request, path: str = ""):
     """文本截断预览；二进制只回标记（内容走下载口）。"""
     login_user = await get_login_user(request)
     try:
-        data = await sfs.read_text_file(login_user, path)
+        data = await sandbox_file_service.read_text_file(login_user, path)
         return ApiResponse.success(data=data)
-    except sfs.HarnessSandboxError as e:
+    except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
 
 
@@ -247,9 +244,9 @@ async def harness_sandbox_upload(request: Request, path: str = Form(""),
     login_user = await get_login_user(request)
     content = await file.read()
     try:
-        data = await sfs.save_file(login_user, path, file.filename or "", content)
+        data = await sandbox_file_service.save_file(login_user, path, file.filename or "", content)
         return ApiResponse.success(data=data, message="上传成功")
-    except sfs.HarnessSandboxError as e:
+    except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
 
 
@@ -259,8 +256,8 @@ async def harness_sandbox_download(request: Request, path: str = ""):
 
     login_user = await get_login_user(request)
     try:
-        data, name, is_dir = await sfs.download(login_user, path)
-    except sfs.HarnessSandboxError as e:
+        data, name, is_dir = await sandbox_file_service.download(login_user, path)
+    except sandbox_file_service.HarnessSandboxError as e:
         return ApiResponse.error(400, str(e))
     quoted = urllib.parse.quote(name)
     return Response(
@@ -270,13 +267,5 @@ async def harness_sandbox_download(request: Request, path: str = ""):
     )
 
 
-@sandbox_router.delete("", summary="重置我的沙箱（清空工作区文件）")
-async def harness_workspace_reset(request: Request):
-    """WorkspaceBase.reset：文件全清、会话与消息不动，下一轮对话在同一
-    workspace_id 上继续（用户级沙箱与单会话解耦，删除会话不触发重置）。"""
-    login_user = await get_login_user(request)
-    try:
-        data = await sfs.reset_workspace(login_user)
-        return ApiResponse.success(data=data, message="沙箱已重置")
-    except sfs.HarnessSandboxError as e:
-        return ApiResponse.error(400, str(e))
+# （已移除「重置我的沙箱」口：后端 reset_workspace 从未实现，且改为 manager/会话级
+#  工作区后，用户级清空沙箱文件的语义与「文件跨会话保留」相互矛盾，前端入口一并下线）

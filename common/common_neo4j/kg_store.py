@@ -111,7 +111,8 @@ async def _ensure_chunks(kb_id: int, doc_id: int, chunks: Sequence[dict], *,
 # =====================================================================================
 async def upsert_graph(kb_id: int, doc_id: int, entities: Sequence[dict],
                        relations: Sequence[dict], *, chunks: Optional[Sequence[dict]] = None,
-                       org_id: int = 0, replace: bool = True) -> dict:
+                       org_id: int = 0, replace: bool = True,
+                       allowed_types: Optional[Sequence[str]] = None) -> dict:
     """一篇文档的抽取结果落库：实体 → MENTIONED_IN 切片 → RELATED_TO 关系。
 
     :param entities: `[{"name","type","summary","aliases":[..],"chunk_ids":[es_id,..]}]`
@@ -120,6 +121,8 @@ async def upsert_graph(kb_id: int, doc_id: int, entities: Sequence[dict],
         没给 type 的按 DEFAULT_ENTITY_TYPE 落，与实体侧的缺省值一致才不会裂成两个节点。
     :param chunks: 该批实体引用到的切片（缺省时切片节点靠 chunk_ids 现场 MERGE 出桩节点）
     :param replace: True 时先按文档清理上一轮的图（重跑同一文档不叠加历史抽取结果）
+    :param allowed_types: 知识库自定义的实体类型集合；传入时实体/关系类型按它归一（不再往系统默认
+        的「其他」折），保证自定义类型能原样落库；留空用系统默认 RC.KG_ENTITY_TYPES。
     :return: {"entities","relations","mentions","chunks"} 四个计数（写进度与页面回显）
     """
     kb_id, doc_id = int(kb_id), int(doc_id)
@@ -128,8 +131,8 @@ async def upsert_graph(kb_id: int, doc_id: int, entities: Sequence[dict],
     if chunks:
         await _ensure_chunks(kb_id, doc_id, chunks, org_id=org_id)
 
-    ents = _norm_entities(entities)
-    rels = _norm_relations(relations)
+    ents = _norm_entities(entities, allowed_types)
+    rels = _norm_relations(relations, allowed_types)
     if not ents and not rels:
         return {"entities": 0, "relations": 0, "mentions": 0, "chunks": 0}
     now = _now()
@@ -162,14 +165,18 @@ async def upsert_graph(kb_id: int, doc_id: int, entities: Sequence[dict],
             "chunks": len(chunks or [])}
 
 
-def _norm_entities(entities: Sequence[dict]) -> list[dict]:
-    """实体规范化：名字去空去重，类型落在受控集合内（模型自由发挥出十种类型会让图例失效）。"""
+def _norm_entities(entities: Sequence[dict],
+                   allowed: Optional[Sequence[str]] = None) -> list[dict]:
+    """实体规范化：名字去空去重，类型落在受控集合内（模型自由发挥出十种类型会让图例失效）。
+
+    allowed 传知识库自定义类型集时，受控集就是它（自定义类型不会被折回系统默认的「其他」）。
+    """
     out: dict[tuple[str, str], dict] = {}
     for item in entities or []:
         name = str(item.get("name") or "").strip()
         if not name:
             continue
-        etype = entity_type_of(item.get("type"))
+        etype = entity_type_of(item.get("type"), allowed)
         aliases = [str(a).strip() for a in (item.get("aliases") or []) if str(a).strip()]
         chunk_ids = [str(c).strip() for c in (item.get("chunk_ids") or []) if c]
         key = (name, etype)
@@ -191,7 +198,8 @@ def _norm_entities(entities: Sequence[dict]) -> list[dict]:
     return list(out.values())
 
 
-def _norm_relations(relations: Sequence[dict]) -> list[dict]:
+def _norm_relations(relations: Sequence[dict],
+                    allowed: Optional[Sequence[str]] = None) -> list[dict]:
     """关系规范化：头尾齐全、不自环、类型缺省与实体侧一致。"""
     out: dict[tuple[str, str, str], dict] = {}
     for item in relations or []:
@@ -204,20 +212,29 @@ def _norm_relations(relations: Sequence[dict]) -> list[dict]:
         if key in out:
             continue
         out[key] = {"head": head, "tail": tail, "relation": rel[:RELATION_CHARS],
-                    "head_type": entity_type_of(item.get("head_type")),
-                    "tail_type": entity_type_of(item.get("tail_type"))}
+                    "head_type": entity_type_of(item.get("head_type"), allowed),
+                    "tail_type": entity_type_of(item.get("tail_type"), allowed)}
     return list(out.values())
 
 
-def entity_type_of(value: Any) -> str:
+def entity_type_of(value: Any, allowed: Optional[Sequence[str]] = None) -> str:
     """实体类型落受控集合：不在表内的一律归“其他”。
 
     MERGE 键里带了 type，模型今天发挥出一个「公司名称」明天写出「组织」，
     同一个实体就会在图上裂成两个节点（而且再也合不回来）。上层组装抽取结果时
     必须用同一个函数，不然实体侧与关系侧的两个缺省值会不一致。
+
+    :param allowed: 知识库自定义类型集；传入时受控集就是它（自定义类型原样保留，
+        不会因不在系统默认 RC.KG_ENTITY_TYPES 里而被折回「其他」）；留空用系统默认。
     """
-    etype = str(value or "").strip() or DEFAULT_ENTITY_TYPE
-    return etype if etype in RC.KG_ENTITY_TYPES else DEFAULT_ENTITY_TYPE
+    base = [str(t).strip() for t in allowed if str(t).strip()] if allowed else RC.KG_ENTITY_TYPES
+    etype = str(value or "").strip()
+    if etype in base:
+        return etype
+    if DEFAULT_ENTITY_TYPE in base:
+        return DEFAULT_ENTITY_TYPE
+    # 自定义集不含「其他」：折到集内首个类型，保证 MERGE 键的 type 不为空
+    return base[0] if base else DEFAULT_ENTITY_TYPE
 
 
 async def _upsert_mentions(kb_id: int, doc_id: int, entities: Sequence[dict], *,

@@ -142,12 +142,14 @@ export default function createCrudOptions(
           title: '描述',
           type: 'textarea',
           form: {
+            rules: [{ required: true, message: '请输入 MCP 描述' }],
             component: {
-              placeholder: '描述这个 MCP 连接是做什么的',
+              placeholder: '必填，描述这个 MCP 连接是做什么的',
               rows: 2,
             },
             col: { span: 24 },
-            helper: '用于说明该 MCP 提供的能力，便于其他用户理解',
+            helper:
+              '作为深度探索智能体的工具描述，用于让模型判断该调用哪个工具，务必写清楚能力边界',
           },
           column: { width: 200, ellipsis: true, show: false },
         },

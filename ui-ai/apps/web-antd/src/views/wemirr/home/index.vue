@@ -13,7 +13,6 @@ import { useAccessStore } from '@vben/stores';
 
 import {
   ArrowLeftOutlined,
-  ClearOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
@@ -54,7 +53,6 @@ export default defineComponent({
   name: 'HernesExplorerPage',
   components: {
     ArrowLeftOutlined,
-    ClearOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
     DeleteOutlined,
@@ -73,13 +71,13 @@ export default defineComponent({
     const sessionId = ref(0);
     const sessionLoading = ref(false);
     const modelOptions = ref<api.HarnessModelOption[]>([]);
-    /** 当前生效的模型授权（未建会话时是草稿值，建会话时随请求落库） */
-    const modelApplyId = ref(0);
+    /** 当前选用的模型 id（未建会话时是草稿值，每次发消息随请求传） */
+    const modelId = ref(0);
+    // 后端只返回本人已授权的模型，可选即能用，直接以 model id 作选项值
     const modelSelectOptions = computed(() =>
       modelOptions.value.map((m) => ({
-        label: m.applied ? m.name : `${m.name}（需授权）`,
-        value: m.applyId,
-        disabled: !m.applied,
+        label: m.name,
+        value: m.id,
       })),
     );
 
@@ -172,9 +170,19 @@ export default defineComponent({
     async function switchSession(s: api.HarnessSession) {
       closeStream();
       sessionId.value = s.id;
-      modelApplyId.value = s.modelApplyId;
-      await Promise.all([loadMessages(s.id), ensurePickerOptions()]);
-      mountedItems.value = mountsToItems(s.mounts);
+      const rows = await loadMessages(s.id);
+      // 先拉齐候选再匹配名称（挂载回显要按 id 找 name）
+      await ensurePickerOptions();
+      // 模型与挂载不绑会话：切会话时按该会话最近一轮回显 composer 选择，无历史则保留当前草稿
+      const last =
+        [...rows].reverse().find((r) => r.role === 'ASSISTANT') ||
+        rows.at(-1);
+      if (last) {
+        if (last.modelId) modelId.value = last.modelId;
+        mountedItems.value = mountsToItems(last.mounts || {});
+      } else {
+        mountedItems.value = [];
+      }
       scrollToBottom();
     }
 
@@ -262,7 +270,7 @@ export default defineComponent({
       };
     }
 
-    async function loadMessages(sid: number) {
+    async function loadMessages(sid: number): Promise<api.HarnessMessage[]> {
       try {
         const rows = (await api.HarnessSessionMessages(sid)) || [];
         const list: ChatMsg[] = [];
@@ -292,8 +300,10 @@ export default defineComponent({
           }
         }
         messages.value = list;
+        return rows;
       } catch {
         message.error('历史消息加载失败');
+        return [];
       }
     }
 
@@ -327,19 +337,9 @@ export default defineComponent({
       }
     }
 
-    /** 切模型：有会话即落库（下轮生效），草稿态只存本地 */
-    async function changeModel(value: number) {
-      if (sessionId.value && value) {
-        try {
-          await api.HarnessSessionUpdate(sessionId.value, {
-            modelApplyId: value,
-          });
-        } catch {
-          message.error('模型切换失败');
-          return;
-        }
-      }
-      modelApplyId.value = value;
+    /** 切模型：纯前端 composer 状态，随每次发消息一并传给后端（不绑会话，可随时切换） */
+    function changeModel(value: number) {
+      modelId.value = value;
     }
 
     // ==================== 对话（ARQ 投递 + SSE 订阅） ====================
@@ -351,18 +351,16 @@ export default defineComponent({
         return;
       }
       if (!text || sending.value) return;
-      if (!modelApplyId.value) {
+      if (!modelId.value) {
         message.warning('请先在右上角选择一个已授权的模型');
         return;
       }
 
-      // 首条消息自动建会话：标题取前 24 字
+      // 首条消息自动建会话：只落标题，模型与挂载随每次发消息传
       if (!sessionId.value) {
         try {
           const s = await api.HarnessSessionCreate({
             title: text.slice(0, 24),
-            modelApplyId: modelApplyId.value,
-            mounts: currentMounts(),
           });
           sessionId.value = s.id;
         } catch (error: any) {
@@ -379,6 +377,7 @@ export default defineComponent({
         const res = await api.HarnessChat({
           sessionId: sessionId.value,
           message: text,
+          modelId: modelId.value,
           mounts: currentMounts(),
         });
         void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
@@ -652,17 +651,6 @@ export default defineComponent({
       }
     }
 
-    /** 重置沙箱（清空工作区文件，会话与消息不动） */
-    async function resetSandbox() {
-      try {
-        await api.HarnessWorkspaceReset();
-        message.success('沙箱已重置');
-        await loadSandboxFiles('');
-      } catch {
-        message.error('沙箱重置失败');
-      }
-    }
-
     function pathBreadcrumbClick(part: string, index: number) {
       const parts = currentPath.value.split('/').filter(Boolean);
       loadSandboxFiles(parts.slice(0, index + 1).join('/'));
@@ -670,7 +658,6 @@ export default defineComponent({
     }
 
     return {
-      resetSandbox,
       accessStore,
       messages,
       inputValue,
@@ -684,7 +671,7 @@ export default defineComponent({
       sessions,
       sessionId,
       sessionLoading,
-      modelApplyId,
+      modelId,
       modelSelectOptions,
       switchSession,
       newSession,
@@ -766,7 +753,7 @@ export default defineComponent({
           :options="modelSelectOptions"
           placeholder="选择模型"
           size="small"
-          :value="modelApplyId || undefined"
+          :value="modelId || undefined"
           @change="changeModel"
         />
         <a-tooltip v-if="sessionId" title="删除当前会话">
@@ -776,8 +763,9 @@ export default defineComponent({
         </a-tooltip>
       </header>
 
-      <!-- 已挂载能力 -->
+      <!-- 已挂载能力（始终可见的清单条；模型/工具每轮可切换，这份 composer 状态随每次发消息传给后端） -->
       <div class="hermes-mounted">
+        <span class="hermes-mounted-label">已挂载能力</span>
         <template v-if="mountedItems.length > 0">
           <a-tag
             v-for="item in mountedItems"
@@ -796,7 +784,7 @@ export default defineComponent({
           </a-tag>
         </template>
         <span v-else class="hermes-mounted-empty">
-          点击下方 + 按钮挂载技能 / 工具 / 知识库
+          尚未挂载，点下方按钮添加 技能 / MCP / 工具 / 知识库
         </span>
       </div>
 
@@ -861,36 +849,37 @@ export default defineComponent({
       <!-- 输入区 -->
       <footer class="hermes-input">
         <div class="hermes-input-tools">
-          <a-button
-            size="small"
-            ghost
-            type="primary"
+          <button
+            class="hermes-add-btn is-skill"
+            type="button"
             @click="openPicker('skill')"
           >
-            <template #icon><PlusOutlined /></template>
-            技能
-          </a-button>
-          <a-button
-            size="small"
-            ghost
-            type="success"
+            <PlusOutlined /> 技能
+          </button>
+          <button
+            class="hermes-add-btn is-mcp"
+            type="button"
             @click="openPicker('mcp')"
           >
-            <template #icon><PlusOutlined /></template>
-            MCP
-          </a-button>
-          <a-button
-            size="small"
-            ghost
+            <PlusOutlined /> MCP
+          </button>
+          <button
+            class="hermes-add-btn is-tool"
+            type="button"
             @click="openPicker('tool')"
           >
-            <template #icon><PlusOutlined /></template>
-            工具
-          </a-button>
-          <a-button size="small" ghost type="warning" @click="openPicker('kb')">
-            <template #icon><PlusOutlined /></template>
-            知识库
-          </a-button>
+            <PlusOutlined /> 工具
+          </button>
+          <button
+            class="hermes-add-btn is-kb"
+            type="button"
+            @click="openPicker('kb')"
+          >
+            <PlusOutlined /> 知识库
+          </button>
+          <span v-if="mountedItems.length > 0" class="hermes-add-count">
+            已挂载 {{ mountedItems.length }} 项
+          </span>
         </div>
         <div class="hermes-input-row">
           <a-textarea
@@ -936,15 +925,6 @@ export default defineComponent({
               上传
             </a-button>
           </a-upload>
-          <a-popconfirm
-            title="清空沙箱里的全部文件？会话与消息不受影响"
-            @confirm="resetSandbox"
-          >
-            <a-button size="small" danger>
-              <template #icon><ClearOutlined /></template>
-              重置
-            </a-button>
-          </a-popconfirm>
         </a-space>
       </header>
 
@@ -1201,9 +1181,21 @@ export default defineComponent({
   .hermes-mounted {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
-    padding: 8px 16px 0;
+    margin: 10px 16px 0;
+    padding: 8px 12px;
     min-height: 34px;
+    border: 1px dashed var(--border-color-2, #e5e7eb);
+    border-radius: 10px;
+    background: var(--hover-bg-color, #f8fafc);
+
+    .hermes-mounted-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-color-2, #4e5969);
+      margin-right: 2px;
+    }
 
     .hermes-mounted-empty {
       font-size: 12px;
@@ -1315,8 +1307,71 @@ export default defineComponent({
 
     .hermes-input-tools {
       display: flex;
+      flex-wrap: wrap;
+      align-items: center;
       gap: 8px;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
+
+      .hermes-add-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 28px;
+        padding: 0 12px;
+        font-size: 12px;
+        line-height: 1;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition:
+          transform 0.15s ease,
+          box-shadow 0.15s ease,
+          filter 0.15s ease;
+
+        .anticon {
+          font-size: 12px;
+        }
+
+        &:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+          filter: brightness(1.03);
+        }
+
+        &:active {
+          transform: translateY(0);
+        }
+
+        &.is-skill {
+          color: #1677ff;
+          background: rgba(22, 119, 255, 0.1);
+          border-color: rgba(22, 119, 255, 0.32);
+        }
+
+        &.is-mcp {
+          color: #fa8c16;
+          background: rgba(250, 140, 22, 0.1);
+          border-color: rgba(250, 140, 22, 0.32);
+        }
+
+        &.is-tool {
+          color: #52c41a;
+          background: rgba(82, 196, 26, 0.1);
+          border-color: rgba(82, 196, 26, 0.32);
+        }
+
+        &.is-kb {
+          color: #722ed1;
+          background: rgba(114, 46, 209, 0.1);
+          border-color: rgba(114, 46, 209, 0.32);
+        }
+      }
+
+      .hermes-add-count {
+        margin-left: auto;
+        font-size: 12px;
+        color: var(--text-color-3, #8a9099);
+      }
     }
 
     .hermes-input-row {

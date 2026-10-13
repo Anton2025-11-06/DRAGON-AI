@@ -158,21 +158,27 @@ class RagTaskService:
 
     @staticmethod
     async def enqueue_document(doc_id: int, kb_type: str, *, retry: bool = False,
-                               sidecar: str = RC.RAG_SIDECAR_AUTO, session=None) -> str:
+                               sidecar: str = RC.RAG_SIDECAR_AUTO,
+                               mode: str = RC.DOC_MODE_FILE, session=None) -> str:
         """投递一篇文档的解析任务，并把文档摆回排队中（写 task_id、清上一轮错误）。
 
         ``retry=True`` 时换新 job_id：失败重试是最常见的动作，沿用旧 id 会被 arq 的
         结果保留期判成重复投递，页面表现就是「点了重试但状态一直不动」。
         ``sidecar`` 决定要不要复用上一轮的解析产物（取值见 ``RC.RAG_SIDECAR_MODES``）：
         只改分块配置用 reuse、改了解析配置用 reparse，其余一律 auto。
+        ``mode`` 是原件来源（``RC.DOC_MODE_FILE``/``DOC_MODE_URL``）：随 options 带到 worker，
+        worker 据此决定按对象名下载还是直接 GET URL。认错值一律回 file（与 sidecar 同口径）。
         """
         if sidecar not in RC.RAG_SIDECAR_MODES:
             raise ValueError(f"未知的解析产物复用策略：{sidecar}"
                              f"（合法值 {RC.RAG_SIDECAR_MODES}）")
+        mode = str(mode or RC.DOC_MODE_FILE).strip().lower()
+        if mode not in RC.DOC_MODES_ALL:
+            mode = RC.DOC_MODE_FILE
         task = RagTaskService.task_of(kb_type)
         # 第二个位置参数是任务选项：arq 把 args 直递任务函数，多一个默认 None 的形参就能把
-        # 「要不要重解析」这类意图带到 worker，不必再开一条 Redis 旁路传参
-        job_id = await RagTaskService.enqueue(task, [doc_id, {"sidecar": sidecar}],
+        # 「要不要重解析」「原件从哪取」这类意图带到 worker，不必再开一条 Redis 旁路传参
+        job_id = await RagTaskService.enqueue(task, [doc_id, {"sidecar": sidecar, "mode": mode}],
                                               doc_id=doc_id, unique=bool(retry))
         await RagTaskService.transition(
             doc_id, RC.DOC_STATUS_PENDING, task_id=job_id, error_msg="",

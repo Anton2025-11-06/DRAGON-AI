@@ -31,7 +31,8 @@ from common.common_file_parser.entry import config_summary
 from common.common_permission.permission import get_login_user, has_permission
 from common.common_storage import MAX_FILE_SIZE
 from service.service_rag.schemas.rag_schema import (
-    BuildVectorReq, DocPageReq, GraphBuildReq, IdsReq, KbPageReq, KbSaveReq, RuntimeConfigResp,
+    BuildVectorReq, DocPageReq, DocUrlSaveReq, GraphBuildReq, IdsReq, KbPageReq, KbSaveReq,
+    RuntimeConfigResp,
 )
 from service.service_rag.services import rag_settings as settings
 from service.service_rag.services.doc_service import RagDocService
@@ -158,6 +159,17 @@ async def upload_documents(request: Request, kb_id: int,
     接口只做「收文件 + 建行 + 入队」，解析/分块/向量化由 rag 流水线的 worker 跑。
     """
     result = await RagDocService.upload(await get_login_user(request), kb_id, files)
+    return ApiResponse.success(data=result, message=_upload_message(result))
+
+
+@router.post("/{kb_id}/documents/upload-urls", summary="按 URL 导入文档（多链接批量，异步解析）")
+async def upload_documents_by_url(request: Request, kb_id: int, body: DocUrlSaveReq):
+    """只接受文件 URL 集合、不接受文件流：后端校验 URL → 建行（不落存储）→ 入队（mode=url）。
+
+    与上传文件同一个回执形状（逐项、不整批回滚）；区别只在原件不进 OSS，file_path 直接存 URL，
+    解析流水线据 mode 直接 GET URL 取字节再解析，列表「查看原文件」对 url 模式原样开该 URL。
+    """
+    result = await RagDocService.upload_by_urls(await get_login_user(request), kb_id, body.urls)
     return ApiResponse.success(data=result, message=_upload_message(result))
 
 

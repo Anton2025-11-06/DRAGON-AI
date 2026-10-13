@@ -10,7 +10,10 @@ class McpServerSaveRequest(BaseModel):
     command: Optional[str] = Field(None, max_length=255, description="STDIO 启动命令")
     args: Optional[str] = Field(None, max_length=1000, description="STDIO 参数 JSON 数组")
     env: Optional[str] = Field(None, max_length=1000, description="环境变量 JSON 对象")
-    description: Optional[str] = Field(None, max_length=500, description="MCP 描述（这个连接是做什么的）")
+    # 描述必填：harness agent 挂载 MCP 工具时把它拼进工具 description，
+    # 缺失会让智能体不知道这条连接能做什么，无法做工具选择。
+    description: str = Field(..., min_length=1, max_length=500,
+                             description="MCP 描述（这个连接是做什么的，用于智能体工具选择，必填）")
     status: bool = True
 
 

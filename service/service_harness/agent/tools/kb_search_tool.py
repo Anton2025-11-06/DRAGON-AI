@@ -60,21 +60,30 @@ def _pick(row: dict, *keys: str) -> Any:
 
 
 def make_kb_search_tool(login_user: dict, kb_ids: list[int],
-                        kb_names: dict[int, str]) -> ToolBase:
-    """按本轮挂载白名单构造 kb_search 工具实例（闭包捕获鉴权上下文）。"""
+                        kb_names: dict[int, str],
+                        kb_descriptions: list[str] | None = None) -> ToolBase:
+    """按本轮挂载白名单构造 kb_search 工具实例（闭包捕获鉴权上下文）。
+
+    :param kb_descriptions: 各库的描述列表，拼入工具 description 让 agent 知道每个库的内容范围。
+    """
     allowed = [int(i) for i in kb_ids or []]
     names = {int(k): v for k, v in (kb_names or {}).items()}
+
+    # 工具描述：基础段 + 各库描述（让模型知道检索范围，不会放着工具不用或乱用）
+    base_desc = (
+        "检索当前会话挂载的知识库，返回相关切片的内容、所属文档与相似度。"
+        "用于回答涉及私有资料/内部文档/已上传文件的问题——这些内容不在公开"
+        "网页上，先检索再回答，不要凭记忆编造。检索不到时明确说没找到。"
+    )
+    if kb_descriptions:
+        base_desc += "\n挂载知识库：" + "；".join(kb_descriptions)
 
     class KbSearch(ToolBase):
         """检索挂载的知识库（平台 RAG），返回切片正文与出处。"""
 
         name: str = "kb_search"
 
-        description: str = (
-            "检索当前会话挂载的知识库，返回相关切片的内容、所属文档与相似度。"
-            "用于回答涉及私有资料/内部文档/已上传文件的问题——这些内容不在公开"
-            "网页上，先检索再回答，不要凭记忆编造。检索不到时明确说没找到。"
-        )
+        description: str = base_desc
 
         input_schema: dict[str, Any] = KbSearchParams.model_json_schema()
 

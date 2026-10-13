@@ -231,6 +231,10 @@ async function handleSave() {
     message.warning('请输入函数代码');
     return;
   }
+  if (!form.description?.trim()) {
+    message.warning('请输入工具描述（智能体据此选择该工具）');
+    return;
+  }
   if (!validateRows()) return;
   const payload: api.ToolSaveReq = {
     description: form.description || undefined,
@@ -280,10 +284,10 @@ function handleClose() {
             </a-form-item>
           </a-col>
           <a-col :span="14">
-            <a-form-item label="描述">
+            <a-form-item label="描述" required>
               <a-input
                 v-model:value="form.description"
-                placeholder="工具用途说明（将展示给工作流编排使用）"
+                placeholder="必填，工具用途说明（将作为智能体工具描述供模型选择）"
               />
             </a-form-item>
           </a-col>

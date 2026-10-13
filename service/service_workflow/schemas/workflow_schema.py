@@ -27,7 +27,10 @@ class VariableDefinition(BaseModel):
 
 class WorkflowSaveReq(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="工作流名称")
-    description: Optional[str] = Field(None, max_length=500)
+    # 描述必填：harness agent 挂载工作流时用它做工具选择依据，空描述会让
+    # 智能体无法判断这条工作流能干什么。
+    description: str = Field(..., min_length=1, max_length=500,
+                             description="工作流描述（用于智能体工具选择，必填）")
     graph: Optional[dict] = None
     inputVariables: Optional[list[VariableDefinition]] = None
     outputVariables: Optional[list[VariableDefinition]] = None
@@ -68,7 +71,9 @@ class SubmitResult(BaseModel):
 
 class TemplateSaveReq(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
-    description: Optional[str] = Field(None, max_length=500)
+    # 模板描述必填：模板市场展示 + harness 工具选择都要靠它，缺失会退化到只看见 name。
+    description: str = Field(..., min_length=1, max_length=500,
+                             description="模板描述（用于智能体工具选择/展示，必填）")
     category: str = Field("CUSTOM", description="CONVERSATION/GENERATION/RAG/EXTRACTION/SUMMARY/CUSTOM")
     icon: Optional[str] = Field(None, max_length=64)
     graph: Optional[dict] = None

@@ -234,6 +234,9 @@ class KnowledgeBaseService:
         retrieve_config = settings.normalize_retrieve_config(
             req.retrieve_config, top_k=req.top_k, score_threshold=req.score_threshold)
         graph_enabled = settings.normalize_graph_enabled(kb_type, req.enable_graph)
+        # 图谱自定义实体范围：只在 doc 型且开了图谱时归一落库，其余一律 None（走系统默认）；
+        # 不参与 version 判定——实体范围只影响图谱抽取，改了不该提示存量文档重解析（切片与它无关）。
+        graph_config = settings.normalize_graph_config(kb_type, graph_enabled, req.graph_config)
 
         async with mysql_client.get_session() as session:
             if (await session.execute(select(KnowledgeBase.kb_id).where(
@@ -249,6 +252,7 @@ class KnowledgeBaseService:
                 extract_model_id=req.extract_model_id or 0, image_model_id=req.image_model_id or 0,
                 parser_engine=engine, parse_config=parse_config,
                 chunk_config=chunk_config, retrieve_config=retrieve_config,
+                graph_config=graph_config,
                 graph_enabled=graph_enabled, status=1,
                 # 归属部门与 org_id 同值但语义不同：前者只作展示统计，后者是存储侧的隔离维度
                 owner_dept_id=dept_id,
@@ -325,6 +329,11 @@ class KnowledgeBaseService:
             retrieve_config = settings.normalize_retrieve_config(
                 req.retrieve_config if req.retrieve_config is not None else kb.retrieve_config,
                 top_k=req.top_k, score_threshold=req.score_threshold)
+            # 图谱自定义实体范围：没重传实体配置时沿用库里的；只在开图谱时归一，
+            # 关掉图谱（或非 doc 型）时 normalize 会返回 None，把旧的自定义类型一并抹掉回默认。
+            graph_config = settings.normalize_graph_config(
+                kb.kb_type, graph_enabled,
+                req.graph_config if req.graph_config is not None else kb.graph_config)
 
             # 只有会让已有切片作废的改动才推版本号（检索配置与名称不参与解析）
             reindex = (engine != kb.parser_engine
@@ -339,6 +348,7 @@ class KnowledgeBaseService:
                 "image_model_id": image_model_id or 0,
                 "parser_engine": engine, "parse_config": parse_config,
                 "chunk_config": chunk_config, "retrieve_config": retrieve_config,
+                "graph_config": graph_config,
                 "graph_enabled": graph_enabled,
                 "kb_metadata": req.metadata if req.metadata is not None else kb.kb_metadata,
                 "update_by": int(login_user.get("user_id") or 0),
@@ -421,14 +431,29 @@ class KnowledgeBaseService:
 
         这两个数是「派生值」，不做增量累加：增量要么漏（异常分支没走到）要么重
         （任务重试过），一旦对不上，页面显示的分块总数就再也无法自证清白。
+
+        口径修正（BUG 修复）：
+        - chunk_count 只统计「存活且解析成功」文档的切片（JOIN Document 并卡
+          is_deleted=0 + status=PROCESSED）：
+          ① 删除文档后切片行尚未被 purge 物理清时，靠 is_deleted=0 归零；
+          ② 流水线中途失败的文档，_replace_chunks 已把切片行写进 MySQL 但向量化
+             没跑成（status 停在 FAILED），这类残留不该计入库切片数——只有真正
+             走完、进了检索索引的文档（PROCESSED）的切片才算数。
         """
         async with maybe_session(session) as s:
             doc_count = (await s.execute(
                 select(func.count()).select_from(Document).where(
                     Document.kb_id == kb_id, Document.is_deleted == 0))).scalar() or 0
+            # 切片数只算「存活 + 解析成功」文档的切片：
+            # - is_deleted=0：已删文档的切片行等 purge 物理删除，删除前不计入总数；
+            # - status=PROCESSED：解析中途失败的文档，其 _replace_chunks 落下的残留
+            #   切片行（向量没写进 ES）不该让库切片数凭空增加。
             chunk_count = (await s.execute(
-                select(func.count()).select_from(DocumentChunk).where(
-                    DocumentChunk.kb_id == kb_id))).scalar() or 0
+                select(func.count()).select_from(DocumentChunk)
+                .join(Document, Document.doc_id == DocumentChunk.doc_id)
+                .where(DocumentChunk.kb_id == kb_id,
+                       Document.is_deleted == 0,
+                       Document.status == RC.DOC_STATUS_PROCESSED))).scalar() or 0
             await s.execute(update(KnowledgeBase).where(
                 KnowledgeBase.kb_id == kb_id).values(
                     doc_count=doc_count, chunk_count=chunk_count))
@@ -456,6 +481,7 @@ class KnowledgeBaseService:
             enable_graph=bool(row.graph_enabled), parser_engine=engine,
             parse_config=parse_config, chunk_config=chunk_config,
             retrieve_config=retrieve_config,
+            graph_config=(row.graph_config or {}),
             version=row.version, doc_count=row.doc_count, chunk_count=row.chunk_count,
             metadata=row.kb_metadata, created_by=row.created_by,
             owner_dept_id=row.owner_dept_id,

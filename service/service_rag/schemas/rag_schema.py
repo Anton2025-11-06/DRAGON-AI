@@ -106,7 +106,10 @@ class KbSaveReq(CamelModel):
 
     kb_type: str = Field("doc", description="知识库类型，创建后锁定")
     name: str = Field(..., min_length=1, max_length=128, description="知识库名称")
-    description: Optional[str] = Field(None, max_length=500)
+    # 描述必填：作为 harness agent 挂载知识库工具时的 description 依据，
+    # 空描述会导致智能体不知道该库能回答什么问题，无法做工具选择。
+    description: str = Field(..., min_length=1, max_length=500,
+                             description="知识库描述（用于智能体工具选择，必填）")
 
     embed_model_id: int = Field(..., ge=1, description="向量模型 id（创建后锁定）")
     rerank_model_id: Optional[int] = Field(0, ge=0, description="重排模型 id，0=不启用（配置面板已撤，仅接口透传）")
@@ -129,6 +132,11 @@ class KbSaveReq(CamelModel):
     score_threshold: Optional[float] = Field(None, ge=0, le=1, description="相似度阈值")
 
     enable_graph: Optional[bool] = Field(None, description="知识图谱开关（仅 doc 型有意义，配置面板归到解析配置页）")
+    # 知识图谱自定义实体范围（仅 doc 型且 enable_graph 时有意义）：
+    #   {"customEnabled": true, "entityTypes": [{"name": 必填, "description": 选填}, ...]}。
+    #   不传/customEnabled=false → 后端按系统默认 KG_ENTITY_TYPES 抽取；customEnabled=true 且给了
+    #   合法类型名 → 抽取只按这些类型，越界实体直接丢弃（过滤兜底）。
+    graph_config: Optional[dict] = Field(None, description="图谱自定义实体范围（实体类型名+描述）")
     metadata: Optional[dict] = Field(None, description="扩展元数据，前端透传")
 
 
@@ -159,6 +167,8 @@ class KnowledgeBaseResp(CamelModel):
     chunk_overlap: int = 0
     chunk_strategy: Optional[str] = None
     enable_graph: bool = False
+    # 图谱自定义实体范围（归一后的完整形态；未自定义时为 {custom_enabled:0,...} 或空）
+    graph_config: dict = Field(default_factory=dict)
     parser_engine: Optional[str] = None
     parse_config: dict = Field(default_factory=dict)
     chunk_config: dict = Field(default_factory=dict)
@@ -215,6 +225,29 @@ class BuildVectorReq(DocActionReq):
     chunk_overlap: Optional[int] = Field(None, ge=0, le=20000)
 
 
+class DocUrlItem(CamelModel):
+    """单条文件 URL（URL 导入接口的一行）。
+
+    url 必填、必须 http(s) 且带扩展名（与文件上传同口径：没扩展名判不出解析链路）；
+    title / file_name 选填，缺省都从 URL 路径末段推导。
+    长度上限对齐 tb_document.file_path 的 VARCHAR(500)，落库前不会超宽。
+    """
+
+    url: str = Field(..., min_length=1, max_length=500, description="文件的可访问 URL（http/https）")
+    title: Optional[str] = Field(None, max_length=255, description="文档标题，缺省取 URL 文件名")
+    file_name: Optional[str] = Field(None, max_length=255, description="展示用原始文件名，缺省取 URL 文件名")
+
+
+class DocUrlSaveReq(CamelModel):
+    """知识库新增知识（URL 模式）：不接受文件流，只接受文件 URL 集合。
+
+    与文件上传同一个回执形状（逐项、不整批回滚）；后端只「校验 URL + 建行（file_path=URL、
+    source_mode=url，不落存储）+ 入队（mode=url）」，解析时 worker 直接 GET URL 取字节。
+    """
+
+    urls: list[DocUrlItem] = Field(default_factory=list, description="文件 URL 集合")
+
+
 class DocumentResp(CamelModel):
     """文档行（三类知识库共用；预览形态由 media_type 决定，SPEC §11.1-4）。"""
 
@@ -224,6 +257,9 @@ class DocumentResp(CamelModel):
     file_name: Optional[str] = None
     file_ext: Optional[str] = None
     file_size: int = 0
+    # 原件来源模式 file/url（rag_constant.DOC_MODE_*）：url 模式前端「查看原文件」直接开
+    # 后端透出的原始 URL（不签名），不必知道对象名。
+    source_mode: str = Field("file", description="原件来源 file=上传落存储 / url=外部地址直接引用")
     content_type: Optional[str] = None
     media_type: Optional[str] = None
     parser_engine: Optional[str] = None

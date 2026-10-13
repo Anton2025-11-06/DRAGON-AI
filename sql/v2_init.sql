@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS `tb_knowledge_base` (
     `parse_config` JSON COMMENT '解析与预处理配置 {remove_toc,remove_header_footer,image_understand} + 引擎专有参数，默认值见 rag_constant.PARSE_OPTION_DEFAULTS',
     `chunk_config` JSON COMMENT '分块配置 {strategy,chunk_size,chunk_overlap,delimiter,regex_pattern,max_chars,keep_table_header,context_augment,title_path}，默认值见 rag_constant.CHUNK_CONFIG_DEFAULTS',
     `retrieve_config` JSON COMMENT '检索配置 {top_k,score_threshold,vector_similarity_weight,rerank,keyword_boost}，默认值见 rag_constant.RETRIEVE_DEFAULTS',
+    `graph_config` JSON COMMENT '知识图谱自定义实体范围 {customEnabled,entityTypes:[{name,description}]}；NULL/未开启=按 rag_constant.KG_ENTITY_TYPES 系统默认抽取（仅 doc 型且 graph_enabled=1 时生效）',
     `graph_enabled` TINYINT NOT NULL DEFAULT 0 COMMENT '知识图谱库级开关：仅 doc 型可开；开了会在解析完成后自动投递图谱抽取任务，也可在文档列表勾选文档手动点「构建图谱」重跑',
     `doc_count` INT NOT NULL DEFAULT 0 COMMENT '文档数（列表页展示，增删后由 service 重算）',
     `chunk_count` INT NOT NULL DEFAULT 0 COMMENT '切片数',
@@ -282,7 +283,8 @@ CREATE TABLE IF NOT EXISTS `tb_document` (
     `kb_id` BIGINT UNSIGNED NOT NULL COMMENT '所属知识库（ES/Neo4j 的隔离维度，检索一律先过 kb_id 白名单）',
     `doc_name` VARCHAR(255) NOT NULL COMMENT '文档标题，列表页可改（接口 DTO 里叫 title）',
     `file_name` VARCHAR(255) DEFAULT NULL COMMENT '上传时的原始文件名',
-    `file_path` VARCHAR(500) NOT NULL COMMENT '原件在公共存储中的 key（rag/raw/{kb_id}/{doc_id}.{ext}）',
+    `file_path` VARCHAR(500) NOT NULL COMMENT '原件在公共存储中的 key（rag/raw/{kb_id}/{doc_id}.{ext}）；source_mode=url 时存文件本身的可访问 URL',
+    `source_mode` VARCHAR(8) NOT NULL DEFAULT 'file' COMMENT '原件来源模式：file=上传落公共存储（file_path 是对象名，解析按对象名下载）；url=外部地址（file_path 存 URL，解析时直接 GET）。取值见 rag_constant.DOC_MODE_*',
     `file_ext` VARCHAR(16) DEFAULT NULL COMMENT '扩展名（小写、不含点），决定解析链路与分块默认策略',
     `file_size` BIGINT NOT NULL DEFAULT 0 COMMENT '字节数',
     `content_type` VARCHAR(128) DEFAULT NULL COMMENT 'MIME 类型（页面 contentType）',
@@ -704,14 +706,11 @@ CREATE TABLE IF NOT EXISTS `tb_workflow_api_key` (
 --   沙箱文件在 OpenSandbox（每用户一个 workspace_id），均不在 MySQL。
 -- =====================================================================================
 
--- 7.1 深度探索-会话表（挂载快照与模型偏好切会话时恢复；发消息时以此组装 toolkit）
+-- 7.1 深度探索-会话表（只存标题/状态：模型与挂载不绑会话，逐轮随消息落库；见 7.2）
 CREATE TABLE IF NOT EXISTS `tb_harness_session` (
     `id`             BIGINT          NOT NULL AUTO_INCREMENT,
     `user_id`        BIGINT          NOT NULL COMMENT '所属用户（数据隔离边界：会话/沙箱/AgentState 三处都以它为界）',
     `title`          VARCHAR(128) NOT NULL DEFAULT '新会话' COMMENT '会话标题',
-    `model_apply_id` BIGINT          NOT NULL DEFAULT 0 COMMENT '授权记录 apply_id（模型广场审批通过后签发，模型密钥从这行取）',
-    `model_name`     VARCHAR(128) DEFAULT NULL COMMENT '模型标识快照（展示用，调用以 apply 行为准）',
-    `mounts`         JSON         COMMENT '挂载快照 {kbIds:[],mcpIds:[],toolIds:[],skillIds:[]}（执行侧另有 ACL 二次校验，见 worker）',
     `status`         VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE' COMMENT '状态 ACTIVE/ARCHIVED（归档后不再出现在列表）',
     `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `update_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -731,7 +730,9 @@ CREATE TABLE IF NOT EXISTS `tb_harness_message` (
     `tool_calls`  JSON         COMMENT '工具调用轨迹 [{tool,arguments,result}]（result 裁剪口径同工作流 hide_tool_call_results）',
     `status`      VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '轮次状态（ASSISTANT 行权威）RUNNING/COMPLETED/FAILED/INTERRUPTED（INTERRUPTED=HITL 挂起等用户答复）',
     `error`       TEXT         COMMENT '失败原因（status=FAILED 时）',
-    `model_name`  VARCHAR(128) DEFAULT NULL COMMENT '本轮实际使用的模型标识（ASSISTANT 行）',
+    `model_name`  VARCHAR(128) DEFAULT NULL COMMENT '本轮实际使用的模型标识（ASSISTANT 行，worker 构造模型后回写）',
+    `model_id`    BIGINT    NOT NULL DEFAULT 0 COMMENT '本轮模型 id（模型/工具每轮可切换，随消息行落库；worker 按它命中 Redis model_rate_limit_config）',
+    `mounts`      JSON         COMMENT '本轮挂载快照 {kbIds:[],mcpIds:[],toolIds:[],skillIds:[]}（执行侧另有 ACL 二次校验）',
     `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_hm_turn` (`turn_id`, `role`),

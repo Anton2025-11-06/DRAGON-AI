@@ -13,16 +13,16 @@
   绕开 Linux 单命令行参数 ~128KiB 的上限。
 
 workspace 生命周期（与 worker 的轮次执行共享同一个沙箱）：
-- workspace_id = ``harness-{user_id}``（workspace_factory 同一约定），attach
-  幂等（沙箱还在时走 reattach+resume 快路径）；
-- 进程级缓存 + 空闲 TTL 只回收引用，**不调 close**——close 可能是销毁性
-  语义（demo teardown 选 pause 而非 close 即此因），沙箱本体由 worker 轮次
-  收尾的 pause 管理；
-- 同一用户首次 attach 加锁去重（冷启动 bootstrap 是分钟级，不能并发重复）。
+- workspace 由 workspace_factory 经 manager 分配/复用，attach 幂等（沙箱还在
+  时走 reattach+resume 快路径）；
+- 本服务不做进程级缓存——workspace 由 manager 持有（自带 TTL），本地缓存只会
+  攥着可能已过期的死引用，每次直接 build_workspace 取用；
+- 只回收引用、**不调 close**——close 可能是销毁性语义（OpenSandboxWorkspace 没有
+  pause 方法，沙箱本体靠服务端 timeout_seconds 自然暂停，worker 轮次收尾中的
+  _release_workspace 也只探 teardown/close，不存在就只丢引用）。
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import posixpath
 import secrets
@@ -41,56 +41,40 @@ class HarnessSandboxError(Exception):
 
 READ_TEXT_MAX = 200 * 1024          # 文本预览截断（字节）
 UPLOAD_MAX = 20 * 1024 * 1024       # 上传上限（分块传输，超过明显变慢）
-DOWNLOAD_MAX = 50 * 1024 * 1024     # 下载上限（单次 base64 回传）
+DOWNLOAD_MAX = 100 * 1024 * 1024     # 下载上限（单次 base64 回传）
 _UPLOAD_CHUNK = 64 * 1024           # 单条命令携带的 base64 字符数（< 128KiB）
 
-# workspace 连接缓存的空闲回收窗（秒）：只丢引用，沙箱生命周期不归本进程管
-_WS_TTL_S = 600.0
 
-# user_id -> {"workspace", "bash", "workdir", "expire"}（backend/bash 绑定后不变）
-_WS_CACHE: dict[int, dict] = {}
-_WS_LOCKS: dict[int, asyncio.Lock] = {}
-
-
-# ==================== workspace 连接（进程级缓存） ====================
+# ==================== workspace 连接 ====================
 
 
 async def _get_entry(user_id: int) -> dict:
-    """取（或 attach）当前用户的沙箱执行入口：Bash 工具 + workdir。
+    """构建当前用户的沙箱执行入口：Bash 工具 + workdir。
 
-    build_workspace 幂等（reattach 快路径）；冷启动（沙箱从未建过）是分钟级
-    bootstrap——同一用户的并发请求在此处排队，只 attach 一次。
+    不做进程级缓存——workspace 由 manager 持有（自带 TTL），本地缓存只会攥着
+    可能已过期的死引用；build_workspace 幂等（reattach 快路径），每次直接取用。
     """
-    loop = asyncio.get_running_loop()
-    entry = _WS_CACHE.get(user_id)
-    if entry and entry["expire"] > loop.time():
-        entry["expire"] = loop.time() + _WS_TTL_S
-        return entry
+    from agentscope.tool import Bash
 
-    lock = _WS_LOCKS.setdefault(user_id, asyncio.Lock())
-    async with lock:
-        entry = _WS_CACHE.get(user_id)  # 双检：排队期间可能已被别的请求建好
-        if entry and entry["expire"] > loop.time():
-            entry["expire"] = loop.time() + _WS_TTL_S
-            return entry
+    from service.service_harness.agent.workspace_factory import (
+        build_workspace, workspace_id_of,
+    )
 
-        from agentscope.tool import Bash
-
-        from service.service_harness.agent.workspace_factory import (
-            build_workspace, workspace_id_of,
-        )
-
-        workspace = await build_workspace({"user_id": user_id})
-        backend = workspace.get_backend()
-        entry = {
-            "workspace_id": workspace_id_of(user_id),
-            "workspace": workspace,
-            "bash": Bash(backend=backend),
-            "workdir": str(getattr(workspace, "workdir", "") or "/workspace"),
-            "expire": loop.time() + _WS_TTL_S,
-        }
-        _WS_CACHE[user_id] = entry
-        return entry
+    workspace = await build_workspace({"user_id": user_id})
+    backend = workspace.get_backend()
+    workdir = str(getattr(workspace, "workdir", "") or "")
+    # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
+    # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
+    ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
+    if not workdir:
+        raise HarnessSandboxError(
+            f"沙箱 workdir 为空，无法执行文件操作（workspace_id={ws_id}）")
+    return {
+        "workspace_id": ws_id,
+        "workspace": workspace,
+        "bash": Bash(backend=backend),
+        "workdir": workdir,
+    }
 
 
 async def _run(entry: dict, command: str) -> str:
@@ -334,25 +318,4 @@ async def download(login_user: dict, path: str) -> tuple[bytes, str, bool]:
     raise HarnessSandboxError("文件或目录不存在")
 
 
-# ==================== workspace 重置（会话清理口，M3-5） ====================
 
-
-async def reset_workspace(login_user: dict) -> dict:
-    """清空当前用户的沙箱工作区（WorkspaceBase.reset，官方 Lifecycle 接口）。
-
-    场景：用户要一个干净的探索环境（旧产物/误传文件全清）；会话与消息不
-    动，下一轮对话在同一 workspace_id 上继续。执行后本进程的连接缓存一并
-    失效（reset 语义 = 回到初始，缓存的 backend 不可复用）。
-    """
-    user_id = int(login_user.get("user_id") or 0)
-    entry = await _get_entry(user_id)
-    workspace = entry["workspace"]
-    reset = getattr(workspace, "reset", None)
-    if not callable(reset):
-        raise HarnessSandboxError("当前 agentscope 版本不支持 workspace reset")
-    try:
-        await reset()
-    except Exception as e:  # noqa: BLE001
-        raise HarnessSandboxError(f"沙箱重置失败：{e}") from e
-    _WS_CACHE.pop(user_id, None)
-    return {"workspace": entry["workspace_id"], "reset": True}

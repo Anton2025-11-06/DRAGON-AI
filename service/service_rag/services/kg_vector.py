@@ -23,7 +23,7 @@ Neo4j 里已不存在的项目当场删掉。代价是一次 `_source` 只取 te
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from common.common_constants import rag_constant as RC
 from common.common_es import es_client, to_json
@@ -62,14 +62,19 @@ def relation_vector_text(head: str, relation: str, tail: str) -> str:
     return truncate_text(f"{head} {rel} {tail}")
 
 
-def _desired_docs(kb_id: int, rows: dict, *, org_id: int = 0) -> dict[str, dict]:
-    """Neo4j 源数据 → `{投影 _id: 文档体（不含向量）}`，文本同时是差集比对的依据。"""
+def _desired_docs(kb_id: int, rows: dict, *, org_id: int = 0,
+                  allowed_types: Optional[Sequence[str]] = None) -> dict[str, dict]:
+    """Neo4j 源数据 → `{投影 _id: 文档体（不含向量）}`，文本同时是差集比对的依据。
+
+    allowed_types 必须与写入图谱时用的是同一份（知识库自定义实体集），否则自定义类型会在这层
+    被 entity_type_of 折回「其他」，投影的 _id（带 type）与图谱真身对不上。
+    """
     out: dict[str, dict] = {}
     for one in rows.get("entities") or []:
         name = str(one.get("name") or "").strip()
         if not name:
             continue
-        etype = kg_store.entity_type_of(one.get("type"))
+        etype = kg_store.entity_type_of(one.get("type"), allowed_types)
         text = entity_vector_text(name, etype, str(one.get("summary") or ""),
                                   [str(a) for a in (one.get("aliases") or []) if a])
         out[kg_vector_id(kb_id, RC.KG_VECTOR_KIND_ENTITY, kg_entity_key(name, etype))] = {
@@ -96,9 +101,9 @@ def _desired_docs(kb_id: int, rows: dict, *, org_id: int = 0) -> dict[str, dict]
             RC.KG_FIELD_TEXT: relation_vector_text(head, rel, tail),
             RC.KG_FIELD_REFS: to_json({"head": head, "relation": rel, "tail": tail,
                                        "head_type": kg_store.entity_type_of(
-                                           one.get("head_type")),
+                                           one.get("head_type"), allowed_types),
                                        "tail_type": kg_store.entity_type_of(
-                                           one.get("tail_type"))}),
+                                           one.get("tail_type"), allowed_types)}),
         }
     for doc in out.values():
         doc[RC.KG_FIELD_KB] = int(kb_id)
@@ -107,19 +112,23 @@ def _desired_docs(kb_id: int, rows: dict, *, org_id: int = 0) -> dict[str, dict]
 
 
 async def sync_kb_vectors(kb_id: int, *, embed_model_id: int, org_id: int = 0,
-                         embed_config: Any = None) -> dict:
+                         embed_config: Any = None,
+                         allowed_types: Optional[Sequence[str]] = None) -> dict:
     """按 Neo4j 当前状态补齐一个库的实体/关系向量投影（幂等，可反复调）。
 
     :param embed_config: 已经取好的向量模型配置（构建链路里传进来，省一次查库）；
         没传就按 embed_model_id 现取。取不到模型时报 ValueError——投影写不出向量
         比不写更糟（一堆零向量条目会让 kNN 随机命中）。
+    :param allowed_types: 知识库自定义实体类型集，必须与写入图谱时同一份（留空=系统默认）；
+        不一致会让自定义类型的投影文本与 _id 全部错位。
     :return: {"entities","relations","embedded","deleted","truncated"}
     """
     from service.service_rag.services.rag_model import RagModelService
 
     kb_id = int(kb_id)
     rows = await kg_store.vector_rows(kb_id)
-    desired = _desired_docs(kb_id, rows, org_id=int(org_id or 0))
+    desired = _desired_docs(kb_id, rows, org_id=int(org_id or 0),
+                            allowed_types=allowed_types)
     existing = await es_client.kg_scan_texts(kb_id, size=RC.KG_VECTOR_SCAN_LIMIT)
 
     changed = {kg_id: doc for kg_id, doc in desired.items()

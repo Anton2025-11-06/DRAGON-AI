@@ -386,6 +386,9 @@ function buildUploadReq(): SkillZipUploadReq {
   if (!formState.name.trim()) {
     throw new Error('请输入技能名称');
   }
+  if (!formState.description?.trim()) {
+    throw new Error('请输入技能描述（智能体据此选择该技能）');
+  }
   const uploadItem = formState.skillPackage[0];
   const file = (uploadItem?.originFileObj || uploadItem) as File | undefined;
   if (!file) {
@@ -697,12 +700,12 @@ onMounted(() => {
             show-count
           />
         </a-form-item>
-        <a-form-item label="技能描述">
+        <a-form-item label="技能描述" required>
           <Input.TextArea
             v-model:value="formState.description"
             :maxlength="500"
             :rows="3"
-            placeholder="说明该技能适合处理的问题和边界"
+            placeholder="必填，说明该技能适合处理的问题和边界（智能体据此选择工具）"
             show-count
           />
         </a-form-item>

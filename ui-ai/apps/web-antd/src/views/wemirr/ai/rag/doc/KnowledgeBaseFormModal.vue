@@ -1,5 +1,10 @@
 <script lang="ts" setup>
-import type { KbSaveReq, KbType, RuntimeConfig } from './api';
+import type {
+  KbSaveReq,
+  KbType,
+  KgEntityTypeItem,
+  RuntimeConfig,
+} from './api';
 
 /**
  * 知识库创建 / 编辑弹窗。
@@ -22,6 +27,7 @@ import { computed, reactive, ref, watch } from 'vue';
 
 import { QuestionCircleOutlined } from '@ant-design/icons-vue';
 import {
+  Button,
   Col,
   Form,
   FormItem,
@@ -121,6 +127,27 @@ const form = reactive<KbSaveReq>({
   enableGraph: false,
 });
 const activeTab = ref('basic');
+
+// ---------- 图谱自定义实体范围 ----------
+// 与后端 RC.KG_ENTITY_TYPES 末项同值：开自定义时先塞一行「其他」，用户可删可改可加。
+const KG_ENTITY_OTHER = '其他';
+const ENTITY_TYPE_MAX = 30;
+const customEntityEnabled = ref(false);
+const entityTypes = ref<KgEntityTypeItem[]>([]);
+
+function addEntityTypeRow() {
+  if (entityTypes.value.length >= ENTITY_TYPE_MAX) return;
+  entityTypes.value.push({ name: '', description: '' });
+}
+function removeEntityTypeRow(idx: number) {
+  entityTypes.value.splice(idx, 1);
+}
+// 打开开关时自动补一行「其他」（已有内容则不覆盖），与需求「自动增加一个其他类型」一致。
+watch(customEntityEnabled, (on) => {
+  if (on && entityTypes.value.length === 0) {
+    entityTypes.value = [{ name: KG_ENTITY_OTHER, description: '' }];
+  }
+});
 
 // 分块策略相关：把 chunkConfig 摊出来好绑定
 const chunkStrategy = computed<string>({
@@ -405,6 +432,15 @@ watch(
       lockedDim.value = detail.embeddingDim || 0;
       await loadModelOptions(detail.kbType);
       syncSeparators();
+      // 自定义实体范围回填：开了图谱且库里存了合法类型才勾上并填列表，否则回到默认
+      const gc = detail.graphConfig || {};
+      customEntityEnabled.value = !!gc.customEnabled && !!detail.enableGraph;
+      entityTypes.value = customEntityEnabled.value
+        ? (gc.entityTypes || []).map((t) => ({
+            name: t.name || '',
+            description: t.description || '',
+          }))
+        : [];
     } else {
       Object.assign(form, {
         kbType: props.defaultKbType || KB_TYPE_DOC,
@@ -418,6 +454,8 @@ watch(
         parserEngine: 'native',
         enableGraph: false,
       });
+      customEntityEnabled.value = false;
+      entityTypes.value = [];
       lockedDim.value = 0;
       applyDefaults();
       await loadModelOptions(form.kbType);
@@ -436,6 +474,11 @@ watch(
     form.extractModelId = 0;
     form.imageModelId = 0;
     if (t !== KB_TYPE_DOC) form.enableGraph = false;
+    // 非文档型没有图谱，自定义实体范围跟着关掉（只藏 UI 不清值会留下脏配置）
+    if (t !== KB_TYPE_DOC) {
+      customEntityEnabled.value = false;
+      entityTypes.value = [];
+    }
     const p = ensureParse();
     // 页面上一藏就看不见的开关必须同时置 false：只删 UI 不清值，用户上一次勾的增强
     // 会跟着类型切换静静存进库里，下次换回来一看「开关自己开着」
@@ -481,6 +524,11 @@ async function handleSubmit() {
     message.warning('请输入知识库名称');
     return;
   }
+  if (!form.description?.trim()) {
+    activeTab.value = 'basic';
+    message.warning('请输入知识库描述（智能体据此选择该知识库工具）');
+    return;
+  }
   if (!form.embedModelId) {
     activeTab.value = 'basic';
     message.warning('请选择向量模型');
@@ -490,6 +538,21 @@ async function handleSubmit() {
     activeTab.value = 'basic';
     message.warning('开启知识图谱需要选择图谱抽取模型');
     return;
+  }
+  // 开了自定义实体范围：每行实体名必填（描述选填），且至少一个——后台按这份清单严格抽取，
+  // 空名/零行会让提示词没有可选类型，落库时 normalize 也会回退系统默认，等于白开。
+  if (isDoc.value && form.enableGraph && customEntityEnabled.value) {
+    const rows = entityTypes.value.map((t) => (t.name || '').trim());
+    if (rows.length === 0) {
+      activeTab.value = 'basic';
+      message.warning('开启自定义实体范围至少需要配置一个实体类型');
+      return;
+    }
+    if (rows.some((n) => !n)) {
+      activeTab.value = 'basic';
+      message.warning('自定义实体类型的名称不能为空（描述可不填）');
+      return;
+    }
   }
   // 媒体库的解析模型必填（需求 5）：这类文件的「正文」就是它转写出来的东西——音频/视频
   // 缺对应模型时后端直接解析失败，图片缺模型则只剩文件名可检索，等于建了个搜不到的库
@@ -572,6 +635,27 @@ async function handleSubmit() {
     payload.enableGraph = !!form.enableGraph;
     // 开关关掉就不存模型选择，免得上一个图谱抽取模型的配置挂在库里说不清
     payload.extractModelId = form.enableGraph ? form.extractModelId || 0 : 0;
+    // 自定义实体范围只在「doc 型 + 开图谱 + 开了自定义」三者都成立时落内容，
+    // 其余一律 customEnabled:false（后端 normalize 会据此回退系统默认）。
+    if (form.enableGraph && customEntityEnabled.value) {
+      const seen = new Set<string>();
+      payload.graphConfig = {
+        customEnabled: true,
+        entityTypes: entityTypes.value
+          .map((t) => ({
+            name: (t.name || '').trim(),
+            description: (t.description || '').trim(),
+          }))
+          .filter((t) => {
+            if (!t.name || seen.has(t.name)) return false;
+            seen.add(t.name);
+            return true;
+          })
+          .slice(0, ENTITY_TYPE_MAX),
+      };
+    } else {
+      payload.graphConfig = { customEnabled: false };
+    }
   }
 
   submitting.value = true;
@@ -632,12 +716,12 @@ async function handleSubmit() {
             />
           </FormItem>
 
-          <FormItem label="描述">
+          <FormItem label="描述" required>
             <Textarea
               v-model:value="form.description"
               :rows="2"
               :maxlength="500"
-              placeholder="可选，说明这个库的用途"
+              placeholder="必填，说明这个库的内容与适用问题（深度探索智能体据此决定是否调用该知识库）"
             />
           </FormItem>
 
@@ -696,6 +780,55 @@ async function handleSubmit() {
               show-search
               :filter-option="(i: string, o: any) => o.label.includes(i)"
             />
+          </FormItem>
+
+          <FormItem v-if="isDoc && form.enableGraph">
+            <template #label>
+              自定义实体范围
+              <Tooltip
+                title="开了就只按你列的实体类型抽取，模型越界输出的实体会被直接丢弃；不开则用系统默认类型（人物/组织/地点…）。已建好的图谱要按新范围生效，需在文档列表重新构建图谱。"
+              >
+                <QuestionCircleOutlined class="help-icon" />
+              </Tooltip>
+            </template>
+            <Switch v-model:checked="customEntityEnabled" />
+            <div class="hint">
+              关掉则按系统默认的实体类型集抽取。
+            </div>
+
+            <div v-if="customEntityEnabled" class="entity-type-editor">
+              <div
+                v-for="(row, idx) in entityTypes"
+                :key="idx"
+                class="entity-type-row"
+              >
+                <Input
+                  v-model:value="row.name"
+                  :maxlength="50"
+                  placeholder="实体名称（必填）"
+                  style="width: 170px"
+                />
+                <Input
+                  v-model:value="row.description"
+                  :maxlength="500"
+                  placeholder="实体描述（选填，帮模型正确归类）"
+                  style="flex: 1"
+                />
+                <Button type="link" danger @click="removeEntityTypeRow(idx)">
+                  删除
+                </Button>
+              </div>
+              <Button
+                size="small"
+                :disabled="entityTypes.length >= ENTITY_TYPE_MAX"
+                @click="addEntityTypeRow"
+              >
+                + 添加实体类型
+              </Button>
+              <div class="hint">
+                最多 {{ ENTITY_TYPE_MAX }} 个；名称需不重复且非空，越界抽取会被后端过滤兜底。
+              </div>
+            </div>
           </FormItem>
         </TabPane>
 
@@ -1146,5 +1279,17 @@ async function handleSubmit() {
 
 .strategy-meta .meta-scene {
   margin-left: 8px;
+}
+
+/* 自定义实体范围：一行一个类型（名称 + 描述 + 删除），行间距留给输入框 */
+.entity-type-editor {
+  margin-top: 8px;
+}
+
+.entity-type-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
 }
 </style>

@@ -543,7 +543,16 @@ KG_REL_EXTRACT = "EXTRACTED_FROM"     # Chunk -[:EXTRACTED_FROM]-> Document
 KG_REL_RELATION = "RELATED_TO"        # Entity -[:RELATED_TO {relation}]-> Entity
 
 # 实体类型（抽取提示词与前端图例共用这一份，避免模型自由发挥出十种类型）
+#   知识库未自定义实体范围时按这份系统默认抽取；自定义后 run_build 用库自己的类型集合
+#   替换它（提示词的可选类型清单 + 落库时的类型归一都以库配置为准）
 KG_ENTITY_TYPES = ["人物", "组织", "地点", "时间", "产品", "技术", "事件", "指标", "其他"]
+# 兜底类型：系统默认与自定义都可能含它；不在允许集合内的实体，允许集合里有它就归它
+KG_ENTITY_OTHER = KG_ENTITY_TYPES[-1]
+# 自定义实体范围的取值边界（tb_knowledge_base.graph_config.entity_types 的元素校验）
+#   名称必填（去空后非空）、描述选填；单库类型数封顶防「配几百个类型塞爆提示词」
+KG_ENTITY_NAME_MAX = 50
+KG_ENTITY_DESC_MAX = 500
+KG_CUSTOM_ENTITY_TYPES_MAX = 30
 
 # 图谱规模（唯一取值点，配置中心不再覆盖；读取口见 rag_settings 同名函数）
 #   KG_EXTRACT_BATCH_CHUNKS 只是**一次大模型调用喂多少片**的分批粒度，不再是总片数封顶：
@@ -625,6 +634,14 @@ KG_CONTEXT_MAX_TRIPLES = 60
 RAG_OBJ_DIR_RAW = "raw"
 RAG_OBJ_DIR_SIDECAR = "sidecar"
 RAG_OBJ_DIR_IMAGE = "image"
+
+# 文档原件来源模式（tb_document.source_mode，随解析任务 options["mode"] 带到 worker）：
+#   file：页面/开放 API 上传文件流，先落公共存储，file_path 是对象名，解析按对象名下载；
+#   url ：只给文件的可访问 URL，不落存储，file_path 直接存 URL，解析时按 mode GET 取字节。
+# 列表「查看原文件」同按它分流：file 签存储地址、url 原样透出（_sign 遇 :// 直接返回）。
+DOC_MODE_FILE = "file"
+DOC_MODE_URL = "url"
+DOC_MODES_ALL = [DOC_MODE_FILE, DOC_MODE_URL]
 
 # 单次批量上传的文件数上限（只卡开放 API，页面上传由前端自己控制）；
 # 预览、重排候选、图谱抽取规模等人为上限已全部取消，代码不再悄悄丢数据

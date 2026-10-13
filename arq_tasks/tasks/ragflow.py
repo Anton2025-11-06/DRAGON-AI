@@ -209,7 +209,8 @@ async def parse_document(ctx: dict, doc_id: int, options: Optional[dict] = None)
 
     任务体只做「驱动 + 兜异常」：状态机流转、进度写 Redis、失败落 error_msg 都在
     parse_service 里（API 侧的手工重跑走同一个方法，两条路径不可能跑出两种结果）。
-    ``options`` 是投递时带上的任务选项（目前只有 sidecar 复用策略）。
+    ``options`` 是投递时带上的任务选项（sidecar 复用策略 + mode 原件来源 file/url）：
+    mode=url 时 run_parse 直接 GET 原件 URL 取字节，不走存储下载。
     """
     from service.service_rag.services.parse_service import RagParseService
 

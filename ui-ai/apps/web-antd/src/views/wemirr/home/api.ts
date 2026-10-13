@@ -39,14 +39,10 @@ export interface HarnessMounts {
   skillIds: number[];
 }
 
-/** 深度探索会话 */
+/** 深度探索会话（只存标题/状态：模型与挂载不绑会话，逐轮随消息携带） */
 export interface HarnessSession {
   id: number;
   title: string;
-  /** 0 = 未选模型（发消息前必须选） */
-  modelApplyId: number;
-  modelName: string;
-  mounts: Partial<HarnessMounts>;
   status: string;
   createTime: string;
   updateTime: string;
@@ -71,18 +67,19 @@ export interface HarnessMessage {
   status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED' | 'RUNNING';
   error: null | string;
   modelName: null | string;
+  /** 本轮模型 id（切换会话时按最后一轮回显 composer 选择） */
+  modelId?: number;
+  mounts?: Partial<HarnessMounts>;
   createTime: string;
 }
 
-/** 可选模型（已按支持工具调用过滤；applyId>0 = 本人已授权可选） */
+/** 可选模型（后端只返回本人已授权且支持工具调用的模型；chat 直接传 id） */
 export interface HarnessModelOption {
   id: number;
   name: string;
   provider: string;
   modelName: string;
   category: string;
-  applyId: number;
-  applied: boolean;
 }
 
 /** SSE 协议帧（data: {json}；type 与 worker 侧 publish 的口径一致） */
@@ -125,11 +122,9 @@ export function HarnessSessionPage(params: { current: number; size: number }) {
   }>('/api/harness/session/page', { params });
 }
 
-/** 新建会话（模型与初始挂载一起落，首轮即可发消息） */
+/** 新建会话（只建标题：模型与挂载不绑会话，发消息时逐轮现选） */
 export function HarnessSessionCreate(body: {
   title: string;
-  modelApplyId: number;
-  mounts?: Partial<HarnessMounts>;
 }) {
   return defHttp.post<HarnessSession>('/api/harness/session', body);
 }
@@ -141,12 +136,11 @@ export function HarnessSessionMessages(sessionId: number) {
   );
 }
 
-/** 编辑会话（只传要改的键：标题/模型/挂载）——封装层无 patch 快捷方法，走通用 request */
+/** 编辑会话（只传要改的键：标题/归档状态）——封装层无 patch 快捷方法，走通用 request */
 export function HarnessSessionUpdate(
   sessionId: number,
   body: {
-    modelApplyId?: number;
-    mounts?: Partial<HarnessMounts>;
+    status?: 'ACTIVE' | 'ARCHIVED';
     title?: string;
   },
 ) {
@@ -168,9 +162,10 @@ export function HarnessModels() {
   );
 }
 
-/** 发送一轮对话：建 turn → 投 arq harness 流水线 → 返回 turnId（随后订阅事件流） */
+/** 发送一轮对话：本轮模型与挂载一并传后端 → 建 turn → 投 arq harness 流水线 → 返回 turnId */
 export function HarnessChat(body: {
   message: string;
+  modelId: number;
   mounts?: Partial<HarnessMounts>;
   sessionId: number;
 }) {
@@ -213,11 +208,6 @@ export function SandboxUpload(path: string, file: File) {
 /** 沙箱下载地址（文件原样 / 目录 zip） */
 export function SandboxDownloadUrl(path: string) {
   return `/api/harness/sandbox/download?path=${encodeURIComponent(path)}`;
-}
-
-/** 重置我的沙箱（清空工作区文件；会话与消息不动） */
-export function HarnessWorkspaceReset() {
-  return defHttp.delete('/api/harness/sandbox');
 }
 
 // ==================== 挂载候选（harness options 四口，use 口径） ====================

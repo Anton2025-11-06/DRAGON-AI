@@ -269,6 +269,18 @@ export interface PageResp<T> {
 
 // ==================== 知识库 ====================
 
+/** 自定义实体类型项：名称必填、描述选填（与后端 KG_ENTITY_NAME_MAX/DESC_MAX 同口径） */
+export interface KgEntityTypeItem {
+  name: string;
+  description?: string;
+}
+
+/** 图谱自定义实体范围：开=按 entityTypes 严格抽取；关/空=系统默认类型 */
+export interface GraphConfig {
+  customEnabled?: boolean | number;
+  entityTypes?: KgEntityTypeItem[];
+}
+
 export interface KbPageReq extends PageReq {
   name?: string;
   description?: string;
@@ -298,6 +310,8 @@ export interface KbSaveReq {
   topK?: number;
   scoreThreshold?: number;
   enableGraph?: boolean;
+  /** 图谱自定义实体范围（仅 doc 型且 enableGraph 时生效）；不传/未开=按系统默认类型抽取 */
+  graphConfig?: GraphConfig;
   metadata?: Record<string, any>;
 }
 
@@ -323,6 +337,8 @@ export interface KnowledgeBaseResp {
   chunkOverlap: number;
   chunkStrategy?: string;
   enableGraph: boolean;
+  /** 图谱自定义实体范围回显（后端统一驼峰 customEnabled/entityTypes） */
+  graphConfig?: GraphConfig;
   parserEngine?: string;
   parseConfig: Record<string, any>;
   chunkConfig: Record<string, any>;
@@ -417,6 +433,30 @@ export async function UploadDocuments(
   }
 }
 
+/**
+ * 单条文件 URL（URL 导入接口的一行）；title/fileName 选填，缺省后端从 URL 路径末段推导。
+ */
+export interface DocUrlItem {
+  url: string;
+  title?: string;
+  fileName?: string;
+}
+
+/**
+ * 按 URL 批量导入知识（与文件上传同一个回执形状）。
+ *
+ * 只发 URL 集合、上行不起文件流：后端校验后建行（source_mode=url，不落 OSS）并入队（mode=url），
+ * 解析时 worker 直接 GET URL 取字节。这一步本身很快（不上传、不等解析），默认超时即够。
+ */
+export const UploadDocumentsByUrl = (
+  kbId: number,
+  urls: DocUrlItem[],
+): Promise<UploadResp> =>
+  defHttp.post<UploadResp>(
+    `${BASE}/knowledge-bases/${kbId}/documents/upload-urls`,
+    { urls },
+  );
+
 export const DeleteDocuments = (kbId: number, ids: number[]) =>
   defHttp.post<{ accepted: number }>(
     `${BASE}/knowledge-bases/${kbId}/documents/delete`,
@@ -502,6 +542,8 @@ export interface DocumentResp {
   fileName?: string;
   fileExt?: string;
   fileSize: number;
+  /** 原件来源：file=上传落存储 / url=外部地址直接引用（url 行「查看原文件」直接开后端透出的 URL） */
+  sourceMode?: 'file' | 'url';
   contentType?: string;
   mediaType?: 'audio_video' | 'image' | 'text';
   parserEngine?: string;

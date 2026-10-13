@@ -24,8 +24,9 @@ case "$SERVICE" in
   service_rag)      MODULE=service.service_rag.rag;          DEFAULT_PORT=9002 ;;
   service_workflow) MODULE=service.service_workflow.workflow; DEFAULT_PORT=9003 ;;
   service_gateway)  MODULE=service.service_gateway.gateway;  DEFAULT_PORT=18000 ;;
+  service_harness)  MODULE=service.service_harness.harness;  DEFAULT_PORT=9005 ;;
   *)
-    echo "[run_service] 未知服务: $SERVICE（可选 service_login|service_system|service_rag|service_workflow|service_gateway）" >&2
+    echo "[run_service] 未知服务: $SERVICE（可选 service_login|service_system|service_rag|service_workflow|service_gateway|service_harness）" >&2
     exit 2
     ;;
 esac

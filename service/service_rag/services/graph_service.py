@@ -119,6 +119,13 @@ class RagGraphService:
             if not extract_id:
                 raise ValueError("知识库没有配置图谱抽取模型，无法抽取实体（请在知识库的解析配置里选）")
             cfg = await RagModelService.require_config(extract_id, "图谱抽取模型")
+            # 自定义实体范围：库开了就按库自己的类型集抽取（提示词的可选清单 + 落库类型
+            # 归一 + 越界丢弃都以它为准）；没开则 allowed=None，走系统默认 KG_ENTITY_TYPES
+            allowed_types, prompt_types, type_rule = settings.graph_extract_types(
+                getattr(kb, "graph_config", None))
+            if allowed_types:
+                log.info("图谱使用自定义实体范围: doc={} kb={} 类型={}",
+                         doc_id, kb_id, "、".join(allowed_types))
             # 不封顶总片数，只拆成每次调用若干片：单条 prompt 装下几百片会直接超模型
             # 上下文，那一类失败是「整篇抽不出来」，比多跑几次调用严重得多
             batch = max(1, settings.graph_extract_batch_chunks())
@@ -142,7 +149,8 @@ class RagGraphService:
             drawn: list[tuple[list[dict], list[dict], list[str]]] = []
             for no, part in enumerate(batches, start=1):
                 prompt = settings.build_extract_prompt(
-                    [(r["chunk_index"], str(r["content"] or "")) for r in part])
+                    [(r["chunk_index"], str(r["content"] or "")) for r in part],
+                    entity_types=prompt_types, type_rule=type_rule)
                 stamp = kg_ckpt.prompt_stamp(prompt)
                 # 上一轮抽成功且内容没改的批：直接吃断点，不再调模型（断点的全部意义在这一行）
                 hit = kg_ckpt.unpack(cached.get(kg_ckpt.batch_field(no)) or "", stamp=stamp)
@@ -160,7 +168,7 @@ class RagGraphService:
                 payload = await _extract_batch(cfg, prompt, doc_id=doc_id, no=no,
                                                total=len(batches))
                 # 一批没抽到实体不是失败：只记一句说明，整篇都为空也按成功收口（见下面的完成文案）
-                part_result = _normalize(payload, es_ids)
+                part_result = _normalize(payload, es_ids, allowed_types=allowed_types)
                 drawn.append(part_result)
                 progressed["done"] = no
                 if not await _save_ckpt(doc_id, no, part_result, stamp=stamp, sig=want_sig):
@@ -194,7 +202,8 @@ class RagGraphService:
                          "chunk_index": int(r["chunk_index"]),
                          "content": str(r["content"] or ""),
                          "title_path": str(r["title_path"] or "")} for r in rows],
-                org_id=int(kb.org_id or 0), replace=True)
+                org_id=int(kb.org_id or 0), replace=True,
+                allowed_types=allowed_types)
 
             # 需求 9a：图谱真身落 Neo4j 后同步它的向量投影（rag_kg_vector）。
             # 按整库算差集而不是只送本篇：实体是库内同名同类合并的，本篇会改写到
@@ -205,7 +214,8 @@ class RagGraphService:
                 embed_cfg = await RagModelService.get_config(int(kb.embedding_model_id or 0))
                 vec = await kg_vector.sync_kb_vectors(
                     kb_id, embed_model_id=int(kb.embedding_model_id or 0),
-                    org_id=int(kb.org_id or 0), embed_config=embed_cfg)
+                    org_id=int(kb.org_id or 0), embed_config=embed_cfg,
+                    allowed_types=allowed_types)
                 if vec.get("truncated"):
                     notes = notes + [f"实体/关系向量仅投影前 {RC.KG_VECTOR_SCAN_LIMIT} 条"]
             except Exception as ve:  # noqa: BLE001  投影失败只降级图谱增强检索
@@ -629,14 +639,19 @@ def _merge_batches(drawn: Sequence[tuple[list[dict], list[dict], list[str]]]
     return list(by_name.values()), relations, notes
 
 
-def _normalize(payload: Any, es_ids: dict[int, str]) -> tuple[list[dict], list[dict], list[str]]:
-    """模型返回的 JSON → kg_store 的入参形态，并记下丢掉了什么（降级必须看得见）。
+def _normalize(payload: Any, es_ids: dict[int, str], *,
+               allowed_types: Optional[Sequence[str]] = None
+               ) -> tuple[list[dict], list[dict], list[str]]:
+    """模型返回的 JSON → kg_store 的入参形态，并记下丢掉了什么（降级必须看得见。
 
     只认 ``entities/relations`` 之外的同义写法也一并兼容（nodes/triples/edges），
     因为换一个大模型就要改一次代码里的字段名的话，内置的 ``graph_extract_prompt`` 模板就白给了。
 
     :param es_ids: ``{chunk_index: ES _id}``——本文档全部可用切片的溯源表，
         模型报回来的切片编号只有在这张表里才能换成溯源地址
+    :param allowed_types: 知识库自定义实体类型集（非空时）：模型只允许从这些类型里选，
+        给出的类型不在集合内的实体直接丢弃（严格过滤兜底，端点被丢的关系随之丢）；
+        留空按系统默认：未知类型由 kg_store.entity_type_of 折回「其他」。
     :raises ValueError: 返回结构不是 JSON 对象
     """
     notes: list[str] = []
@@ -662,7 +677,14 @@ def _normalize(payload: Any, es_ids: dict[int, str]) -> tuple[list[dict], list[d
         name = str(item.get("name") or item.get("entity") or "").strip()
         if not name:
             continue
-        etype = kg_store.entity_type_of(item.get("type") or item.get("entity_type"))
+        raw_type = str(item.get("type") or item.get("entity_type") or "").strip()
+        if allowed_types is not None:
+            # 自定义实体范围：严格只收允许集内的类型，越界实体直接丢弃（不做丢弃计数）
+            if raw_type not in allowed_types:
+                continue
+            etype = raw_type
+        else:
+            etype = kg_store.entity_type_of(raw_type)
         # 同一名字被写成两种类型：先到先得，后一个不再建节点（否则图上裂成两个同名实体）
         if name in type_of:
             if type_of[name] != etype:

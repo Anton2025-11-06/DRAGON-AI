@@ -47,7 +47,26 @@ async def _visible_ids(kind: str, login_user: dict) -> dict[int, str]:
         return {}
 
 
-def _intersect(ids: list[int], visible: dict[int, str], kind: str) -> list[int]:
+async def _visible_meta(kind: str, login_user: dict) -> dict[int, dict]:
+    """use 口径的可见集合 {id: {name, description}}（工具描述组装用）。
+
+    description 是 agent 选择工具的关键依据，缺失会导致模型不知道该工具能干什么。
+    """
+    from service.service_harness.services.options_service import (
+        HarnessOptionsService,
+    )
+    try:
+        rows = await HarnessOptionsService.options(login_user, kind)
+        return {int(r["id"]): {
+            "name": str(r.get("name") or r["id"]),
+            "description": str(r.get("description") or "").strip(),
+        } for r in rows}
+    except Exception as e:  # noqa: BLE001
+        log.warning("harness mount visible query failed: kind={} {}", kind, e)
+        return {}
+
+
+def _intersect(ids: list[int], visible: dict[int, Any], kind: str) -> list[int]:
     """请求挂载 ∩ 可见集合；越权/失效的记一条日志（静默跳过，不炸整轮）。"""
     wanted = [int(i) for i in ids or []]
     kept = [i for i in wanted if i in visible]
@@ -74,13 +93,17 @@ async def load_mounted(login_user: dict, mounts: dict) -> MountBundle:
         return bundle
 
     # ---- 知识库 → kb_search 工具（一个工具覆盖全部挂载库）----
-    kb_visible = await _visible_ids("kb", login_user)
-    kb_effective = _intersect(mounts.get("kbIds") or [], kb_visible, "kb")
+    kb_meta = await _visible_meta("kb", login_user)
+    kb_effective = _intersect(mounts.get("kbIds") or [], kb_meta, "kb")
     if kb_effective:
+        # 把知识库的 description 拼进工具描述，让 agent 知道每个库是干什么的
+        kb_names = {i: kb_meta[i]["name"] for i in kb_effective}
+        kb_desc_parts = [f"{kb_meta[i]['name']}：{kb_meta[i]['description']}"
+                         for i in kb_effective if kb_meta[i].get("description")]
         bundle.tools.append(make_kb_search_tool(
-            login_user, kb_effective,
-            {i: kb_visible[i] for i in kb_effective}))
-        bundle.summary["kbNames"] = [kb_visible[i] for i in kb_effective]
+            login_user, kb_effective, kb_names,
+            kb_descriptions=kb_desc_parts))
+        bundle.summary["kbNames"] = [kb_meta[i]["name"] for i in kb_effective]
 
     # ---- MCP 连接 → 每个远端工具一个实例 ----
     mcp_visible = await _visible_ids("mcp", login_user)

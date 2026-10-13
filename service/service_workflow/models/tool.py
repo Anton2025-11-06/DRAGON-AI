@@ -4,7 +4,10 @@ from pydantic import Field, BaseModel
 
 class ToolSaveRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="工具名称")
-    description: Optional[str] = Field(None, max_length=500, description="工具描述")
+    # 描述必填：harness agent 平台工具挂载时直接把它作为工具 description，
+    # 空描述会让智能体看不到工具能力，无法做选择。
+    description: str = Field(..., min_length=1, max_length=500,
+                             description="工具描述（用于智能体工具选择，必填）")
     function_code: str = Field(..., description="Python 函数源码")
     parameters_schema: Optional[str] = Field(
         None, description='参数定义 JSON：{"parameters":[{name,type,required,description,default}]}')

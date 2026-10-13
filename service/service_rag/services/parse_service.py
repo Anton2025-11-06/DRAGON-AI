@@ -40,9 +40,11 @@ from common.common_file_parser import constants as C
 from common.common_file_parser.entry import (chunk_parsed_document, parse_document,
                                              sidecar_bytes, sidecar_from_bytes)
 from common.common_file_parser.models import ImageRef, ParsedBlock, ParsedDocument
+from common.common_httpx.httpx import httpx_pool
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from common.common_neo4j import kg_store, neo4j_client
+from common.common_storage import MAX_FILE_SIZE
 from common.common_storage import download as storage_download
 from common.common_storage import get_storage
 from service.service_rag.models.kb_entity import Document, DocumentChunk, KnowledgeBase
@@ -95,8 +97,9 @@ class RagParseService:
         try:
             doc, kb = await load_pair(doc_id)
             kb_id = int(kb.kb_id)
-            log.info("开始文档解析: doc={} kb={} name={} type={} sidecar={}",
-                     doc_id, kb_id, doc.doc_name, kb.kb_type, sidecar)
+            mode = _doc_mode(options, doc)
+            log.info("开始文档解析: doc={} kb={} name={} type={} sidecar={} mode={}",
+                     doc_id, kb_id, doc.doc_name, kb.kb_type, sidecar, mode)
 
             # ---------- 阶段 1：取原件 ----------
             await RagTaskService.transition(
@@ -105,7 +108,14 @@ class RagParseService:
             engine, parse_config = settings.normalize_parse_config(
                 kb.kb_type, kb.parser_engine, kb.parse_config)
             chunk_config = settings.normalize_chunk_config(kb.chunk_config)
-            raw = await _download(doc.file_path)
+            # mode=file 按对象名从公共存储下载；mode=url 直接 GET 外部 URL 取字节（原件不进存储）
+            if mode == RC.DOC_MODE_URL:
+                raw = await _fetch_url(doc.file_path)
+                if int(doc.file_size or 0) != len(raw):
+                    # 建行时拿不到字节数（还没 GET），取回后把真实大小补进文档行
+                    await _save_doc_meta(doc_id, file_size=len(raw))
+            else:
+                raw = await _download(doc.file_path)
             # doc 型库也收图片/音频/视频：这类文件抽不出文字，由解析配置里的模型先转写
             media_kind = RC.media_kind_of_ext(doc.file_ext or "")
             log.info("阶段[取原件]完成: doc={} 字节={} 媒体={}",
@@ -364,13 +374,21 @@ class RagParseService:
                 if ids:
                     # 增量同步要能算「文本变了」的那几条：按库上的向量模型取配置，
                     # 删文档一般只有回收没有新增（向量模型的调用一次也不发）
+                    # 实体类型集也要跟着库走：投影里的 type 与图谱写入用的是同一份
+                    # entity_type_of，自定义类型不在投影层被折回系统默认的「其他」。
                     embed_id = 0
+                    graph_cfg = None
                     async with mysql_client.get_session() as session:
-                        embed_id = int((await session.execute(
-                            select(KnowledgeBase.embedding_model_id)
+                        row = (await session.execute(
+                            select(KnowledgeBase.embedding_model_id, KnowledgeBase.graph_config)
                             .where(KnowledgeBase.kb_id == int(kb_id))
-                        )).scalar_one_or_none() or 0)
-                    await kg_vector.sync_kb_vectors(kb_id, embed_model_id=embed_id)
+                        )).one_or_none()
+                        if row is not None:
+                            embed_id = int(row[0] or 0)
+                            graph_cfg = row[1]
+                    allowed_types = settings.graph_extract_types(graph_cfg)[0]
+                    await kg_vector.sync_kb_vectors(kb_id, embed_model_id=embed_id,
+                                                    allowed_types=allowed_types)
                 else:
                     graph_count += await kg_vector.forget_kb(kb_id)
             except Exception as e:  # noqa: BLE001
@@ -470,11 +488,17 @@ async def _public_url(name: str) -> str:
 
     媒体理解与多模态向量都要求厂商端点能自己拉到文件：OSS 给预签名地址；
     本地后端必须有 storage.public_base，否则拿不到 URL（这里给出可执行的提示）。
+
+    已是完整 URL 的原样透出：url 模式的原件、历史数据里直接落库的签名地址都是本就可访问
+    的外链，递进存储签名会被 check_name 拒掉（含冒号）。
     """
-    if not name:
+    value = str(name or "").strip()
+    if not value:
         raise ValueError("文档缺少存储路径")
+    if "://" in value:
+        return value
     try:
-        url, _expires = await get_storage().public_url(name)
+        url, _expires = await get_storage().public_url(value)
     except ValueError as e:
         raise ValueError(f"取不到匿名访问地址：{e}（本地后端需配置 storage.public_base，"
                          f"或改用 OSS 后端）") from e
@@ -514,6 +538,49 @@ def _sidecar_mode(options: Optional[dict]) -> str:
     """
     mode = str((options or {}).get("sidecar") or "").strip().lower()
     return mode if mode in RC.RAG_SIDECAR_MODES else RC.RAG_SIDECAR_AUTO
+
+
+def _doc_mode(options: Optional[dict], doc: Document) -> str:
+    """取原件的方式：优先看任务选项里的 mode，其次看文档行持久化的 source_mode，都没有回 file。
+
+    retry/build_vectors 这些重入队路径会带着 mode 走，但仍以行上的 source_mode 为兜底：
+    万一某个旧任务没带 mode，按行本身存的模式取文件才不会把 url 文档当对象名去下载。
+    """
+    mode = str((options or {}).get("mode") or "").strip().lower()
+    if mode in RC.DOC_MODES_ALL:
+        return mode
+    persisted = str(getattr(doc, "source_mode", "") or "").strip().lower()
+    return persisted if persisted in RC.DOC_MODES_ALL else RC.DOC_MODE_FILE
+
+
+async def _fetch_url(url: str) -> bytes:
+    """按 URL 直接 GET 取字节（mode=url 的取原件入口，走 worker 已初始化的共享 httpx 连接池）。
+
+    与 _download 同位：都是「拿到原件字节」，只是来源从存储对象换成了外部可访问 URL。
+    跟重定向（签名/CDN 直链常 302）、拉回后按 MAX_FILE_SIZE 兜底；非 2xx / 空体都翻成可读报错。
+    """
+    value = str(url or "").strip()
+    if not value:
+        raise ValueError("文档缺少原件 URL，无法解析")
+    if "://" not in value:
+        raise ValueError(f"原件不是可下载的 URL：{value[:120]}")
+    client = httpx_pool.client
+    if client is None:
+        # 正常由 worker bootstrap 已 init；不在 API 进程里跑解析，但补一道兜底防手测调用
+        httpx_pool.init()
+        client = httpx_pool.client
+    try:
+        resp = await client.get(value, follow_redirects=True)
+    except Exception as e:  # noqa: BLE001  网络异常翻成页面可读的失败原因
+        raise ValueError(f"下载 URL 原件失败：{str(e)[:150]}") from e
+    if resp.status_code >= 400:
+        raise ValueError(f"下载 URL 原件失败：HTTP {resp.status_code}")
+    data = resp.content
+    if not data:
+        raise ValueError("URL 指向的文件内容为空")
+    if len(data) > MAX_FILE_SIZE:
+        raise ValueError(f"URL 指向的文件超过单文件上限 {MAX_FILE_SIZE // 1024 // 1024}MB")
+    return data
 
 
 async def _parse_or_reuse(doc: Document, kb: KnowledgeBase, raw: bytes, *,
@@ -1158,8 +1225,11 @@ async def _collect_objects(kb_id: int, doc_ids: Sequence[int]) -> tuple[list[str
             .where(*conds))).all()
         for doc_id, file_path, sidecar_path, file_ext, media_type in rows:
             targets.append(int(doc_id))
-            if file_path:
-                names.append(file_path)
+            ref = str(file_path or "")
+            # url 模式的 file_path 是外部 URL、不是本存储的对象，递进删除会被当成删不掉的垃圾报一轮
+            if ref:
+                if "://" not in ref:
+                    names.append(ref)
             else:
                 names.append(obj_raw_name(kb_id, doc_id, file_ext or "bin"))
             if sidecar_path:

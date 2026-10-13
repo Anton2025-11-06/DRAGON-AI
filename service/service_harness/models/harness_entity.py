@@ -2,8 +2,9 @@
 """深度探索 harness 智能体 ORM 实体（对齐 sql/v2_init.sql PART 7）。
 
 设计要点（与 tb_model_chat_* 同款范式）：
-- 会话行持挂载快照（mounts JSON）与模型授权（model_apply_id），发消息时以此
-  组装 toolkit；执行侧（arq worker）另有 ACL 二次校验，快照不是信任边界。
+- 会话行只持标题/状态（用户与归档），不绑模型与挂载：同一会话里用户可随时
+  切换模型与工具，配置随每一轮消息落库（见 HarnessMessage），执行侧（arq worker）
+  另有 ACL 二次校验，消息上的快照不是信任边界。
 - 消息按轮（turn）组织：一轮对话 = USER 行 + ASSISTANT 行同 turn_id；turn_id
   同时是 arq job_id 与事件频道后缀，幂等投递、发布订阅、SSE 回放共用这一个键。
 - 运行态（AgentState 记忆窗口/HITL 待答上下文）在 Redis（agentscope
@@ -37,11 +38,6 @@ class HarnessSession(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="所属用户")
     title: Mapped[str] = mapped_column(String(128), nullable=False, default="新会话", comment="会话标题")
-    # 授权记录 apply_id（模型广场审批通过后签发，模型密钥从 tb_model_apply 取）
-    model_apply_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="授权记录 apply_id")
-    model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, comment="模型标识快照")
-    # 挂载快照 {kbIds:[], mcpIds:[], toolIds:[], skillIds:[]}（展示用；执行侧另有 ACL 校验）
-    mounts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="挂载快照")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=SESSION_ACTIVE,
                                         comment="状态 ACTIVE/ARCHIVED")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -67,4 +63,7 @@ class HarnessMessage(Base):
                                         comment="轮次状态 RUNNING/COMPLETED/FAILED/INTERRUPTED")
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="失败原因")
     model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, comment="本轮模型标识")
+    # 本轮模型与挂载快照（模型/工具每轮可切换，随消息行落库；worker 据此按 model_id 取配置、组 toolkit）
+    model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="本轮模型 id")
+    mounts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="本轮挂载快照")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
