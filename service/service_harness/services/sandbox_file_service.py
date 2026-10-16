@@ -45,6 +45,12 @@ UPLOAD_MAX = 20 * 1024 * 1024       # 上传上限（分块传输，超过明显
 DOWNLOAD_MAX = 100 * 1024 * 1024     # 下载上限（单次 base64 回传）
 _UPLOAD_CHUNK = 64 * 1024           # 单条命令携带的 base64 字符数（< 128KiB）
 
+# 工作区绝对根目录（OpenSandbox 镜像契约，沙箱内固定为 /workspace）。
+# 历史上曾试过读 workspace.workdir，但那个属性有时是宿主机路径、有时直接读不到，
+# 一旦与沙箱内实际目录对不上，命令里的 `cd <workdir>` 会静默失败、后续 python 无输出（
+# 曾表现为 list_dir 返 “无输出”），直接把这里锁为固定常量最稳。
+WORKSPACE_ROOT = "/workspace"
+
 
 # ==================== workspace 连接 ====================
 
@@ -66,18 +72,21 @@ async def _sandbox_entry(user_id: int, session_id=None):
 
     async with workspace_scope({"user_id": user_id}, session_id) as workspace:
         backend = workspace.get_backend()
-        workdir = str(getattr(workspace, "workdir", "") or "")
+        raw_workdir = str(getattr(workspace, "workdir", "") or "")
+        # 锁定 WORKSPACE_ROOT，不再拿 workspace.workdir 当错-与前端契约对齐；
+        # 两者不一致时只当情报留痕，不作为错误。
+        if raw_workdir and raw_workdir.rstrip("/") != WORKSPACE_ROOT:
+            log.warning(
+                "harness sandbox: workspace.workdir={} 与固定契约 {} 不一致，仍用 {}",
+                raw_workdir, WORKSPACE_ROOT, WORKSPACE_ROOT)
         # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
         # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
         ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
-        if not workdir:
-            raise HarnessSandboxError(
-                f"沙箱 workdir 为空，无法执行文件操作（workspace_id={ws_id}）")
         yield {
             "workspace_id": ws_id,
             "workspace": workspace,
             "bash": Bash(backend=backend),
-            "workdir": workdir,
+            "workdir": WORKSPACE_ROOT,
         }
 
 
@@ -116,14 +125,27 @@ def _chunk_text(chunk) -> str:
 
 
 def _safe_rel(path: str) -> str:
-    """前端路径 → workdir 相对路径；逃逸（../、绝对路径、反斜杠）即拒。"""
-    rel = (path or "").strip().replace("\\", "/").strip("/")
+    """前端路径 → workdir 相对路径；兼容两种写法，逃逸即拒。
+
+    - 新式绝对：以 WORKSPACE_ROOT (/workspace) 为前缀，例 /workspace 或 /workspace/sub。
+      前端面包屑、上传、下载都按这一支传。
+    - 旧式相对：''/'sub'/'sub/file'，直接当 workdir 下相对。
+    带开斜杠、但不在 /workspace 下的（如 /etc/passwd）一律拒 为“非法路径”；相对写法
+    里的 ../ 同样拒。
+    """
+    raw = (path or "").strip().replace("\\", "/")
+    if raw.startswith("/"):
+        if raw == WORKSPACE_ROOT or raw.startswith(WORKSPACE_ROOT + "/"):
+            raw = raw[len(WORKSPACE_ROOT):]
+        else:
+            raise HarnessSandboxError("非法路径")
+    rel = raw.strip("/")
     if not rel:
         return ""
     norm = posixpath.normpath(rel)
     if norm in (".", ""):
         return ""
-    if norm == ".." or norm.startswith("../") or norm.startswith("/"):
+    if norm == ".." or norm.startswith("../"):
         raise HarnessSandboxError("非法路径")
     return norm
 
@@ -204,10 +226,15 @@ async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
             raise HarnessSandboxError("沙箱目录读取失败") from None
         if isinstance(items, dict) and items.get("error") == "not_dir":
             raise HarnessSandboxError("目录不存在")
+        # 前端面包屑统一按工作区绝对路径展示，这里把 rel 拼回 /workspace 前缀；
+        # 到根时 parent_path 也指 /workspace 自身（前端自己会按 atRoot 判断是否 disable 回退）。
+        cur_abs = WORKSPACE_ROOT if not rel else f"{WORKSPACE_ROOT}/{rel}"
+        parent_rel = posixpath.dirname(rel)
+        parent_abs = WORKSPACE_ROOT if not parent_rel else f"{WORKSPACE_ROOT}/{parent_rel}"
         return {
             "workspace": entry["workspace_id"],
-            "current_path": rel,
-            "parent_path": posixpath.dirname(rel),
+            "current_path": cur_abs,
+            "parent_path": parent_abs,
             "items": items,
         }
 

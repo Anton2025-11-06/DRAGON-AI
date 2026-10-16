@@ -105,7 +105,9 @@ export default defineComponent({
 
     // ==================== 沙箱 ====================
     const sandboxLoading = ref(false);
-    const currentPath = ref('');
+    // 工作区绝对根：与后端 WORKSPACE_ROOT 对齐；前端所有路径都以此开头，避免“无 path”传参。
+    const WORKSPACE_ROOT = '/workspace';
+    const currentPath = ref(WORKSPACE_ROOT);
     const sandboxItems = ref<api.SandboxItem[]>([]);
     const workspace = ref('');
     const uploading = ref(false);
@@ -566,7 +568,7 @@ export default defineComponent({
       sandboxLoading.value = true;
       try {
         const res = await api.SandboxFiles(dir);
-        currentPath.value = res.current_path || '';
+        currentPath.value = res.current_path || WORKSPACE_ROOT;
         workspace.value = res.workspace || '';
         sandboxItems.value = res.items || [];
       } catch {
@@ -576,21 +578,32 @@ export default defineComponent({
       }
     }
 
+    /** 面包屑非根段：剥掉首段 workspace（根由「工作区」面包屑单独代表），逐段带绝对路径 */
+    const subSegments = computed(() => {
+      const parts = currentPath.value.split('/').filter(Boolean);
+      const body = parts[0] === 'workspace' ? parts.slice(1) : parts;
+      return body.map((part, i) => ({
+        part,
+        path: `${WORKSPACE_ROOT}/${body.slice(0, i + 1).join('/')}`,
+      }));
+    });
+
+    /** 已在工作区根时禁用回退 */
+    const atWorkspaceRoot = computed(() => currentPath.value === WORKSPACE_ROOT);
+
     function goBack() {
+      if (atWorkspaceRoot.value) return;
       const parts = currentPath.value.split('/').filter(Boolean);
       parts.pop();
-      loadSandboxFiles(parts.join('/'));
+      loadSandboxFiles(`/${parts.join('/')}`);
     }
 
     function enterDir(name: string) {
-      const next = currentPath.value ? `${currentPath.value}/${name}` : name;
-      loadSandboxFiles(next);
+      loadSandboxFiles(`${currentPath.value || WORKSPACE_ROOT}/${name}`);
     }
 
     async function openFile(item: api.SandboxItem) {
-      const path = currentPath.value
-        ? `${currentPath.value}/${item.name}`
-        : item.name;
+      const path = `${currentPath.value || WORKSPACE_ROOT}/${item.name}`;
       try {
         const res = await api.SandboxFile(path);
         fileData.value = res;
@@ -608,9 +621,7 @@ export default defineComponent({
 
     /** 下载（文件或文件夹），fetch blob 带 token */
     async function downloadItem(item: api.SandboxItem) {
-      const path = currentPath.value
-        ? `${currentPath.value}/${item.name}`
-        : item.name;
+      const path = `${currentPath.value || WORKSPACE_ROOT}/${item.name}`;
       try {
         const traceId = getTraceId();
         const resp = await fetch(api.SandboxDownloadUrl(path), {
@@ -644,7 +655,10 @@ export default defineComponent({
     async function uploadFile(file: File) {
       uploading.value = true;
       try {
-        const res = await api.SandboxUpload(currentPath.value, file);
+        const res = await api.SandboxUpload(
+          currentPath.value || WORKSPACE_ROOT,
+          file,
+        );
         message.success(`文件 ${res.name} 上传成功`);
         loadSandboxFiles();
       } catch {
@@ -654,11 +668,7 @@ export default defineComponent({
       }
     }
 
-    function pathBreadcrumbClick(part: string, index: number) {
-      const parts = currentPath.value.split('/').filter(Boolean);
-      loadSandboxFiles(parts.slice(0, index + 1).join('/'));
-      void part;
-    }
+    // pathBreadcrumbClick 已删：面包屑非根段改由 subSegments 直接递对应的绝对 path 给 loadSandboxFiles。
 
     return {
       accessStore,
@@ -706,7 +716,9 @@ export default defineComponent({
       uploading,
       fileVisible,
       fileData,
-      pathBreadcrumbClick,
+      subSegments,
+      atWorkspaceRoot,
+      WORKSPACE_ROOT,
     };
   },
 });
@@ -920,7 +932,7 @@ export default defineComponent({
         </span>
         <a-space>
           <a-tooltip title="回退到上一级">
-            <a-button size="small" :disabled="!currentPath" @click="goBack">
+            <a-button size="small" :disabled="atWorkspaceRoot" @click="goBack">
               <template #icon><ArrowLeftOutlined /></template>
             </a-button>
           </a-tooltip>
@@ -941,14 +953,11 @@ export default defineComponent({
       <!-- 路径面包屑 -->
       <a-breadcrumb class="hermes-path">
         <a-breadcrumb-item>
-          <a class="hermes-path-item" @click="loadSandboxFiles('')">工作区</a>
+          <a class="hermes-path-item" @click="loadSandboxFiles(WORKSPACE_ROOT)">工作区</a>
         </a-breadcrumb-item>
-        <a-breadcrumb-item
-          v-for="(part, i) in currentPath.split('/').filter(Boolean)"
-          :key="i"
-        >
-          <a class="hermes-path-item" @click="pathBreadcrumbClick(part, i)">{{
-            part
+        <a-breadcrumb-item v-for="seg in subSegments" :key="seg.path">
+          <a class="hermes-path-item" @click="loadSandboxFiles(seg.path)">{{
+            seg.part
           }}</a>
         </a-breadcrumb-item>
       </a-breadcrumb>

@@ -211,7 +211,7 @@ sandbox_router = APIRouter(prefix="/sandbox", tags=["深度探索-沙箱文件"]
 
 
 @sandbox_router.get("/files", summary="沙箱工作区目录列表")
-async def harness_sandbox_files(request: Request, path: str = "",
+async def harness_sandbox_files(request: Request, path: str = sandbox_file_service.WORKSPACE_ROOT,
                                session_id: str = ""):
     """每用户独立云沙箱（harness-{user_id}），文件跨会话保留。
 
@@ -228,7 +228,7 @@ async def harness_sandbox_files(request: Request, path: str = "",
 
 
 @sandbox_router.get("/file", summary="查看沙箱文件内容")
-async def harness_sandbox_file(request: Request, path: str = "",
+async def harness_sandbox_file(request: Request, path: str = sandbox_file_service.WORKSPACE_ROOT,
                               session_id: str = ""):
     """文本截断预览；二进制只回标记（内容走下载口）。"""
     login_user = await get_login_user(request)
@@ -240,7 +240,7 @@ async def harness_sandbox_file(request: Request, path: str = "",
 
 
 @sandbox_router.post("/upload", summary="上传文件到沙箱工作区")
-async def harness_sandbox_upload(request: Request, path: str = Form(""),
+async def harness_sandbox_upload(request: Request, path: str = Form(sandbox_file_service.WORKSPACE_ROOT),
                                  session_id: str = Form(""),
                                  file: UploadFile = File(...)):
     """base64 分块写入（跟 agentscope 快照同款通道，单次≤20MB）。"""
@@ -255,7 +255,7 @@ async def harness_sandbox_upload(request: Request, path: str = Form(""),
 
 
 @sandbox_router.get("/download", summary="下载沙箱文件或目录(zip)")
-async def harness_sandbox_download(request: Request, path: str = "",
+async def harness_sandbox_download(request: Request, path: str = sandbox_file_service.WORKSPACE_ROOT,
                                   session_id: str = ""):
     import urllib.parse
 
@@ -272,5 +272,3 @@ async def harness_sandbox_download(request: Request, path: str = "",
     )
 
 
-# （已移除「重置我的沙箱」口：后端 reset_workspace 从未实现，且改为 manager/会话级
-#  工作区后，用户级清空沙箱文件的语义与「文件跨会话保留」相互矛盾，前端入口一并下线）

@@ -184,8 +184,8 @@ export function HarnessSubscribeUrl(turnId: string) {
 
 // ==================== 沙箱文件（harness 口：每用户 OpenSandbox 工作区代理） ====================
 
-/** 沙箱工作区目录列表 */
-export function SandboxFiles(path = '') {
+/** 沙箱工作区目录列表（path 默认工作区根 /workspace）*/
+export function SandboxFiles(path = '/workspace') {
   return defHttp.get<SandboxFilesRep>('/api/harness/sandbox/files', { params: { path } });
 }
 
