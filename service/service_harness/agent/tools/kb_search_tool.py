@@ -49,6 +49,21 @@ class KbSearchParams(BaseModel):
         default=5, ge=1, le=20,
         description="最多返回几条切片，默认 5 条。",
     )
+    with_graph: bool = Field(
+        default=False,
+        description="是否开启知识图谱增强（默认关）。开启后除了关键词+向量一路，还会按每"
+                    "个知识库自己配置的图谱模型从问题里抽取实体和关系，再去知识图库按"
+                    "邻域展开召回相关知识，与关键词+向量的结果叠加一起返回。仅对已建过图谱"
+                    "的文档型知识库生效；需要关系类、跨实体问题才建议开启。",
+    )
+    graph_depth: int = Field(
+        default=2, ge=1, le=4,
+        description="图谱邻域从命中实体向外扩几跳，默认 2，最多 4（超过会按 4 取）。",
+    )
+    graph_scale: int = Field(
+        default=20, ge=1, le=100,
+        description="图谱实体/关系每一路的向量召回条数，默认 20，最多 100（超过会按 100 取）。",
+    )
 
 
 def _pick(row: dict, *keys: str) -> Any:
@@ -93,9 +108,9 @@ def make_kb_search_tool(login_user: dict, kb_ids: list[int],
         is_external_tool: bool = False
 
         async def check_permissions(
-            self,
-            tool_input: dict[str, Any],
-            context: PermissionContext,
+                self,
+                tool_input: dict[str, Any],
+                context: PermissionContext,
         ) -> PermissionDecision:
             return PermissionDecision(
                 behavior=PermissionBehavior.ALLOW,
@@ -103,10 +118,13 @@ def make_kb_search_tool(login_user: dict, kb_ids: list[int],
             )
 
         async def call(
-            self,
-            query: str,
-            kb_ids: list[int] | None = None,
-            top_k: int = 5,
+                self,
+                query: str,
+                kb_ids: list[int] | None = None,
+                top_k: int = 10,
+                with_graph: bool = False,
+                graph_depth: int = 2,
+                graph_scale: int = 20,
         ):
             if not backend_ready:
                 return ToolChunk(
@@ -120,23 +138,34 @@ def make_kb_search_tool(login_user: dict, kb_ids: list[int],
                     content=[TextBlock(text="当前会话没有挂载任何知识库。")],
                     state=ToolResultState.ERROR,
                 )
-            # 模型传入的库清单必须落在白名单内（不传 = 全部白名单）
+            # 模型传的 kb_ids 与白名单 allowed 取交集：无权的自动卸载。
+            # 不传 = 全部白名单；传了但全无权 = 一个都没得查，直接结束不往下走。
             wanted = [int(i) for i in (kb_ids or [])]
-            illegal = [i for i in wanted if i not in allowed]
-            if illegal:
+            dropped = [i for i in wanted if i not in allowed]
+            effective = [i for i in wanted if i in allowed]
+            if not effective:
                 return ToolChunk(
                     content=[TextBlock(
-                        text=f"以下知识库不在本轮挂载范围内: {illegal}"
-                             f"（可用: {allowed}）")],
+                        text=f"你要检索的知识库 {wanted} 都不在本轮挂载范围内（可用: {allowed}），"
+                             "本次未做检索；请只检索已挂载的知识库。")],
                     state=ToolResultState.ERROR,
                 )
-            effective = wanted or allowed
+            # 深度/规模在工具侧再夹一次，防止超大值把子图展开打爆
+            # （schema 已卡 le=4/le=100，这里是双保险）
+            g_depth = max(1, min(int(graph_depth or 2), 4))
+            g_scale = max(1, min(int(graph_scale or 20), 100))
             try:
                 from service.service_rag.services.retrieval_service import (
                     RagRetrievalService,
                 )
+                # graph_per_kb=True：按本轮要检索的每个库反查它自己的图谱抽取模型+实体范围分别抽词；
+                # 图谱那一路不依赖本轮 agent 用的 LLM，chat_model_id 不传（各库自己定）
+                # graph_source_chunks=True：把图谱命中实体回捞成 GRAPH 行，行上带实体摘要与
+                # 相关三元组（A -[关系]-> B），模型才能直接引用关系而不只是看到实体名
                 rows = await RagRetrievalService.search_rows(
-                    login_user, kb_ids=effective, query=query, top_k=top_k)
+                    login_user, kb_ids=effective, query=query, top_k=top_k,
+                    with_graph=bool(with_graph), graph_depth=g_depth,
+                    graph_scale=g_scale, graph_source_chunks=True, graph_per_kb=True)
             except Exception as e:  # noqa: BLE001  检索失败回给模型换路走，不炸整轮
                 return ToolChunk(
                     content=[TextBlock(
@@ -144,25 +173,51 @@ def make_kb_search_tool(login_user: dict, kb_ids: list[int],
                     state=ToolResultState.ERROR,
                 )
             if not rows:
-                return ToolChunk(
-                    content=[TextBlock(
-                        text=f"“{query}”没有检索到可用切片；"
-                             "可以换个说法，或确认知识库已完成解析。")],
-                )
-            lines = [f"“{query}”检索到 {len(rows)} 条切片："]
+                text = (f"“{query}”没有检索到可用切片；"
+                        "可以换个问法，或确认知识库已完成解析。")
+                if dropped:
+                    text = f"（{dropped} 不在本轮挂载范围，已跳过）{text}"
+                return ToolChunk(content=[TextBlock(text=text)])
+            lines = [f"“{query}”检索到 {len(rows)} 条切片"
+                     f"（图谱增强{'已开' if with_graph else '未开'}）："]
+            if dropped:
+                lines.append(f"（{dropped} 不在本轮挂载范围，已自动跳过；"
+                             f"可用: {allowed}）")
             hits = []
+            graph_hits = 0
             for index, row in enumerate(rows, start=1):
                 kb_id = int(_pick(row, "kbId", "kb_id") or 0)
                 kb_name = names.get(kb_id) or _pick(row, "kbName", "kb_name") or kb_id
                 doc_name = _pick(row, "docName", "doc_name") or "(未命名文档)"
                 score = float(_pick(row, "score") or 0.0)
+                recall = str(_pick(row, "recall") or "CHUNK").upper()
+                graph_entity = _pick(row, "graphEntity", "graph_entity")
+                graph_summary = _pick(row, "graphSummary", "graph_summary")
+                graph_triples = _pick(row, "graphTriples", "graph_triples") or []
                 content = str(_pick(row, "content") or "")
                 if len(content) > CONTENT_MAX_CHARS:
                     content = f"{content[:CONTENT_MAX_CHARS]}…"
-                lines.append(f"{index}. [{kb_name} / {doc_name} / 相似度 {score:.3f}]")
+                is_graph = recall == "GRAPH"
+                if is_graph:
+                    graph_hits += 1
+                tag = "（图谱命中" + (f"：{graph_entity}" if graph_entity else "") + "）" \
+                    if is_graph else ""
+                lines.append(f"{index}. [{kb_name} / {doc_name} / 相似度 {score:.3f}]{tag}")
                 lines.append(f"   {content}")
+                if is_graph and graph_summary:
+                    lines.append(f"   实体摘要（{graph_entity}）：{graph_summary}")
+                rel_text = "；".join(str(t) for t in graph_triples if t)
+                if is_graph and rel_text:
+                    lines.append(f"   相关关系：{rel_text}")
                 hits.append({"kb": str(kb_name), "doc": str(doc_name),
-                             "score": score, "content": content})
+                             "score": score, "content": content,
+                             "recall": "GRAPH" if is_graph else "CHUNK",
+                             "graph_entity": graph_entity,
+                             "graph_summary": graph_summary,
+                             "graph_triples": [str(t) for t in graph_triples if t]})
+            if with_graph and not graph_hits:
+                lines.append("（本轮图谱增强没有额外命中：这些库可能没建过图谱，"
+                             "或问句里没出现图谱存过的实体名）")
             return ToolChunk(
                 content=[TextBlock(text="\n".join(lines))],
                 metadata={"results": hits},

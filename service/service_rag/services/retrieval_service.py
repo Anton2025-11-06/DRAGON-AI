@@ -106,6 +106,9 @@ _META_OPS = ("EQUALS", "NOT_EQUALS", "CONTAINS", "IN", "NOT_IN",
 # 图谱那一路叠加进结果的行数上限（与 scale 取小：上下文堆太多等于没堆，模型只用得上开头那段）
 GRAPH_ROW_LIMIT = 10
 
+# 每条图谱命中行附带的三元组上限（一个实体可能连着十几条关系，正文只给最靠前的几条）
+GRAPH_TRIPLES_PER_ROW = 6
+
 # 召回来源标记（RetrieveHit.recall）：页面要能说清这一条是被哪一路拉上来的
 RECALL_CHUNK = "CHUNK"
 RECALL_GRAPH = "GRAPH"
@@ -230,7 +233,7 @@ class _SearchRunner:
                  with_graph: bool = True, metadata_filters: Optional[Sequence[dict]] = None,
                  total_limit: int = 0, rerank_model_id: int = 0, chat_model_id: int = 0,
                  graph_depth: Any = None, graph_scale: Any = None,
-                 graph_source_chunks: bool = False):
+                 graph_source_chunks: bool = False, graph_per_kb: bool = False):
         self.login_user = login_user or {}
         self.query = str(query or "").strip()
         self.image_url = str(image_url or "").strip()
@@ -250,6 +253,9 @@ class _SearchRunner:
         # 需求 9（选 A）：图谱那一路默认只出精炼的实体+关系，不反查原文 chunk
         # （反查会把上下文撑大、让模型失焦）；只有显式开了才顺 MENTIONED_IN 把切片叠成 GRAPH 行
         self.graph_source_chunks = bool(graph_source_chunks)
+        # 深度探索 kb_search：图谱抽词按「每个库自己的图谱模型+实体范围」分别抽（graph_per_kb）；
+        # 检索页那一档（默认）仍用页面选的单一对话模型整批共用，不启用按库抽取。
+        self.graph_per_kb = bool(graph_per_kb)
         self.total_limit = int(total_limit or 0)
         self.requested_ids = [int(i) for i in (kb_ids or []) if i]
 
@@ -380,6 +386,16 @@ class _SearchRunner:
         else:
             rerank_model, do_rerank = 0, False
 
+        # 图谱那一路（按库抽取时要用）：抽取模型 + 实体范围。
+        #   抽取模型：新库建库已强制“开图谱必选图谱模型”；存量老库回退库上的 chat_model_id，
+        #     两个都没有就是 0（recall 会把这一组的图谱那一路跳过）。
+        #   实体范围：开了自定义就用它（与建图同口径的 prompt_types 展示串），否则 None 走系统默认。
+        graph_entity_types: Optional[list[str]] = None
+        graph_extract_model = 0
+        if is_doc and kb.graph_enabled:
+            graph_extract_model = int(kb.extract_model_id or 0) or int(kb.chat_model_id or 0)
+            graph_entity_types = settings.graph_extract_types(kb.graph_config)[1]
+
         return {
             "kb_id": int(kb.kb_id), "kb_name": kb.kb_name, "kb_type": kb_type,
             "embed_model_id": int(kb.embedding_model_id or 0),
@@ -390,6 +406,9 @@ class _SearchRunner:
             "chunk_types": [self.chunk_type] if self.chunk_type else None,
             # 图谱增强只对 doc 型且真建过图的库生效（非 doc 型的支持列恒为 0）
             "graph_enabled": bool(is_doc and kb.graph_enabled),
+            # 按库抽取那一路的两个参数（graph_per_kb 时 _merge_graph 会用上；其余时候无害）
+            "extract_model_id": graph_extract_model,
+            "graph_entity_types": graph_entity_types,
             # 查询向量走哪条路：与解析侧的 embed_* 严格对应，选错等于换了个向量空间
             "kind": ("image" if self.image_url else
                      ("text_doc" if is_doc else "text_media")),
@@ -510,6 +529,8 @@ class _SearchRunner:
             "es_id": src.get("es_id"),
             "recall": RECALL_CHUNK,
             "graph_entity": None,
+            "graph_summary": None,
+            "graph_triples": [],
             "extra": extra if isinstance(extra, dict) else {},
         }
 
@@ -639,18 +660,28 @@ class _SearchRunner:
             self.warnings.append("开启图谱增强但这些知识库都没建过图谱（只有文档型知识库"
                                  "支持构建），本次只有关键词+向量一路")
             return rows
-        if not self.chat_model_id:
-            self.warnings.append("开启图谱增强必须选对话模型，本次未做图谱召回")
-            return rows
         if not self.query:
             self.warnings.append("图谱那一路要先从问句里抽实体和关系，以图搜图不做图谱增强")
             return rows
 
-        # 按向量模型分组：实体/关系投影与切片共用知识库自己的向量空间
-        buckets: dict[int, list[int]] = {}
-        for t in targets:
-            buckets.setdefault(int(t["embed_model_id"] or 0), []).append(int(t["kb_id"]))
-        payload = [{"kb_ids": ids, "embed_model_id": mid} for mid, ids in buckets.items()]
+        if self.graph_per_kb:
+            # 深度探索 kb_search：一个库一组，各用自己的图谱抽取模型+实体范围抽词。
+            # 抽取靠每个库建图时那套模型，不再要求本轮传对话模型；某库抽取模型缺失时
+            # 由 recall 跳过那一组（见 kg_search.recall 的 notes）。
+            payload = [{"kb_ids": [int(t["kb_id"])],
+                        "embed_model_id": int(t["embed_model_id"] or 0),
+                        "extract_model_id": int(t.get("extract_model_id") or 0),
+                        "entity_types": t.get("graph_entity_types")} for t in targets]
+        elif self.chat_model_id:
+            # 检索页：按向量模型分组（实体/关系投影与切片共用知识库自己的向量空间）；
+            # 抽词整批共用页面选的这一个对话模型。
+            buckets: dict[int, list[int]] = {}
+            for t in targets:
+                buckets.setdefault(int(t["embed_model_id"] or 0), []).append(int(t["kb_id"]))
+            payload = [{"kb_ids": ids, "embed_model_id": mid} for mid, ids in buckets.items()]
+        else:
+            self.warnings.append("开启图谱增强必须选对话模型，本次未做图谱召回")
+            return rows
         try:
             got = await kg_search.recall(payload, question=self.query,
                                          chat_model_id=self.chat_model_id,
@@ -682,6 +713,26 @@ class _SearchRunner:
             return rows
         allowed = {int(t["kb_id"]) for t in self.targets if t["graph_enabled"]}
         seen = {str(r.get("es_id") or "") for r in rows}
+        # 实体名 → 摘要 / 实体名 → 相关三元组：让图谱命中行在正文里能说清
+        # 「这个实体是什么、和谁有什么关系」，模型才能直接引用「A -[关系]-> B」
+        ent_summary: dict[str, str] = {}
+        for one_ent in got.get("entities") or []:
+            nm = str(one_ent.get("name") or "").strip()
+            sm = str(one_ent.get("summary") or "").strip()
+            if nm and sm:
+                ent_summary.setdefault(nm, sm)
+        ent_triples: dict[str, list[str]] = {}
+        for edge in got.get("edges") or []:
+            head = str(edge.get("head") or "").strip()
+            tail = str(edge.get("tail") or "").strip()
+            rel = str(edge.get("relation") or "").strip()
+            if not head or not tail:
+                continue
+            text = f"{head} -[{rel}]-> {tail}"
+            for nm in (head, tail):
+                bucket = ent_triples.setdefault(nm, [])
+                if text not in bucket:
+                    bucket.append(text)
         extra: list[dict] = []
         for hit in hits:
             es_id = str(hit.get("es_id") or "")
@@ -698,7 +749,10 @@ class _SearchRunner:
             one = by_es.get(es_id) or {}
             row = self._row(hit)
             row["recall"] = RECALL_GRAPH
-            row["graph_entity"] = str(one.get("entity") or "") or None
+            entity_name = str(one.get("entity") or "")
+            row["graph_entity"] = entity_name or None
+            row["graph_summary"] = ent_summary.get(entity_name) or None
+            row["graph_triples"] = ent_triples.get(entity_name, [])[:GRAPH_TRIPLES_PER_ROW]
             row["score"] = float(one.get("score") or 0.0)
             extra.append(row)
             seen.add(es_id)
@@ -830,13 +884,20 @@ class RagRetrievalService:
                           retrieval_mode: Optional[str] = None,
                           metadata_filters: Optional[Sequence[dict]] = None,
                           chunk_type: Optional[str] = None,
-                          rerank: Optional[bool] = None) -> list[dict]:
-        """平铺召回结果（工作流知识检索节点的 kb_searcher 用这一颗）。
+                          rerank: Optional[bool] = None,
+                          with_graph: bool = False, chat_model_id: int = 0,
+                          graph_depth: Any = None, graph_scale: Any = None,
+                          graph_source_chunks: bool = False,
+                          graph_per_kb: bool = False) -> list[dict]:
+        """平铺召回结果（工作流知识检索节点的 kb_searcher 与深度探索 kb_search 用这一颗）。
 
         与 ``search`` 的区别只在形态：节点要的是 ``[{content, score, ...}]``，
         并且它的 topK 语义是「总共返回几条」而不是「每个库返回几条」，
         所以这里带上 total_limit，其余鉴权、分组、融合逻辑与检索页完全一致
         ——两条路跑出不同的召回集，是知识库最难自证清白的问题。
+
+        图谱增强默认关（工作流/开放 API 保持原样）；kb_search 要增强时显式传
+        with_graph=True 且 graph_per_kb=True（按每个库自己的图谱模型+实体范围抽词）。
         """
         if not str(query or "").strip() and not str(image_url or "").strip():
             raise ValueError("检索词为空：请先让上游节点产出要检索的内容")
@@ -844,7 +905,10 @@ class RagRetrievalService:
             login_user, kb_ids=kb_ids, query=query, image_url=image_url,
             chunk_type=chunk_type, mode=retrieval_mode, top_k=top_k or 0,
             score_threshold=score_threshold, rerank=rerank,
-            metadata_filters=metadata_filters, total_limit=top_k or 0)
+            metadata_filters=metadata_filters, total_limit=top_k or 0,
+            with_graph=with_graph, chat_model_id=chat_model_id or 0,
+            graph_depth=graph_depth, graph_scale=graph_scale,
+            graph_source_chunks=graph_source_chunks, graph_per_kb=graph_per_kb)
         rows = await runner.execute()
         return [RagRetrievalService._hit(row).dump() for row in rows]
 
@@ -868,7 +932,9 @@ class RagRetrievalService:
             media_duration=int(row.get("media_duration") or 0),
             block_id=row.get("block_id"),
             recall=str(row.get("recall") or RECALL_CHUNK),
-            graph_entity=row.get("graph_entity"))
+            graph_entity=row.get("graph_entity"),
+            graph_summary=row.get("graph_summary"),
+            graph_triples=row.get("graph_triples") or [])
 
     @staticmethod
     def _resp(runner: _SearchRunner, rows: list[dict], req: RetrieveReq) -> dict:

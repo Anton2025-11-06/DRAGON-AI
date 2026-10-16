@@ -359,15 +359,24 @@ class RagModelService:
                 "开启多模态描述增强需要选择视频理解模型（给视频提描述）"
                 "或音频转文字模型（给音频转写文本），否则关键词一路只能按文件名命中")
 
-        # ---- 大模型：只有 doc 型支持图谱，抽取模型位缺省回退存量 chat_model_id ----
+        # ---- 大模型：只有 doc 型支持图谱，开图谱就必须显式选图谱抽取模型 ----
+        # 建库时把「图谱那一路用哪个模型抽实体/关系」定死，检索期才能按库反查到确定的模型；
+        # 不再允许用 chat_model_id 顶替（顶替会让“图谱模型”这一位形同虚设，
+        # 且存量老库才有的 chat 回退只留在未开图谱的兼容分支里）。
         chat: Optional[ModelConfig] = None
         if kb_type == RC.KB_TYPE_DOC:
-            extract_id = int(extract_model_id or 0) or int(chat_model_id or 0)
-            if enable_graph or extract_id:
-                extract = await RagModelService.require_config(extract_id, "图谱抽取模型")
+            if enable_graph:
+                if not int(extract_model_id or 0):
+                    raise ValueError("开启知识图谱必须选择图谱抽取模型（不能用对话模型代替），"
+                                     "否则构建与检索时都无法从文档/问句里抽取实体和关系")
+                extract = await RagModelService.require_config(extract_model_id, "图谱抽取模型")
                 RagModelService._ensure_extract_capable(extract)
-            if enable_graph and not extract:
-                raise ValueError("开启知识图谱需要选择图谱抽取模型，否则构建时会静默跳过")
+            else:
+                # 未开图谱但存量填了抽取/对话模型：仍按老口径验一次能力位（不强制）
+                extract_id = int(extract_model_id or 0) or int(chat_model_id or 0)
+                if extract_id:
+                    extract = await RagModelService.require_config(extract_id, "图谱抽取模型")
+                    RagModelService._ensure_extract_capable(extract)
 
         return {"kb_type": kb_type, "embed": embed, "rerank": rerank, "chat": chat,
                 "extract": extract, "image": image, "ocr": ocr,

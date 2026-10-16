@@ -33,8 +33,9 @@ from common.common_neo4j.client import FULLTEXT_INDEX, Neo4jError, neo4j_client
 
 # 抽取出的关系若没给实体类型，落到这个类型上（与 KG_ENTITY_TYPES 的最后一项同值）
 DEFAULT_ENTITY_TYPE = RC.KG_ENTITY_TYPES[-1]
-# 可视化深度上限：再多一跳节点数指数级膨胀，页面也画不下
-MAX_DEPTH = 3
+# 子图逐跳深度上限：再多一跳节点数指数级膨胀（页面画不下、检索邻域也炸）。
+# 与 rag_constant.KG_RETRIEVE_MAX_DEPTH 保持同值（全局单一上限）；检索与可视化都夹到这里。
+MAX_DEPTH = 4
 # 图谱不复制正文：切片正文与实体摘要同尺度截断，全文一律回 ES 取
 PREVIEW_CHARS = 500
 # 单实体别名上限：模型一发一大串，展示与检索都用不上这么多

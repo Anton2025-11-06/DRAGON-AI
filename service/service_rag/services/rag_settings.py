@@ -201,10 +201,17 @@ def kg_query_extract_prompt() -> str:
     return DEFAULT_KG_QUERY_EXTRACT_PROMPT
 
 
-def build_kg_query_extract_prompt(question: str) -> str:
-    """拼一次「从问句里抽实体/关系」的完整提示词。"""
+def build_kg_query_extract_prompt(question: str,
+                                  entity_types: Optional[Sequence[str]] = None) -> str:
+    """拼一次「从问句里抽实体/关系」的完整提示词。
+
+    entity_types：该知识库自定义的实体范围（已带描述的展示串，与建图侧 graph_extract_types
+    的 prompt_types 同一口径）；传进来就问句也只按这些类型抽词，与图里存过的实体名对齐；
+    留空回退系统默认 KG_ENTITY_TYPES（没开自定义的库走这一档）。
+    """
+    types = list(entity_types) if entity_types else list(RC.KG_ENTITY_TYPES)
     return (kg_query_extract_prompt()
-            .replace("{entity_types}", "、".join(RC.KG_ENTITY_TYPES))
+            .replace("{entity_types}", "、".join(types))
             .replace("{question}", str(question or "").strip()))
 
 

@@ -182,16 +182,25 @@ async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
     """目录列表（响应形状与旧沙箱口一致，前端零改动）。"""
     async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
         rel = _safe_rel(path)
+        # rel 为空即根目录：HP 传空串会让沙箱内 os.path.isdir('') 恒为 False 而误判
+        # 「目录不存在」，这里用 "." 让脚本以已 cd 进来的 workdir 为根来列。
         out = await _run(
             entry,
-            f"cd {_q(entry['workdir'])} && HP={_q(rel)} python3 -c {_q(_LS_SCRIPT)}",
+            f"cd {_q(entry['workdir'])} && HP={_q(rel or '.')} python3 -c {_q(_LS_SCRIPT)}",
         )
         import json
 
+        # 沙箱脚本恒有输出；空 stdout 说明执行通道没回料（reattach/传输抖动），
+        # 取最后一行非空内容再解析，失败时把原始输出与路径带进日志便于定位。
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        if not lines:
+            log.warning("harness sandbox list_dir 无输出: workspace={} path={}",
+                        entry.get("workspace_id"), rel)
+            raise HarnessSandboxError("沙箱目录读取失败：无输出") from None
         try:
-            items = json.loads(out.strip().splitlines()[-1])
-        except (ValueError, IndexError) as e:
-            log.info(e)
+            items = json.loads(lines[-1])
+        except ValueError as e:
+            log.warning("harness sandbox list_dir 解析失败: {} raw={}", e, out[:200])
             raise HarnessSandboxError("沙箱目录读取失败") from None
         if isinstance(items, dict) and items.get("error") == "not_dir":
             raise HarnessSandboxError("目录不存在")

@@ -34,7 +34,7 @@
   html {
     @apply size-full;
 
-    /* scrollbar-gutter: stable; */
+    /* 纵向滚动条槽位预留已改到下方「非 mac」块里按平台生效，避免 mac 侧留出空条 */
   }
 
   body {
@@ -96,6 +96,12 @@
 
   /* 只有非mac下才进行调整，mac下使用默认滚动条 */
   html:not([data-platform='macOs']) {
+    /* 文档滚动时，非 mac 的纵向滚动条会占用可用宽度：列表页内容高度卡在视口边界时，
+       hover 进出触发一次重排，就会形成「纵向条出现→宽度变小→横向条出现→高度变小→
+       纵向条消失→……」的正反馈，表现是页面右缘反复抽缩、底部横向条闪现。恒定预留
+       纵向槽位后，可用宽度不再随纵向条显隐变化，这个循环即被打断。 */
+    scrollbar-gutter: stable;
+
     ::-webkit-scrollbar {
       @apply h-[10px] w-[10px];
     }

@@ -22,7 +22,8 @@ Neo4j 侧只有实体全文索引、没有向量（见 kg_store 的建索引段�
 """
 from __future__ import annotations
 
-from typing import Any, Sequence
+import asyncio
+from typing import Any, Optional, Sequence
 
 from common.common_constants import rag_constant as RC
 from common.common_es import es_client, kg_source
@@ -71,8 +72,12 @@ def _clean_words(items: Any, *, limit: int) -> list[str]:
     return out
 
 
-async def extract_query_terms(chat_cfg: Any, question: str) -> dict[str, Any]:
+async def extract_query_terms(chat_cfg: Any, question: str,
+                              entity_types: Optional[Sequence[str]] = None) -> dict[str, Any]:
     """问句 → 查询词（entities / relations）。
+
+    entity_types：这个库的实体范围（自定义 prompt_types，与建图时同一口径）；传入则
+    只按这些类型从问句抽词，与图里存过的实体名对齐；留空按系统默认。
 
     整句兜底必须有：图谱里存的是抽取时见过的名词，用户问「这两家是什么关系」里
     一个实体名都没有，不兜底这一路就直接空转；兜底之后最差也退化成「按整句做语义匹配」，
@@ -82,7 +87,7 @@ async def extract_query_terms(chat_cfg: Any, question: str) -> dict[str, Any]:
     relations: list[str] = []
     try:
         data = await RagModelService.chat_json(
-            chat_cfg, settings.build_kg_query_extract_prompt(question))
+            chat_cfg, settings.build_kg_query_extract_prompt(question, entity_types=entity_types))
         if isinstance(data, dict):
             entities = _clean_words(data.get("entities"), limit=RC.KG_RETRIEVE_MAX_SCALE)
             relations = _clean_words(data.get("relations"), limit=RC.KG_RETRIEVE_MAX_SCALE)
@@ -160,20 +165,25 @@ def triple_of(relation: dict) -> str:
     return f"{head} -[{rel}]-> {tail}"
 
 
-async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
+async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 0,
                  depth: Any = None, scale: Any = None,
                  with_context: bool = True) -> dict:
     """图谱那一路的完整召回。
 
-    :param groups: ``[{"kb_ids": [...], "embed_model_id": int}]``——**必须按向量模型分组**：
-        实体/关系投影与切片共用知识库自己的向量空间，两个不同模型编出的向量不能交叉比距离。
+    :param groups: ``[{"kb_ids":[...], "embed_model_id":int,
+                        "extract_model_id":int(选填), "entity_types":[...](选填)}]``。
+        匹配仍**按向量模型分组**（实体/关系投影与切片共用知识库自己的向量空间，两个不同
+        模型编出的向量不能交叉比距离）；抽词模型与实体范围**按组各取**：组里带了
+        extract_model_id 就用它（每个知识库用自己建图时那套图谱模型+实体范围抽词，
+        这是深度探索 kb_search 的口径），没带就回退 chat_model_id（检索页整批共用一个
+        对话模型的老口径）；两者都没有的组直接跳过它的图谱那一路。
+    :param chat_model_id: 缺省抽词模型（组未带 extract_model_id 时才用它）；可为 0。
     :param with_context: 是否回捞原文切片（关掉只出实体与三元组，给「只想看有哪些实体」的场景用）。
     :return: {"entities","relations","edges","triples","sources","es_ids","terms","truncated","warnings"}
         ``sources`` 是切片那一路拿不到的东西——**图谱叠加到检索结果上的行**，
         形态 ``[{"es_id","kb_id","entity","score"}]``，score 取命中实体的向量分，
-        调用方据此把它和 BM25+kNN 的行一起排序（见 retrieval_service 的 _graph_recall）。
-        ``edges`` 是 ``triples`` 的结构化那份（``head/relation/tail/kb_id/score``）：页面要画
-        「实体—关系—实体」的图，拿拼好的字符串反解等于把展示格式变成隐性契约。
+        调用方据此把它和 BM25+kNN 的行一起排序（见 retrieval_service 的 _merge_graph）。
+        ``edges`` 是 ``triples`` 的结构化那份；``terms`` 汇总各组抽出的实体词/关系词并集。
     """
     depth = clamp_depth(depth)
     scale = clamp_scale(scale)
@@ -186,29 +196,97 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int,
     if not kb_ids or not str(question or "").strip():
         return empty
 
-    chat_cfg = await RagModelService.require_config(chat_model_id, "对话模型")
-    RagModelService._ensure_extract_capable(chat_cfg)
-    terms = await extract_query_terms(chat_cfg, question)
-
-    ent_hits: list[dict] = []
-    rel_hits: list[dict] = []
+    # 抽词按 (抽取模型, 实体范围) 去重：同配置的多个库共用一次大模型调用；
+    # 组与组之间互不依赖，且都是网络 I/O（抽取/向量化/ES kNN），所以分两阶段并发跑，
+    # 而不是把延迟乘以组数：先把去重后的抽词并发完，再把每组的向量匹配并发完。
+    unique_tkeys: list[tuple] = []
+    seen_tkey: set[tuple] = set()
+    # valid_groups 每项：(g_ids, tkey, embed_model_id)（每组都要单独匹配，只有抽词去重）
+    valid_groups: list[tuple] = []
     for group in groups or []:
         g_ids = [int(i) for i in (group.get("kb_ids") or []) if int(i or 0)]
         if not g_ids:
             continue
-        try:
-            embed_cfg = await RagModelService.require_config(
-                int(group.get("embed_model_id") or 0), "向量模型")
-        except ValueError as e:  # 这一组没有可用的向量模型，只跳过它的图谱匹配
-            notes.append(str(e)[:120])
+        ex_model = int(group.get("extract_model_id") or 0) or int(chat_model_id or 0)
+        if not ex_model:
+            notes.append(f"知识库 {g_ids} 未配置图谱抽取模型，跳过其图谱那一路")
             continue
-        ent_hits.extend(await _match(g_ids, terms["entities"],
-                                     kind=RC.KG_VECTOR_KIND_ENTITY,
-                                     embed_cfg=embed_cfg, scale=scale, notes=notes))
+        etypes = group.get("entity_types") or None
+        tkey = (ex_model, tuple(etypes) if etypes else None)
+        if tkey not in seen_tkey:
+            seen_tkey.add(tkey)
+            unique_tkeys.append(tkey)
+        valid_groups.append((g_ids, tkey, int(group.get("embed_model_id") or 0)))
+
+    async def _extract_one(tkey: tuple) -> Optional[dict]:
+        """一个 (抽取模型, 实体范围) 的抽词；失败由 gather 接成异常，只影响这一 key。"""
+        ex_model, etypes = tkey
+        chat_cfg = await RagModelService.require_config(ex_model, "图谱抽取模型")
+        RagModelService._ensure_extract_capable(chat_cfg)
+        return await extract_query_terms(
+            chat_cfg, question, entity_types=list(etypes) if etypes else None)
+
+    # 阶段 A：去重后的抽词并发（return_exceptions=True 让单 key 失败不连累其他 key）
+    extracted = await asyncio.gather(
+        *[_extract_one(tk) for tk in unique_tkeys], return_exceptions=True)
+    term_cache: dict[tuple, Optional[dict]] = {}
+    extract_err: dict[tuple, str] = {}
+    for tk, res in zip(unique_tkeys, extracted):
+        if isinstance(res, BaseException):
+            term_cache[tk] = None
+            extract_err[tk] = str(res)[:120]
+        else:
+            term_cache[tk] = res
+
+    async def _match_one(g_ids: list[int], tkey: tuple,
+                         embed_model_id: int) -> tuple:
+        """一组的向量匹配（实体+关系两路）；局部 notes 回主线程按组顺序合并。"""
+        local: list[str] = []
+        terms = term_cache.get(tkey)
+        if terms is None:
+            local.append(f"知识库 {g_ids} 问句抽词失败：{extract_err.get(tkey, '')}")
+            return local, terms, [], []
+        try:
+            embed_cfg = await RagModelService.require_config(embed_model_id, "向量模型")
+        except ValueError as e:  # 这一组没有可用的向量模型，只跳过它的图谱匹配
+            local.append(str(e)[:120])
+            return local, terms, [], []
+        e_hits = await _match(g_ids, terms["entities"],
+                              kind=RC.KG_VECTOR_KIND_ENTITY,
+                              embed_cfg=embed_cfg, scale=scale, notes=local)
+        r_hits = []
         if terms["relations"]:
-            rel_hits.extend(await _match(g_ids, terms["relations"],
-                                         kind=RC.KG_VECTOR_KIND_RELATION,
-                                         embed_cfg=embed_cfg, scale=scale, notes=notes))
+            r_hits = await _match(g_ids, terms["relations"],
+                                  kind=RC.KG_VECTOR_KIND_RELATION,
+                                  embed_cfg=embed_cfg, scale=scale, notes=local)
+        return local, terms, e_hits, r_hits
+
+    # 阶段 B：每组的向量匹配并发；匹配本身已按组隔离，并发只改变完成顺序不改变结果
+    matched = await asyncio.gather(*[_match_one(g, tk, em) for (g, tk, em) in valid_groups])
+
+    union_ent: list[str] = []
+    union_rel: list[str] = []
+    any_fallback = False
+    ent_hits: list[dict] = []
+    rel_hits: list[dict] = []
+    for local, terms, e_hits, r_hits in matched:
+        notes.extend(local)
+        if terms is None:
+            continue
+        any_fallback = any_fallback or bool(terms.get("fallback"))
+        for w in terms["entities"]:
+            if w not in union_ent:
+                union_ent.append(w)
+        for w in terms["relations"]:
+            if w not in union_rel:
+                union_rel.append(w)
+        ent_hits.extend(e_hits)
+        rel_hits.extend(r_hits)
+
+    # 汇总各组抽出的词（返回体与页面展示用；匹配已在上面按组做完）
+    terms = {"entities": union_ent[:RC.KG_RETRIEVE_MAX_SCALE],
+             "relations": union_rel[:RC.KG_RETRIEVE_MAX_SCALE],
+             "fallback": any_fallback}
 
     # 同名同类可能来自两个库/两次命中：按 (kb_id, type, name) 取最高分，顺序即相关度
     entities: dict[tuple, dict] = {}

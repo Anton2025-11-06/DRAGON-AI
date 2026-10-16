@@ -292,7 +292,8 @@ export interface KbSaveReq {
   kbType: KbType;
   name: string;
   description?: string;
-  embedModelId: number;
+  /** 向量模型：建库页未选时留空（undefined），Select 才能显示 placeholder 而不是字面量 0；提交前必填校验保证真正发出去的一定是正数 */
+  embedModelId?: number;
   /** 重排模型：配置面板已撤下（需求 5），检索页按本次请求选 */
   rerankModelId?: number;
   /** 对话模型：只剩存量透传（需求 4 已删音视频型的媒体理解模型位） */

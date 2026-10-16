@@ -411,9 +411,9 @@ class RetrieveReq(CamelModel):
     chat_model_id: Optional[int] = Field(
         None, description="图谱增强的问句抽词模型 / 流式问答的对话模型；开图谱增强时必填")
     graph_depth: Optional[int] = Field(
-        None, ge=1, le=3, description="图谱邻域从命中实体向外扩几跳（空=默认 2）")
+        None, ge=1, le=4, description="图谱邻域从命中实体向外扩几跳（空=默认 2，上限 4）")
     graph_scale: Optional[int] = Field(
-        None, ge=1, le=50, description="图谱实体/关系各一路的向量召回条数（空=默认 10）")
+        None, ge=1, le=100, description="图谱实体/关系各一路的向量召回条数（空=默认 10，上限 100）")
     graph_source_chunks: bool = Field(
         False, description="图谱那一路是否顺命中实体反查原文切片、把它们当 GRAPH 行叠进结果集。"
                            "默认关：图谱只贡献精炼的实体+关系（进向量召回与问答的「图谱关系」段），"
@@ -446,6 +446,11 @@ class RetrieveHit(CamelModel):
     recall: str = Field("CHUNK", description="这一条从哪一路来：CHUNK=关键词+向量，"
                                            "GRAPH=图谱增强叠加")
     graph_entity: Optional[str] = Field(None, description="图谱那一路把它带出来的实体名")
+    graph_summary: Optional[str] = Field(
+        None, description="图谱命中实体的一句话摘要（建图时模型写的实体画像；仅 GRAPH 行有）")
+    graph_triples: list[str] = Field(
+        default_factory=list,
+        description="与该实体相关的三元组「头 -[关系]-> 尾」（仅 GRAPH 行附带，供模型直接引用关系）")
 
 
 class RetrieveResp(CamelModel):
@@ -480,7 +485,7 @@ class GraphQueryReq(CamelModel):
     doc_ids: Optional[list[int]] = Field(None, description="限定文档，可看单文档子图")
     keyword: Optional[str] = Field(None, max_length=100, description="实体名模糊匹配/定位起点")
     entity_type: Optional[str] = Field(None, description="实体类型过滤，取值见 rag_constant.KG_ENTITY_TYPES")
-    depth: int = Field(1, ge=1, le=3, description="从起点外扩几跳")
+    depth: int = Field(1, ge=1, le=4, description="从起点外扩几跳（上限 4，与子图逐跳天花板一致）")
     limit: int = Field(0, ge=0, le=1000, description="返回节点上限，0=用配置默认值")
 
 
@@ -565,9 +570,9 @@ class EvalRunCreateReq(CamelModel):
     retrieval_mode: Optional[str] = Field(None, description="VECTOR/KEYWORD/HYBRID，空=库默认")
     with_graph: Optional[bool] = Field(False, description="是否开启图谱增强召回（仅 doc 型）")
     graph_depth: Optional[int] = Field(
-        None, ge=1, le=3, description="图谱增强邻域深度（空=默认 2；仅 with_graph 开启时生效）")
+        None, ge=1, le=4, description="图谱增强邻域深度（空=默认 2，上限 4；仅 with_graph 开启时生效）")
     graph_scale: Optional[int] = Field(
-        None, ge=1, le=50, description="图谱增强每一路的向量召回条数（空=默认 10）")
+        None, ge=1, le=100, description="图谱增强每一路的向量召回条数（空=默认 10，上限 100）")
     graph_source_chunks: Optional[bool] = Field(False, description="图谱一路是否回捞原文切片")
 
 

@@ -606,10 +606,13 @@ KG_FIELD_CREATE_TIME = "create_time"
 # 图谱增强检索的默认规模与硬上限（页面可传，越界按上限截）
 #   depth：从命中实体出发沿 RELATED_TO 扩散几跳（与 kg_store 子图逐跳上限一致，别超）
 #   scale：实体/关系每一路向量召回的条数（也是进上下文的实体数上限）
+# 上限抬到 4/100 是深度探索 kb_search 的要求：模型可在 tool_call 里传更大的值，
+# 工具与这两处常量共同把深度夹到 ≤4、规模夹到 ≤100，防止超大值把子图展开打爆。
+# 单一事实来源：检索页、评测页、可视化页共用同一上限（不再各自设 le）。
 KG_RETRIEVE_DEFAULT_DEPTH = 2
 KG_RETRIEVE_DEFAULT_SCALE = 10
-KG_RETRIEVE_MAX_DEPTH = 3
-KG_RETRIEVE_MAX_SCALE = 50
+KG_RETRIEVE_MAX_DEPTH = 4
+KG_RETRIEVE_MAX_SCALE = 100
 
 # 投影重建的规模与匹配阈值（写侧一个硬上限，读侧三个口径）
 #   SCAN_LIMIT：一次从 Neo4j 拉多少条源数据。投影是增量算差集的，

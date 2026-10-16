@@ -115,12 +115,14 @@ const form = reactive<KbSaveReq>({
   kbType: KB_TYPE_DOC,
   name: '',
   description: '',
-  embedModelId: 0,
+  // 建库页可见的三个模型选择初值用 undefined：Select 拿到 0 会把「0」当成已选中
+  // 的字面量渲染进框里（0 匹配不到任何 option），只有 undefined 才显示 placeholder。
+  embedModelId: undefined,
   // 重排、对话这两栏已从建库页撤掉：值只从详情原样带回来，避免保存一次就把存量模型清零
   rerankModelId: 0,
   chatModelId: 0,
-  extractModelId: 0,
-  imageModelId: 0,
+  extractModelId: undefined,
+  imageModelId: undefined,
   parserEngine: 'native',
   parseConfig: {},
   chunkConfig: {},
@@ -411,8 +413,9 @@ watch(
         embedModelId: detail.embedModelId,
         rerankModelId: detail.rerankModelId || 0,
         chatModelId: detail.chatModelId || 0,
-        extractModelId: detail.extractModelId || 0,
-        imageModelId: detail.imageModelId || 0,
+        // 图谱/图片理解未配置（存量值 0）时回显成空，否则 Select 会显示选不存在的 0
+        extractModelId: detail.extractModelId || undefined,
+        imageModelId: detail.imageModelId || undefined,
         parserEngine: detail.parserEngine || 'native',
         parseConfig: { ...detail.parseConfig },
         chunkConfig: { ...detail.chunkConfig },
@@ -446,11 +449,12 @@ watch(
         kbType: props.defaultKbType || KB_TYPE_DOC,
         name: '',
         description: '',
-        embedModelId: 0,
+        // 同 reactive 初值：可见的三个模型 Select 未选留 undefined，不显示字面量 0
+        embedModelId: undefined,
         rerankModelId: 0,
         chatModelId: 0,
-        extractModelId: 0,
-        imageModelId: 0,
+        extractModelId: undefined,
+        imageModelId: undefined,
         parserEngine: 'native',
         enableGraph: false,
       });
@@ -468,11 +472,12 @@ watch(
   () => form.kbType,
   async (t) => {
     if (isEdit.value) return; // 编辑态类型锁定，理论不会触发
-    form.embedModelId = 0;
+    // 跨类型清选择：可见的模型 Select 置 undefined（不是 0），避免切换类型后框里残留字面量 0
+    form.embedModelId = undefined;
     form.rerankModelId = 0;
     form.chatModelId = 0;
-    form.extractModelId = 0;
-    form.imageModelId = 0;
+    form.extractModelId = undefined;
+    form.imageModelId = undefined;
     if (t !== KB_TYPE_DOC) form.enableGraph = false;
     // 非文档型没有图谱，自定义实体范围跟着关掉（只藏 UI 不清值会留下脏配置）
     if (t !== KB_TYPE_DOC) {
