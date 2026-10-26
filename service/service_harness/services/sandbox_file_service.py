@@ -28,8 +28,10 @@ import posixpath
 import secrets
 import shlex
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 from common.common_log.log_init import log
+
 
 # ==================== 业务异常（router 转 400） ====================
 
@@ -40,10 +42,10 @@ class HarnessSandboxError(Exception):
 
 # ==================== 大小限制 ====================
 
-READ_TEXT_MAX = 200 * 1024          # 文本预览截断（字节）
-UPLOAD_MAX = 20 * 1024 * 1024       # 上传上限（分块传输，超过明显变慢）
-DOWNLOAD_MAX = 100 * 1024 * 1024     # 下载上限（单次 base64 回传）
-_UPLOAD_CHUNK = 64 * 1024           # 单条命令携带的 base64 字符数（< 128KiB）
+READ_TEXT_MAX = 200 * 1024  # 文本预览截断（字节）
+UPLOAD_MAX = 20 * 1024 * 1024  # 上传上限（分块传输，超过明显变慢）
+DOWNLOAD_MAX = 100 * 1024 * 1024  # 下载上限（单次 base64 回传）
+_UPLOAD_CHUNK = 64 * 1024  # 单条命令携带的 base64 字符数（< 128KiB）
 
 # 工作区绝对根目录（OpenSandbox 镜像契约，沙箱内固定为 /workspace）。
 # 历史上曾试过读 workspace.workdir，但那个属性有时是宿主机路径、有时直接读不到，
@@ -56,10 +58,10 @@ WORKSPACE_ROOT = "/workspace"
 
 
 @asynccontextmanager
-async def _sandbox_entry(user_id: int, session_id=None):
+async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
     """临时 attach 当前用户沙箱，包成一个 async with 作用域（与对话轮次同一套模型）。
 
-    走 workspace_factory.workspace_scope：进入时建临时 manager、assign_workspace_id
+    走 workspace_factory.workspace_scope：进入时获取 manager、assign_workspace_id
     （PER_USER 幂等，与 arq 轮次指向同一 workspace）+ get_workspace（已 initialize），
     退出自动 close_all 释放本轮沙箱。session_id 仅 manager 定位入参，PER_USER
     下不影响归属，文件浏览无会话上下文时留空按固定值处理。
@@ -350,6 +352,3 @@ async def download(login_user: dict, path: str, session_id=None) -> tuple[bytes,
         if marker == "F":
             return await _read_bytes(entry, rel)
         raise HarnessSandboxError("文件或目录不存在")
-
-
-

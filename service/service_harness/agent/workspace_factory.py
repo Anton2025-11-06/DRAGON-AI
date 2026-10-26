@@ -19,8 +19,10 @@ opensandbox 小节）；domain 未配置直接报「未部署」，不硬造默�
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator
 
 from agentscope.app.workspace_manager import IsolationPolicy
+from agentscope.workspace import OpenSandboxWorkspace
 from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
 
 from common.common_log.log_init import log
@@ -41,32 +43,34 @@ def workspace_id_of(user_id: int) -> str:
     return f"{WORKSPACE_PREFIX}-{int(user_id)}"
 
 
-def _new_manager():
-    """按当前 opensandbox 配置新建一个临时 OpenSandboxWorkspaceManager（不共享、不缓存）。
+manager = None
 
-    每轮/每请求各起一个临时 manager，不跨请求共享，就没有「上一轮 close 掉
-    backend、这一轮 get_workspace 命中僵尸对象」的跨调用缓存陷阱；跨调用的
-    沙箱复用交给 OpenSandbox 服务端（initialize 按 workspace_id metadata reattach+resume）。
+
+def _get_manager():
+    """按当前 opensandbox 配置初始化一个 OpenSandboxWorkspaceManager
     """
     opts = opensandbox_options()
     if not opts["domain"]:
         raise ValueError("OpenSandbox Server 地址未配置")
     from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager
     log.info(opts)
-    return OpenSandboxWorkspaceManager(
-        isolation=IsolationPolicy.PER_USER,
-        image=opts["image"] if opts["image"] else DEFAULT_IMAGE,
-        api_key=opts["api_key"],
-        domain=opts["domain"],
-        protocol=opts["protocol"],
-        request_timeout_seconds=opts["request_timeout_seconds"],
-        timeout_seconds=opts["timeout_seconds"],
-        resource=opts["resource"],
-        env=opts["env"],
-    )
+    global manager
+    if not manager:
+        manager = OpenSandboxWorkspaceManager(
+            isolation=IsolationPolicy.PER_USER,
+            image=opts["image"] if opts["image"] else DEFAULT_IMAGE,
+            api_key=opts["api_key"],
+            domain=opts["domain"],
+            protocol=opts["protocol"],
+            request_timeout_seconds=opts["request_timeout_seconds"],
+            timeout_seconds=opts["timeout_seconds"],
+            resource=opts["resource"],
+            env=opts["env"],
+        )
+    return manager
 
 
-async def _attach(manager, login_user: dict, session_id, skill_paths):
+async def _attach(manager, login_user: dict, session_id, skill_paths) -> OpenSandboxWorkspace:
     """在给定 manager 上取（并 initialize）当前用户的 workspace，按需种入技能。"""
     user_key = str(int(login_user.get("user_id") or 0))
     # PER_USER 隔离下 agent/session 只是 manager 定位入参，不参与 workspace 归属；
@@ -87,13 +91,13 @@ async def _attach(manager, login_user: dict, session_id, skill_paths):
 
 @asynccontextmanager
 async def workspace_scope(login_user: dict, session_id=None,
-                          skill_paths: list[str] | None = None):
+                          skill_paths: list[str] | None = None) -> AsyncGenerator[OpenSandboxWorkspace, Any]:
     """async with 一整个使用范围（对话轮次 / 沙箱文件浏览）：进入起临时 manager，退出自动释放。
 
     ``async with OpenSandboxWorkspaceManager`` 的 ``__aexit__`` 会 close_all
     （pause 本轮沙箱 + 停 sweeper），所以整轮/整请求跑完（含异常）不用手工 teardown。
     每次各起临时 manager、互不共享，退出只影响本次自己，不会 close 掉别的并发请求。
     """
-    manager = _new_manager()
+    manager = _get_manager()
     async with manager:
         yield await _attach(manager, login_user, session_id, skill_paths)

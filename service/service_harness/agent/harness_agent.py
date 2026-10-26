@@ -42,7 +42,7 @@ AGENT_NAME = "deep_explore"
 BASE_SYSTEM_PROMPT = (
     "你是「深度探索」智能体，运行在用户专属的云沙箱里，可以自主调用工具完成"
     "分析、探索与创作任务。\n"
-    "- 沙箱工作目录：{workdir}。所有文件读写与命令都在沙箱里执行，文件跨会话保留，"
+    "- 所有文件读写与命令都在沙箱里执行，文件跨会话保留，"
     "产出文件给用户时给出沙箱内路径。\n"
     "- 复杂任务先用 TaskCreate 拆解计划，边执行边用 TaskUpdate 更新状态。\n"
     "- 需要用户补充信息时用 AskUser 提问，不要自行猜测关键前提。\n"
@@ -141,7 +141,7 @@ def _mount_section(summary: dict | None) -> str:
 
 def _build_system_prompt_sync(workspace: Any, mount_summary: dict | None = None) -> str:
     """拼系统提示词的基础段 + 挂载能力说明（同步部分，不含沙箱自述）。"""
-    prompt = BASE_SYSTEM_PROMPT.format(workdir=str(getattr(workspace, "workdir", "/workspace")))
+    prompt = BASE_SYSTEM_PROMPT
     return prompt + _mount_section(mount_summary)
 
 

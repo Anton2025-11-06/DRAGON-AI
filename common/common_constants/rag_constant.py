@@ -659,7 +659,7 @@ OPEN_API_MAX_FILES = 100
 #   multimodal/image 向量 的 contents 配额  通义 multimodal-embedding-v1 图片一次只 1 张
 # 比上限大的批量会被分成几次请求，不会把整篇文档的解析打成 400
 EMBEDDING_BATCH_SIZE = 10
-EMBEDDING_CONCURRENCY = 2
+EMBEDDING_CONCURRENCY = 1
 
 # 侧车产物（解析结果 blocks.jsonl）的格式版本：结构变更即 +1，旧产物读到不匹配就重解析
 # 2：内嵌图片改为「一律传存储并回填正文地址」，并丢弃 <!-- image --> 这类注释占位——
