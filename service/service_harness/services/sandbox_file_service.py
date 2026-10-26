@@ -95,16 +95,25 @@ async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
 async def _run(entry: dict, command: str) -> str:
     """在沙箱里执行一条命令并取 stdout 文本（失败抛业务异常）。
 
-    Bash 工具失败（非零 exit / 内部异常）时 state 会带 ERROR，错误文本通常
-    在 chunk 里——统一包装成 HarnessSandboxError，router 侧转 400。
+    Bash.call 是 async generator function，await entry["bash"]() 返回的是
+    AsyncGenerator[ToolChunk, None] 对象本身，而非 ToolChunk——必须用
+    async for 消费才能拿到真正的 chunk；否则 getattr(chunk, "state") 永远为
+    None、_chunk_text 永远为空字符串（命令失败静默不报错、成功也没输出）。
+    Bash.call 每次只 yield 一个 chunk（is_last=True），取最后一个即可。
     """
     try:
-        chunk = await entry["bash"](command=command)
+        gen = await entry["bash"](command=command)  # AsyncGenerator[ToolChunk, None]
+        chunk = None
+        async for c in gen:
+            chunk = c  # 正常只进一次循环，保留兼容多 chunk 的写法
     except HarnessSandboxError:
         raise
     except Exception as e:  # noqa: BLE001  agentscope 内部异常 / 参数名不符
         log.warning("harness sandbox exec failed: {}", e)
         raise HarnessSandboxError(f"沙箱执行通道异常：{e}") from e
+    if chunk is None:
+        # generator 未 yield 任何 chunk（理论上不应出现，防御性处理）
+        return ""
     state = getattr(chunk, "state", None)
     state_name = str(getattr(state, "name", state) or "")
     text = _chunk_text(chunk)
@@ -206,11 +215,15 @@ async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
     """目录列表（响应形状与旧沙箱口一致，前端零改动）。"""
     async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
         rel = _safe_rel(path)
-        # rel 为空即根目录：HP 传空串会让沙箱内 os.path.isdir('') 恒为 False 而误判
-        # 「目录不存在」，这里用 "." 让脚本以已 cd 进来的 workdir 为根来列。
+        # 必须走 _LS_SCRIPT（python3 -c 输出 JSON），不能用原始 ls：
+        # 原始 ls 输出纯文件名，json.loads 解析必然失败。
+        # _safe_rel 同时防住路径穿越（ls {path} 旧写法直接拼接，有 shell 注入风险）。
+        # rel='' 时代表根目录 /workspace；os.path.isdir('') 恒 False 会误报 not_dir，
+        # 故 cd 进去后用 '.' 代替空串，让 _LS_SCRIPT 正确列出当前目录。
+        hp = rel or "."
         out = await _run(
             entry,
-            f"cd {_q(entry['workdir'])} && HP={_q(rel or '.')} python3 -c {_q(_LS_SCRIPT)}",
+            f"cd {_q(entry['workdir'])} && HP={_q(hp)} python3 -c {_q(_LS_SCRIPT)}",
         )
         import json
 
@@ -219,7 +232,7 @@ async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
         lines = [ln for ln in out.splitlines() if ln.strip()]
         if not lines:
             log.warning("harness sandbox list_dir 无输出: workspace={} path={}",
-                        entry.get("workspace_id"), rel)
+                        entry.get("workspace_id"), path)
             raise HarnessSandboxError("沙箱目录读取失败：无输出") from None
         try:
             items = json.loads(lines[-1])
