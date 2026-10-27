@@ -74,14 +74,7 @@ async def prepare_config():
         namespace_id=os.environ.get("nacos_namespace_id", Config.nacos_namespace_id),
         log_level=logging.NOTSET,
     )
-    try:
-        CustomRedisSettings.yml_harness = await nacos_client.get_config_content(ARQ_HARNESS)
-    except RuntimeError:
-        # arq_harness data_id 不存在：回落 arq_workflow 段（get_redis_setting 的
-        # harness 分支会拿 yml.redis），yml 已被填过（同进程双流水线）就不重读
-        log.warning("Nacos arq_harness 段未配置，harness worker 回落 arq_workflow 段")
-        if not CustomRedisSettings.yml:
-            CustomRedisSettings.yml = await nacos_client.get_config_content(ARQ_WORKFLOW)
+    CustomRedisSettings.yml_harness = await nacos_client.get_config_content(ARQ_HARNESS)
     await nacos_client.close()
 
 
@@ -164,8 +157,10 @@ async def bootstrap(ctx: dict) -> None:
         from common.common_neo4j import init_neo4j
         from common.common_storage import init_storage
 
+        harness_yml = await nacos_client.get_config_content(ARQ_HARNESS) or {}
+        await init_storage(harness_yml.get("storage", {}))
+
         rag_yml = await nacos_client.get_config_content(ARQ_RAGFLOW) or {}
-        await init_storage(rag_yml.get("storage", {}))
         await init_es(rag_yml.get("es"))
         await init_neo4j(rag_yml.get("neo4j"))
         from service.service_rag.services import rag_settings
