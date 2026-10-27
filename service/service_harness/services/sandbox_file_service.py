@@ -9,8 +9,11 @@
 - ``Bash(backend=...)`` 在沙箱里执行 shell——镜像契约必含 python3 / tar /
   base64（agentscope 文件工具自身就靠它们），元信息用 python3 单行输出
   JSON、路径经环境变量传入（杜绝 shell 注入）；
-- 上传/下载走 base64-over-exec（与 agentscope 快照机制同款通道），分块
-  绕开 Linux 单命令行参数 ~128KiB 的上限。
+- 上传走 base64-over-exec 分块（绕开 Linux 单命令行参数 ~128KiB 的上限）；
+  下载直接走 backend.read_file 取原始字节——Bash 工具回传会截断大段 stdout，
+  二进制的 base64 被切成非 4 倍长度就报 Incorrect padding（大文件必现），
+  read_file 是后端专用文件 API、不经 shell、整份返回；目录先在沙箱内 tar.gz
+  落临时文件再 read_file。
 
 workspace 生命周期（每请求临时 attach，作用域结束即释放）：
 - workspace 由 workspace_factory.workspace_scope 经临时 manager 分配：
@@ -44,7 +47,7 @@ class HarnessSandboxError(Exception):
 
 READ_TEXT_MAX = 200 * 1024  # 文本预览截断（字节）
 UPLOAD_MAX = 20 * 1024 * 1024  # 上传上限（分块传输，超过明显变慢）
-DOWNLOAD_MAX = 100 * 1024 * 1024  # 下载上限（单次 base64 回传）
+DOWNLOAD_MAX = 100 * 1024 * 1024  # 下载上限（backend.read_file 单次整份回传）
 _UPLOAD_CHUNK = 64 * 1024  # 单条命令携带的 base64 字符数（< 128KiB）
 
 # 工作区绝对根目录（OpenSandbox 镜像契约，沙箱内固定为 /workspace）。
@@ -87,6 +90,7 @@ async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
         yield {
             "workspace_id": ws_id,
             "workspace": workspace,
+            "backend": backend,
             "bash": Bash(backend=backend),
             "workdir": WORKSPACE_ROOT,
         }
@@ -312,32 +316,52 @@ async def _stat_size(entry: dict, rel: str) -> int:
 
 
 async def _read_bytes(entry: dict, rel: str) -> tuple[bytes, str, bool]:
-    """下载单文件：base64 回传（size 检查在先）。在已连接的 entry 作用域内调用。
+    """下载单文件：走 backend.read_file 直接取原始字节（size 检查在先）。
+
+    不经 Bash 工具回传 base64——那个通道会把大段 stdout 截断，二进制被切
+    成非 4 倍长度就报 base64 "Incorrect padding"（大文件必现）。read_file 是
+    后端专用文件 API，整份返回、不经 shell。在已连接的 entry 作用域内调用。
 
     返回 (字节, 文件名, 是否目录)——目录场景由 _pack_dir 走 zip。
     """
-    if await _stat_size(entry, rel) > DOWNLOAD_MAX:
+    size = await _stat_size(entry, rel)
+    if size > DOWNLOAD_MAX:
         raise HarnessSandboxError(f"文件超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
-    out = await _run(entry,
-                     f"cd {_q(entry['workdir'])} && base64 {_q(rel)} 2>/dev/null "
-                     f"|| echo ERR")
-    if not out or out.strip() == "ERR":
-        raise HarnessSandboxError("文件不存在")
-    data = base64.b64decode("".join(out.split()))
+    abs_path = entry["backend"].join_path(entry["workdir"], rel)
+    try:
+        data = await entry["backend"].read_file(abs_path)
+    except Exception as e:  # noqa: BLE001  read_file 文件缺失/后端异常
+        log.warning("harness sandbox read_file failed: path={} {}", abs_path, e)
+        raise HarnessSandboxError("文件不存在或读取失败") from e
     if not data:
         raise HarnessSandboxError("文件不存在或为空")
     return data, posixpath.basename(rel), False
 
 
 async def _pack_dir(entry: dict, rel: str) -> tuple[bytes, str, bool]:
-    """下载目录：tar.gz + base64 回传（响应头按 zip 呈现给浏览器）。在已连接 entry 内调用。"""
-    full = await _run(entry,
-                      f"cd {_q(entry['workdir'])} && tar cz {_q(rel)} 2>/dev/null "
-                      f"| base64")
-    body = "".join(full.split())
-    if not body:
+    """下载目录：沙箱内 tar.gz 落 /tmp 临时文件，再经 backend.read_file 取字节。
+
+    同样避开 Bash 回传 base64 的大 stdout 截断坑（见 _read_bytes）。响应头按
+    zip 呈现给浏览器。在已连接 entry 内调用。
+    """
+    backend = entry["backend"]
+    tmp = f"/tmp/harness-dl-{secrets.token_hex(8)}.tar.gz"
+    try:
+        await _run(entry,
+                   f"tar czf {_q(tmp)} -C {_q(entry['workdir'])} {_q(rel)} 2>/dev/null")
+        data = await backend.read_file(tmp)
+    except HarnessSandboxError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("harness sandbox pack dir failed: rel={} {}", rel, e)
+        raise HarnessSandboxError("目录不存在或打包失败") from e
+    finally:
+        try:
+            await backend.delete_path(tmp)
+        except Exception as e:  # noqa: BLE001
+            log.warning("harness sandbox temp cleanup failed: {}", e)
+    if not data:
         raise HarnessSandboxError("目录不存在或为空")
-    data = base64.b64decode(body)
     if len(data) > DOWNLOAD_MAX:
         raise HarnessSandboxError(f"目录超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
     return data, f"{posixpath.basename(rel)}.zip", True
