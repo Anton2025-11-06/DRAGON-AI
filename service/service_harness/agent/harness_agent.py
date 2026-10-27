@@ -51,7 +51,9 @@ BASE_SYSTEM_PROMPT = (
     "打算做 X」这种计划当成回复的结尾停下来等用户催「继续」。每一步要么当场发起"
     "工具调用去执行 X，要么（仅当任务已全部完成时）才给出最终结论；工具报错就换个"
     "方法接着做，中途不要停下来征求许可或等用户再说继续。\n"
-    "- 回答使用中文，结论先行；涉及数据与文件时给出可核对的来源。"
+    "- 回答使用中文，结论先行；涉及数据与文件时给出可核对的来源。\n"
+    "- 如果要安装pip依赖，请必须增加国内加速 -i https://pypi.tuna.tsinghua.edu.cn/simple  例如pip install -i https://pypi.tuna.tsinghua.edu.cn/simple uv \n"
+    "- python 环境有两个：/root/.agentscope/.venv/bin是沙箱专用，/usr/local/bin/python是系统专用"
 )
 
 

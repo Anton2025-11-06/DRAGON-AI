@@ -481,6 +481,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                                   mount_summary=mounted.summary)
         loop = asyncio.get_running_loop()
         next_check = loop.time() + INTERRUPT_CHECK_WINDOW_S
+        stream = None  # reply_stream 生成器引用：收尾显式 aclose，见 finally
         try:
             await _publish(turn_id, "turn.started", {})
             # M3 HITL 恢复：上轮挂起的待答（AskUser / 授权确认）由本轮用户
@@ -489,7 +490,8 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
             inputs = _hitl_resume_inputs(agent, snapshot["message"])
             if inputs is None:
                 inputs = UserMsg(name="user", content=snapshot["message"])
-            async for evt in agent.reply_stream(inputs):
+            stream = agent.reply_stream(inputs)
+            async for evt in stream:
                 if isinstance(evt, TextBlockDeltaEvent):
                     text_chunks.append(evt.delta)
                     await _publish(turn_id, EVT_TEXT_DELTA, {"content": evt.delta})
@@ -539,6 +541,20 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                     log.warning("harness interrupt close failed: turn={} {}",
                                 turn_id, e)
         finally:
+            # 显式关闭 reply_stream 生成器：break/return 退出 async for 时它仍
+            # 挂起，交给 GC 收尾会派生一个 athrow(GeneratorExit) 的孤儿 task，
+            # 其 ReadError/GeneratorExit 无人回收（日志里的 "Task exception was
+            # never retrieved / async generator ignored GeneratorExit"）。这里
+            # 自己收：取消语义透传，其余（含沙箱断流 ReadError、agentscope
+            # 生成器吞掉 GeneratorExit 的 RuntimeError）降级记 warning。
+            if stream is not None and hasattr(stream, "aclose"):
+                try:
+                    await stream.aclose()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    log.warning("harness reply_stream aclose failed: turn={} {}",
+                                turn_id, e)
             # state 永远写回：记忆窗口 / HITL 待答上下文 / 任务清单都在里面，
             # 失败一轮不能把之前的对话记忆丢掉（与 demo 主循环同款 finally）
             await storage.upsert_session(

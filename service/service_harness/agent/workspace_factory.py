@@ -18,6 +18,7 @@ opensandbox 小节）；domain 未配置直接报「未部署」，不硬造默�
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
@@ -85,13 +86,25 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> OpenSan
     # get_workspace 的 miss 路径 _build_and_start 内部已 initialize，返回的就是 live workspace
     workspace = await manager.get_workspace(
         user_key, AGENT_ID, session_key, workspace_id)
-    # 挂载技能：本地解压目录 → 沙箱 skills/（List_skills 侧自动可见，重复种入无害）
-    # add_skill 一次只收「单个技能目录」（内部直接 os.path.join(skill_path, "SKILL.md")，
-    # 传 list 会 TypeError: expected str, bytes or os.PathLike object, not list），须逐个种；
-    # 单个技能种入失败只跳过并记 warning，不炸整轮对话（同 mount_loader 静默跳过口径）。
+    # 挂载技能：本地解压目录 → 沙箱 ``skills/<agent_id>/`` 分区。
+    # add_skill 不带 agent_id 会落进 skills/default，而 build_toolkit 的
+    # list_skills(agent_id=AGENT_ID) 读的是 skills/harness_agent/——两套分区，
+    # 种进去的技能其实一直没生效；这里显式传 agent_id 对齐。
+    # add_skill 一次只收「单个技能目录」（内部直接 os.path.join(skill_path,
+    # "SKILL.md")，传 list 会 TypeError），须逐个种；
+    # 沙箱跨轮持久，故先删同名旧副本再种：替换过的 zip 能刷新，同时杜绝
+    # add_skill 报 "Skill directory already exists" 的噪声告警；
+    # 单个技能种入失败只跳过并记 warning，不炸整轮对话（同 mount_loader 口径）。
+    backend = workspace.get_backend()
+    skills_root = workspace._skills_dir  # noqa: SLF001  框架属性：{workdir}/skills
+    partition = backend.join_path(skills_root, AGENT_ID)
     for skill_path in skill_paths or []:
         try:
-            await workspace.add_skill(skill_path)
+            dir_name = os.path.basename(os.path.abspath(skill_path))
+            stale = backend.join_path(partition, dir_name)
+            if await backend.file_exists(stale):
+                await backend.delete_path(stale)
+            await workspace.add_skill(skill_path, agent_id=AGENT_ID)
         except Exception as e:  # noqa: BLE001  单技能失败不影响本轮其它能力
             log.warning("harness skill seed skipped: path={} {}", skill_path, e)
     workdir = str(getattr(workspace, "workdir", "") or "")

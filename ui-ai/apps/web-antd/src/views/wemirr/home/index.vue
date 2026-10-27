@@ -13,11 +13,14 @@ import { useAccessStore } from '@vben/stores';
 
 import {
   ArrowLeftOutlined,
+  BulbOutlined,
+  CheckCircleOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
   FileTextFilled,
   FolderFilled,
+  LoadingOutlined,
   MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -28,6 +31,12 @@ import { message } from 'ant-design-vue';
 
 import { getTraceId } from '#/api/request';
 import * as api from './api';
+
+/** 时间线片段：assistant 消息按到达顺序拆成思考/工具/文本三类块，各自可折叠 */
+type Segment =
+  | { kind: 'thinking'; id: string; text: string; active?: boolean }
+  | { kind: 'text'; id: string; text: string }
+  | { kind: 'tool'; id: string; tool: string; arguments: string; done: boolean };
 
 /** 对话条（前端渲染模型）：assistant 消息聚合思考流/工具轨迹/正文 */
 interface ChatMsg {
@@ -47,6 +56,8 @@ interface ChatMsg {
   answers?: Record<string, { other: string; selected: string[] }>;
   /** 该挂起表单是否已提交（提交后收起、防重复提交） */
   answered?: boolean;
+  /** 时间线片段（assistant 按到达顺序渲染；历史行由落库字段合成） */
+  segments?: Segment[];
 }
 
 /** 已挂载条目 */
@@ -60,11 +71,14 @@ export default defineComponent({
   name: 'HernesExplorerPage',
   components: {
     ArrowLeftOutlined,
+    BulbOutlined,
+    CheckCircleOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
     DeleteOutlined,
     FileTextFilled,
     FolderFilled,
+    LoadingOutlined,
     MoreOutlined,
     PlusOutlined,
     ReloadOutlined,
@@ -289,12 +303,11 @@ export default defineComponent({
             list.push({ role: 'user', content: row.content });
             continue;
           }
-          // 历史轮：正文/思考/轨迹都已落库，直接渲染
+          // 历史轮：落库正文/思考/轨迹合成时间线片段后渲染
           const msg: ChatMsg = {
             role: 'assistant',
             content: row.content,
-            thinking: row.thinking || undefined,
-            toolCalls: row.toolCalls || [],
+            segments: legacyToSegments(row),
           };
           if (row.status === 'RUNNING') {
             // 刷新撞上执行中：接回实时流续渲染（Redis 频道不回放，丢的只是刷新前帧）
@@ -463,6 +476,123 @@ export default defineComponent({
       msg.answers = draft;
     }
 
+    // ==================== 时间线片段（segments）====================
+    let segSeq = 0;
+    function nextSegId(): string {
+      segSeq += 1;
+      return `seg-${segSeq}`;
+    }
+
+    /** 收尾仍在「进行中」的思考段（遇新片段/终态时调用，停掉它的转圈） */
+    function settleThinking(msg: ChatMsg) {
+      for (const s of msg.segments || []) {
+        if (s.kind === 'thinking') s.active = false;
+      }
+    }
+
+    /** 思考增量：并入末尾思考段，否则收尾其它后新开一段 */
+    function appendThinking(msg: ChatMsg, delta: string) {
+      if (!msg.segments) msg.segments = [];
+      const last = msg.segments[msg.segments.length - 1];
+      if (last && last.kind === 'thinking') {
+        last.text += delta;
+        last.active = true;
+      } else {
+        settleThinking(msg);
+        msg.segments.push({
+          kind: 'thinking',
+          id: nextSegId(),
+          text: delta,
+          active: true,
+        });
+      }
+    }
+
+    /** 正文增量：并入末尾文本段，否则收尾思考后新开一段 */
+    function appendText(msg: ChatMsg, delta: string) {
+      if (!msg.segments) msg.segments = [];
+      const last = msg.segments[msg.segments.length - 1];
+      if (last && last.kind === 'text') {
+        last.text += delta;
+      } else {
+        settleThinking(msg);
+        msg.segments.push({ kind: 'text', id: nextSegId(), text: delta });
+      }
+    }
+
+    /** 工具开始：收尾思考，新开一个未完成（转圈）的工具段，id 用 toolCallId */
+    function startTool(msg: ChatMsg, tool: string, toolCallId?: string) {
+      if (!msg.segments) msg.segments = [];
+      settleThinking(msg);
+      msg.segments.push({
+        kind: 'tool',
+        id: toolCallId || nextSegId(),
+        tool,
+        arguments: '',
+        done: false,
+      });
+    }
+
+    /** 工具完成：优先按 toolCallId 命中，退回同名最近未完成段补入参置完成 */
+    function finishTool(
+      msg: ChatMsg,
+      tool: string,
+      argumentsText: string,
+      toolCallId?: string,
+    ) {
+      const segs = msg.segments || [];
+      let target = toolCallId
+        ? segs.find((s) => s.kind === 'tool' && s.id === toolCallId)
+        : undefined;
+      if (!target) {
+        for (let i = segs.length - 1; i >= 0; i -= 1) {
+          const s = segs[i];
+          if (s && s.kind === 'tool' && s.tool === tool && !s.done) {
+            target = s;
+            break;
+          }
+        }
+      }
+      if (target && target.kind === 'tool') {
+        target.arguments = argumentsText;
+        target.done = true;
+      } else {
+        segs.push({
+          kind: 'tool',
+          id: toolCallId || nextSegId(),
+          tool,
+          arguments: argumentsText,
+          done: true,
+        });
+      }
+    }
+
+    /** 由落库字段合成时间线（历史行近似时序：思考 → 各工具 → 正文） */
+    function legacyToSegments(row: api.HarnessMessage): Segment[] {
+      const segs: Segment[] = [];
+      if (row.thinking) {
+        segs.push({
+          kind: 'thinking',
+          id: nextSegId(),
+          text: row.thinking,
+          active: false,
+        });
+      }
+      for (const call of row.toolCalls || []) {
+        segs.push({
+          kind: 'tool',
+          id: call.toolCallId || nextSegId(),
+          tool: call.tool,
+          arguments: call.arguments || '',
+          done: true,
+        });
+      }
+      if (row.content) {
+        segs.push({ kind: 'text', id: nextSegId(), text: row.content });
+      }
+      return segs;
+    }
+
     /** 订阅本轮事件流（传 msg = 刷新恢复的执行中历史行，复用同一条气泡） */
     function subscribeTurn(turnId: string, msg?: ChatMsg) {
       closeStream();
@@ -473,8 +603,7 @@ export default defineComponent({
         msg || {
           role: 'assistant',
           content: '',
-          thinking: '',
-          toolCalls: [],
+          segments: [],
         },
       );
       if (!msg) {
@@ -511,42 +640,36 @@ export default defineComponent({
     function applyFrame(msg: ChatMsg, frame: api.HarnessFrame) {
       switch (frame.type) {
         case 'text.delta': {
-          msg.content += frame.content || '';
+          appendText(msg, frame.content || '');
           break;
         }
         case 'thinking.delta': {
-          msg.thinking = (msg.thinking || '') + (frame.content || '');
+          appendThinking(msg, frame.content || '');
           break;
         }
         case 'tool.started': {
-          msg.toolCalls = msg.toolCalls || [];
-          msg.toolCalls.push({
-            tool: frame.tool || '',
-            toolCallId: frame.toolCallId,
-            arguments: '',
-          });
+          startTool(msg, frame.tool || '', frame.toolCallId);
           break;
         }
         case 'tool.completed': {
-          const calls = msg.toolCalls || [];
-          // 从后往前找同名未闭合的调用补入参（工具名+空入参定位）
-          for (let i = calls.length - 1; i >= 0; i--) {
-            const call = calls[i];
-            if (call && call.tool === frame.tool && !call.arguments) {
-              call.arguments = frame.arguments || '';
-              break;
-            }
-          }
+          finishTool(
+            msg,
+            frame.tool || '',
+            frame.arguments || '',
+            frame.toolCallId,
+          );
           break;
         }
         case 'turn.completed': {
-          // 终态帧带落库全文：以库为准覆盖（流式拼接与落库的出入以权威结果修正）
-          if (frame.content) msg.content = frame.content;
+          // 终态：收尾仍在进行的思考段；正文已由 text.delta 落到时间线，
+          // 不再用整段 content 覆盖（会打乱与工具/思考交错的时序）
+          settleThinking(msg);
           msg.running = false;
           closeStream();
           break;
         }
         case 'turn.interrupted': {
+          settleThinking(msg);
           msg.running = false;
           // HITL 挂起时优先显示智能体的问题（reason 是「等待答复」占位，
           // 回放路径下 question 已拼进 reason）
@@ -566,6 +689,7 @@ export default defineComponent({
           break;
         }
         case 'turn.failed': {
+          settleThinking(msg);
           msg.running = false;
           msg.error = frame.error || '执行失败';
           closeStream();
@@ -892,31 +1016,53 @@ export default defineComponent({
           <div v-if="msg.role === 'assistant'" class="hermes-avatar ai">
             <RobotOutlined />
           </div>
-          <!-- assistant 消息复合体：思考流（折叠）→ 工具轨迹 → 正文 → 运行光标 → 异常提示 -->
+          <!-- assistant 消息：按到达时间序逐个渲染思考/工具/文本片段（对齐 workbuddy/deepseek 风格） -->
           <div v-if="msg.role === 'assistant'" class="hermes-body">
-            <details v-if="msg.thinking" class="hermes-thinking">
-              <summary>思考过程</summary>
-              <pre>{{ msg.thinking }}</pre>
-            </details>
+            <template v-for="seg in msg.segments" :key="seg.id">
+              <!-- 思考块：进行中转圈，结束可折叠；默认折叠摘要 -->
+              <details
+                v-if="seg.kind === 'thinking'"
+                class="hermes-seg hermes-thinking"
+              >
+                <summary class="hermes-seg-summary">
+                  <LoadingOutlined v-if="seg.active" spin />
+                  <BulbOutlined v-else />
+                  <span>{{ seg.active ? '思考中…' : '已完成思考' }}</span>
+                </summary>
+                <pre class="hermes-seg-body">{{ seg.text }}</pre>
+              </details>
+
+              <!-- 工具调用块：未完成转圈，完成打勾，入参折叠 -->
+              <details
+                v-else-if="seg.kind === 'tool'"
+                class="hermes-seg hermes-call"
+              >
+                <summary class="hermes-seg-summary">
+                  <LoadingOutlined v-if="!seg.done && msg.running" spin />
+                  <CheckCircleOutlined v-else class="hermes-seg-done" />
+                  <span>调用工具 · {{ seg.tool }}</span>
+                </summary>
+                <pre v-if="seg.arguments" class="hermes-seg-body">{{
+                  seg.arguments
+                }}</pre>
+              </details>
+
+              <!-- 正文块：按 markdown 直出（renderMarkdown 已转义 HTML，仅输出受控标签） -->
+              <!-- eslint-disable-next-line vue/no-v-html -->
+              <div
+                v-else-if="seg.kind === 'text'"
+                class="hermes-bubble"
+                v-html="renderMarkdown(seg.text)"
+              ></div>
+            </template>
+
+            <!-- 本轮在跑但尚无任何可见片段时，兜底一个“正在思考” -->
             <div
-              v-for="(call, ci) in msg.toolCalls || []"
-              :key="ci"
-              class="hermes-call"
+              v-if="msg.running && (msg.segments || []).length === 0"
+              class="hermes-running"
             >
-              <b>{{ call.tool }}</b>
-              <pre v-if="call.arguments">{{ call.arguments }}</pre>
-            </div>
-            <!-- renderMarkdown 已先行转义 HTML 特殊字符，仅输出受控标签 -->
-            <!-- eslint-disable-next-line vue/no-v-html -->
-            <div
-              v-if="msg.content"
-              class="hermes-bubble"
-              v-html="renderMarkdown(msg.content)"
-            ></div>
-            <div v-if="msg.running" class="hermes-running">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
+              <LoadingOutlined spin />
+              <span>AI 正在思考…</span>
             </div>
             <div v-if="msg.error" class="hermes-msg-error">
               <a-tag color="warning">{{ msg.error }}</a-tag>
@@ -1840,47 +1986,54 @@ export default defineComponent({
     max-width: 100%;
   }
 
-  .hermes-thinking {
+  // 时间片段通用：细边框、可折叠、次要色，对齐 workbuddy/deepseek 的“思考/工具”轨道
+  .hermes-seg {
     width: 100%;
-    border: 1px dashed var(--border-color, #e4e7ed);
+    border: 1px solid var(--border-color, #eef0f3);
     border-radius: 8px;
-    padding: 4px 8px;
+    background: var(--ac-bg-1, #fafbfc);
+    overflow: hidden;
 
-    summary {
+    .hermes-seg-summary {
       cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
       font-size: 12px;
       color: var(--text-color-3, #8a9099);
       user-select: none;
+
+      &::-webkit-details-marker {
+        display: none;
+      }
     }
-    pre {
-      margin: 6px 0 2px;
+
+    .hermes-seg-body {
+      margin: 0 10px 8px;
+      padding: 8px 10px;
+      border-top: 1px dashed var(--border-color, #eef0f3);
       font-size: 12px;
       line-height: 1.6;
       color: var(--text-color-2, #5e6470);
       white-space: pre-wrap;
       word-break: break-word;
+      max-height: 260px;
+      overflow-y: auto;
     }
   }
 
-  .hermes-call {
-    max-width: 100%;
-    border-left: 3px solid #8b5cf6;
-    background: rgba(139, 92, 246, 0.06);
-    border-radius: 4px 8px 8px 4px;
-    padding: 4px 8px;
+  .hermes-thinking .hermes-seg-summary {
+    color: #6366f1;
+  }
 
-    b {
-      font-size: 12px;
-    }
-    pre {
-      margin: 4px 0 2px;
-      font-size: 11px;
-      color: var(--text-color-3, #8a9099);
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 120px;
-      overflow-y: auto;
-    }
+  .hermes-call .hermes-seg-summary {
+    color: #7c3aed;
+  }
+
+  .hermes-seg-done {
+    color: #16a34a;
   }
 
   .hermes-msg-error {
@@ -1957,35 +2110,11 @@ export default defineComponent({
 
   .hermes-running {
     display: inline-flex;
-    gap: 4px;
+    align-items: center;
+    gap: 6px;
     padding: 6px 2px 2px;
-
-    .dot {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: #8b5cf6;
-      animation: hermes-blink 1.2s infinite;
-
-      &:nth-child(2) {
-        animation-delay: 0.2s;
-      }
-      &:nth-child(3) {
-        animation-delay: 0.4s;
-      }
-    }
-  }
-}
-
-@keyframes hermes-blink {
-  0%,
-  60%,
-  100% {
-    opacity: 0.25;
-  }
-
-  30% {
-    opacity: 1;
+    font-size: 12px;
+    color: var(--text-color-3, #8a9099);
   }
 }
 </style>

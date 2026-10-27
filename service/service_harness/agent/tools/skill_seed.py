@@ -2,12 +2,14 @@
 """技能种入：挂载的技能 zip → 本地缓存目录 → OpenSandboxWorkspace skill_paths。
 
 链路：SkillService 取回 zip 原件（共库共存储，进程内 import）→ 解压到
-``{cache_root}/{user_id}/{skill_id}_{code}`` → 目录列表交给 workspace 构造
+``{cache_root}/{user_id}/{skill_code}`` → 目录列表交给 workspace 构造
 （OpenSandbox 在 initialize 时种入沙箱 skills/，reattach 场景沙箱已有副本）。
 
 口径：
 - 解压目录按用户分隔：同一技能多个用户同时挂载互不踩（目录覆盖写没有
   跨用户竞态；同一用户的轮次天然串行）；
+- 解压目录名直接用技能原 code（平台内唯一）：add_skill 取的 basename 即此
+  名，沙箱里就是 ``skills/<partition>/<code>``，不再叠加 ``{id}_`` 自定义前缀；
 - 每次挂载重新解压覆盖（技能 zip 可能已被替换；量级是 zip 内文件数，
   秒级以内）；
 - zip slip 防护：成员路径含 ``..`` 或绝对路径一律拒绝（zip 来自平台
@@ -23,7 +25,6 @@ mount_loader 里按 use 口径做过了。
 from __future__ import annotations
 
 import io
-import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -61,9 +62,10 @@ async def seed_skills(login_user: dict, skill_ids: list[int]) -> tuple[list[str]
                 log.warning("harness skill mount skipped: id={} 不存在或已停用", skill_id)
                 continue
             zip_bytes = await SkillService._load_zip(row)  # noqa: SLF001  见模块 docstring
-            # 目录名里的非法字符折叠成下划线（code 已过 _CODE_RE，这里兜底）
-            code = re.sub(r"[^0-9A-Za-z_-]+", "_", str(row.code or f"skill{skill_id}"))
-            target = root / f"{skill_id}_{code}"
+            # 目录名用技能原 code（平台内唯一，已过 _normalize_code）；不加 skill_id
+            # 前缀，add_skill 取的 basename 即此名。code 为空时兜底成 skill{id}。
+            code = str(row.code or "").strip() or f"skill{skill_id}"
+            target = root / code
             if target.exists():
                 shutil.rmtree(target)
             _safe_extract(zip_bytes, target)
