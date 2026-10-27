@@ -26,6 +26,9 @@ from agentscope.workspace import OpenSandboxWorkspace
 from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
 
 from common.common_log.log_init import log
+from service.service_harness.agent.custom_opensandbox import (
+    CustomOpenSandboxWorkspaceManager,
+)
 from service.service_harness.agent.harness_agent import AGENT_ID
 
 from service.service_harness.services.harness_settings import opensandbox_options
@@ -47,16 +50,17 @@ manager = None
 
 
 def _get_manager():
-    """按当前 opensandbox 配置初始化一个 OpenSandboxWorkspaceManager
+    """按当前 opensandbox 配置初始化一个 CustomOpenSandboxWorkspaceManager
     """
     opts = opensandbox_options()
     if not opts["domain"]:
         raise ValueError("OpenSandbox Server 地址未配置")
-    from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager
+    # 用 Custom 子类而不是父类：父类 _build_and_start 写死了 new OpenSandboxWorkspace，
+    # 只有换 manager，携 skip-bootstrap 的 workspace 子类才会真正被实例化
     log.info(opts)
     global manager
     if not manager:
-        manager = OpenSandboxWorkspaceManager(
+        manager = CustomOpenSandboxWorkspaceManager(
             isolation=IsolationPolicy.PER_USER,
             image=opts["image"] if opts["image"] else DEFAULT_IMAGE,
             api_key=opts["api_key"],
@@ -103,6 +107,9 @@ async def workspace_scope(login_user: dict, session_id=None,
     ``async with OpenSandboxWorkspaceManager`` 的 ``__aexit__`` 会 close_all
     （pause 本轮沙箱 + 停 sweeper），所以整轮/整请求跑完（含异常）不用手工 teardown。
     每次各起临时 manager、互不共享，退出只影响本次自己，不会 close 掉别的并发请求。
+
+    manager 实际是 custom_opensandbox.CustomOpenSandboxWorkspaceManager（跳过首建
+    引导命令，适配已预装网关 venv 的自建镜像），接口与父类一致。
     """
     manager = _get_manager()
     async with manager:
