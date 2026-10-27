@@ -23,7 +23,7 @@
 | 资源级 ACL 授权（全平台一套引擎） | **七类资源**：知识库 / 文档 / 工作流 / 工作流模板 / 工具 / 技能 / MCP 连接；按**动作粒度**（view / use / edit / delete / share / upload / reparse / graph / chunk / preview / content / doc_delete / eval / chat / copy / apikey / template / history / export / test / tools / rename / replace 共 20+ 动作码）授权到 **用户 / 角色 / 部门(含下级) / 用户组 / 全员** 五类主体；判定 = ADMIN ∪ 归属人 ∪ 数据范围 ∪ 显式授权四档并集，`service_system/acl_router` 是全系统唯一读写口，`common_permission/resource_guard` 单点求值，列表下推 / 行内按钮 / 403 三处共用同一份规则，绝不允许各处再手写一份 |
 | 登录鉴权 | JWT 签名 + Redis 登录态（`login:{jti}`），退出即时失效；密码加密存储、登录限流防爆破 |
 | 操作日志审计 | 全链路 `x-trace-id`，敏感字段自动脱敏，按 traceId 串联一次请求的全部落库 |
-| 在线用户 / ARQ 监控 | 在线会话踢出；worker 节点存活、队列积压、切片数在线调整，**workflow / ragflow / graphflow 三条流水线在下拉里各选各的** |
+| 在线用户 / ARQ 监控 | 在线会话踢出；worker 节点存活、队列积压、切片数在线调整，**workflow / ragflow / graphflow / harness 四条流水线在下拉里各选各的** |
 | 限流配置中心 | 模块桶级 QPS/日限额，Redis 原子计数，网关热加载 |
 
 
@@ -65,9 +65,26 @@
 
 
 
-### 5. 执行引擎与基础设施
+### 5. 深度探索（Harness 智能体）
 
-- **异步执行**：arq + Redis 分片队列，**三条流水线独立消费、互不抢占**——`workflow_queue:split_{N}` / `ragflow_queue:split_{N}` / `graphflow_queue:split_{N}`；按 `crc32(task_id) % 切片数` 稳定路由，同一 execution_id / doc_id 恒定落同一切片，多进程横向扩展。切片数存 Redis 而非 Nacos，监控页改完即时生效
+- **AgentScope ReAct 自主智能体**：对话轮次投递到专属 `harness_queue:split_{N}` 流水线异步消费，
+  每轮占一条模型流 + 一个沙箱会话，与 workflow / ragflow / graphflow 完全隔离
+- **每用户独立云沙箱（OpenSandbox 自托管）**：`workspace_id = harness-{user_id}` 幂等复用，
+  文件系统跨轮次/跨会话保留（超时自然暂停后 reattach+resume）；自建镜像自带网关 venv，
+  首建跳过分钟级引导命令
+- **流式时间线对话**：思考 / 工具调用 / 回复按帧到达顺序交错呈现、进行中转圈、逐段可折叠；
+  SSE 帧协议 `turn.started` / `text.delta` / `thinking.delta` / `tool.started` /
+  `tool.completed` / `turn.completed | interrupted | failed`
+- **人在环 AskUser**：智能体执行中可打断向用户要参数/确认，挂起等回答后从断点恢复；
+  也支持手动中断，消息行终态为准、幂等收尾；AgentState 存 Redis，API 进程与 worker 进程跨进程交接
+- **挂载资源**：技能（SKILL.zip 解压种入沙箱 `skills/` 分区）、工具、MCP 连接、知识库检索——
+  与选择器同源 ACL 校验，每轮可携带模型与挂载配置
+- **沙箱文件浏览**：列目录 / 预览 / 上传 / 下载四口把沙箱代理成文件目录；上传走 base64 分块
+  绕开单命令行参数上限，大二进制文件走后端专用文件 API 整份读取（避开命令通道截断大 stdout）
+
+### 6. 执行引擎与基础设施
+
+- **异步执行**：arq + Redis 分片队列，**四条流水线独立消费、互不抢占**——`workflow_queue:split_{N}` / `ragflow_queue:split_{N}` / `graphflow_queue:split_{N}` / `harness_queue:split_{N}`；按 `crc32(task_id) % 切片数` 稳定路由，同一 execution_id / doc_id / 轮次恒定落同一切片，多进程横向扩展。切片数存 Redis 而非 Nacos，监控页改完即时生效
 - **统一存储抽象**：`StorageBackend` 本地目录 / 阿里云 OSS（官方 SDK V2 异步客户端）两种实现，按 Nacos `storage:` 段或环境变量切换；**无盘化**——后端只搬字节，文档解析在内存里做
 - **配置与注册**：Nacos 一个地方管所有环境差异（数据库/Redis/存储/向量库），服务启动即注册 + 拉配置，代码里不写死任何环境地址
 - **可观测**：loguru + `x-trace-id` 贯穿网关→服务→worker
@@ -80,22 +97,21 @@
 
 | 模块 | 服务 | 内容 |
 |---|---|---|
-| 系统管理 | `service_system` :9001 | RBAC 全套、**资源级 ACL 授权的唯一读写口（acl_router，7 类资源共享）**、模型广场与审批、API Key、操作日志、在线用户、限流配置、ARQ 三线监控（workflow/ragflow/graphflow）、网关路由配置 |
+| 系统管理 | `service_system` :9001 | RBAC 全套、**资源级 ACL 授权的唯一读写口（acl_router，7 类资源共享）**、模型广场与审批、API Key、操作日志、在线用户、限流配置、ARQ 四线监控（workflow/ragflow/graphflow/harness）、网关路由配置 |
 | 登录注册 | `service_login` :9004 | 登录 / 注册 / 登出 / 刷新令牌（滑动续期）、JWT + Redis 会话 |
 | 业务网关 | `service_gateway` :18000 | 服务路由转发（Nacos 发现）、JWT 鉴权、模块限流、操作日志、trace-id、API Key 鉴权翻译 |
 | AI 模型网关 | `service_gateway` | `/api/model` OpenAI 兼容入口、12 类能力分发、流式透传、双层限流 |
 | 工作流编排 | `service_workflow` :9003 | 画布、21 类节点、submit 契约、审批与嵌套、SSE/WS、快照恢复、超时与看门狗、记忆、工具/MCP/技能/沙箱、模板、API Key 开放；工作流/模板/工具/技能/MCP 五类资源均接入 ACL |
 | 知识库 / RAG | `service_rag` :9002 | 三类库配置、文档上传与解析进度、混合检索（BM25+dense+重排+图谱增强）、Neo4j 图谱流水线（走独立的 graphflow worker）、知识库/文档两类资源按平台 ACL 鉴权、RAGAS 知识评测、开放检索 API |
 | 知识检索节点 | `service_workflow` | `KNOWLEDGE_RETRIEVAL` 节点已接通（HTTP 调 `service_rag` 检索），画布节点表单可选可配 |
-| 异步执行 | `arq_tasks` | 分片队列、多进程 worker（**workflow / ragflow / graphflow 三条流水线**，`-t workflow\|ragflow\|graphflow`）、健康上报、幂等投递 |
+| 深度探索 Harness | `service_harness` :9005 | AgentScope ReAct 智能体 + 每用户 OpenSandbox 云沙箱：流式时间线、AskUser 打断恢复、技能/工具/MCP/知识库挂载、沙箱文件四口浏览、AgentState 跨进程交接；对话轮次由专属 **harness** 流水线消费 |
+| 异步执行 | `arq_tasks` | 分片队列、多进程 worker（**workflow / ragflow / graphflow / harness 四条流水线**，`-t workflow\|ragflow\|graphflow\|harness`）、健康上报、幂等投递 |
 | 统一存储 | `common_storage` | 本地 / 阿里云 OSS 双实现、预签名 URL、无盘化读写 |
 | 前端 | `ui-ai` :5666 | vben v5 单页应用：以上全部模块的界面 |
 
 ### 🔄 开发中（代码在跑，但不可作为可用能力）
 
-| 模块 | 现状 |
-|---|---|
-| harness 智能体 | 技能中心、工具中心、MCP 中心的接口与界面在工作流服务内已可用；独立的自主规划 agent 循环未落地，端口 :9005 / :9006 与常量已预留 |
+（暂无——原「开发中」的深度探索 harness 智能体已完整落地，见上表 ✅ 已开发）
 
 ### 📋 规划中（只有空包骨架）
 
@@ -116,6 +132,7 @@
 | Redis | 5+（建议 7.x）   | 登录态 / 限流 / 队列 / 配置缓存 |
 | Nacos | 2.x+         | 注册中心 + 配置中心，**必须有**，所有环境差异都在里面 |
 | 阿里云 OSS | 可选           | 配 `storage.type=oss` 后启用 |
+| OpenSandbox Server | 自托管（可选） | 深度探索智能体的云沙箱执行环境（compose 已注释预留）；不开该功能可不部署 |
 
 ### 3.2 新环境初始化（四步）
 
@@ -129,7 +146,8 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 ```
 
 **2) 在 Nacos 建配置**，`data_id` = 服务名：`service_system` / `service_login` / `service_workflow` /
-`service_gateway` / `service_rag` / `arq_workflow` / `arq_ragflow`，内容照抄 `sql/init_nacos.yaml` 改连接信息。
+`service_gateway` / `service_rag` / `service_harness` / `arq_workflow` / `arq_ragflow`
+（`arq_harness` 可选），内容照抄 `sql/init_nacos.yaml` 改连接信息。
 
 > ★ `arq_workflow` 段必须有 `redis.url`，且与 `service_workflow` 用的 Redis 同源——否则任务投了没人消费。
 > ★ `arq_ragflow` 同理：它的 `redis.url` 是 rag 队列的 Redis，而 `mysql/storage/es/neo4j` 必须与 `service_rag` 同实例——
@@ -137,9 +155,13 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 >   本段的 `worker:` 子段是 rag worker 的并发/超时（省略则用代码默认值）。
 > ★ **graphflow 不新增 data_id**：知识图谱 worker 与 ragflow 同读 `arq_ragflow` 这一段 Nacos 配置（同 Redis
 >   同后端），只是队列名 `graphflow_queue` 与 worker 名 `graphflow_worker` 独立；拆队列是为了隔离并发，不是隔离存储。
+> ★ 深度探索需要 `service_harness` 段：`opensandbox`（沙箱服务地址/密钥/镜像/超时）、`agentscope`
+>   （AgentState 的 Redis，缺省回落平台 redis 段 db=1）、`skills`（挂载技能解压缓存目录）；`arq_harness`
+>   data_id 可不建——对话轮次 worker 的 Redis 缺省回落 `arq_workflow` 段。沙箱是轮次执行期才连的
+>   （非启动依赖），opensandbox 后起也能消费。
 > 只有工作流要传文件到对象存储时才需要 `storage:` 段，不配即本地目录。
 
-**3) 起后端** —— 五个服务 + 三条 worker 流水线，见 3.3（本机）或 3.4（容器）。
+**3) 起后端** —— 六个服务 + 四条 worker 流水线，见 3.3（本机）或 3.4（容器）。
 
 **4) 起前端** —— `pnpm build:antd` 出静态产物交给 nginx，把 `/api` 反代到网关；用 3.4 的前端镜像就直接带上 `GATEWAY_URL`。
 
@@ -157,12 +179,14 @@ python -m service.service_login.login          # :9004
 python -m service.service_system.system        # :9001
 python -m service.service_workflow.workflow    # :9003
 python -m service.service_rag.rag              # :9002（知识库：需 ES/Neo4j）
+python -m service.service_harness.harness      # :9005（深度探索：需 OpenSandbox 沙箱服务）
 python -m service.service_gateway.gateway      # :18000
 
-# arq worker：-t 必填，三条流水线各自一个进程组（队列完全隔离，互不偷任务）
+# arq worker：-t 必填，四条流水线各自一个进程组（队列完全隔离，互不偷任务）
 python -m arq_tasks.run_workers -t workflow   -n 4 -p 1    # 工作流：4 进程消费 workflow_queue:split_1
 python -m arq_tasks.run_workers -t ragflow    -n 2 -p 1    # 知识库解析：2 进程消费 ragflow_queue:split_1
 python -m arq_tasks.run_workers -t graphflow  -n 2 -p 1    # 知识图谱：2 进程消费 graphflow_queue:split_1（比解析更慢，单独拆队）
+python -m arq_tasks.run_workers -t harness    -n 2 -p 1    # 深度探索：2 进程消费 harness_queue:split_1（每轮占一条模型流+一个沙箱）
 
 cd ui-ai && pnpm install && pnpm dev:antd      # :5666（vite 已配 /api → 127.0.0.1:18000 代理）
 ```
@@ -201,6 +225,12 @@ docker run -d --name arq-graph --init \
   -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
   dragon-ai-backend:latest
 
+# 起深度探索对话轮次 worker（harness 队列，每轮占一条模型流 + 一个沙箱会话）
+docker run -d --name arq-harness --init \
+  -e SERVICE_NAME=arq_harness -e NACOS_ADDR=10.0.0.9:8848 \
+  -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
+  dragon-ai-backend:latest
+
 # 起前端：GATEWAY_URL 告诉 nginx 把 /api 转发到哪
 docker run -d --name ui --init -p 8080:80 \
   -e GATEWAY_URL=http://10.0.0.9:18000 \
@@ -221,13 +251,14 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 
 | 变量 | 作用 | 默认 |
 |---|---|---|
-| `SERVICE_NAME` | 容器里起哪个进程：`service_login`/`service_system`/`service_gateway`/`service_workflow`/`service_rag`/`arq_workflow`/`arq_ragflow`/`arq_graphflow` | 无（必填） |
+| `SERVICE_NAME` | 容器里起哪个进程：`service_login`/`service_system`/`service_gateway`/`service_workflow`/`service_rag`/`service_harness`/`arq_workflow`/`arq_ragflow`/`arq_graphflow`/`arq_harness` | 无（必填） |
 | `NACOS_ADDR` `NACOS_NAME` `NACOS_PASSWD` `NACOS_NS_ID` | 注册中心与配置中心 | 无 |
 | `<服务名>_port` | 覆盖监听端口（小写服务名，代码里读的就是这个格式） | 各服务默认端口 |
 | `WORKERS` | 微服务 gunicorn worker 数 | 4 |
 | `ARQ_WORKERS` / `SPLIT_NUMBER` | worker 进程数 / 消费的队列切片号 | 4 / 1 |
 | `RAG_ARQ_WORKERS` / `RAG_SPLIT_NUMBER` | compose 里给 `arq_ragflow` 容器覆盖上面两个变量（解析与工作流分开扩容） | 2 / 1 |
 | `GRAPH_ARQ_WORKERS` / `GRAPH_SPLIT_NUMBER` | compose 里给 `arq_graphflow` 容器同样覆盖（图谱与解析各自伸缩） | 2 / 1 |
+| `HARNESS_ARQ_WORKERS` / `HARNESS_SPLIT_NUMBER` | compose 里给 `arq_harness` 容器同样覆盖（深度探索对话轮次） | 2 / 1 |
 | `GATEWAY_URL` / `LISTEN_PORT` | 前端容器：网关地址 / 监听端口 | `http://127.0.0.1:18000` / 80 |
 
 **启动脚本统一在 `scripts/`**，容器里和裸机跑的是同一份：
@@ -239,6 +270,7 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 | `scripts/run_arq_workflow.sh` | 起 N 个工作流 arq worker（`-t workflow`），并把 `docker stop` 的 TERM 转成 INT 走优雅退出分支 |
 | `scripts/run_arq_ragflow.sh` | 同上但 `-t ragflow`：知识库摄取 worker，进程数默认 2（并发大头在 Nacos 的 `arq_ragflow.worker.max_jobs`） |
 | `scripts/run_arq_graphflow.sh` | 同上但 `-t graphflow`：知识图谱构建 worker，独立队列。Redis 与后端仍读 `arq_ragflow` 那一整段 Nacos 配置，只队列/worker 名独立；单篇 job_timeout 4 小时（比解析长），失败不重试，重跑时默认断点续抽 |
+| `scripts/run_arq_harness.sh` | 同上但 `-t harness`：深度探索对话轮次 worker，独立队列 `harness_queue`；每任务占一条模型流 + 一个沙箱会话，进程内并发封顶（max_jobs=4），失败不自动重试（对话非幂等，重跑会重复消耗模型额度） |
 | `scripts/run_ui.sh` | 把 `GATEWAY_URL` 渲染进 nginx 站点配置，前台起 nginx |
 
 ### 3.5 K8s
@@ -253,11 +285,11 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 |---|---|
 | 后端 | Python 3.11 · FastAPI（全异步）· SQLAlchemy 2.0 + aiomysql · Pydantic v2 |
 | 进程与部署 | gunicorn + UvicornWorker · Docker · Nacos（注册/配置中心） |
-| 数据与中间件 | MySQL 8.x · Redis（登录态/限流/缓存/进度的 arq 三队列）· 阿里云 OSS · Elasticsearch 8.x · Neo4j 5.x |
-| 异步任务 | arq 0.28，Redis 分片队列；workflow / ragflow / graphflow **三条流水线完全隔离消费**（`-t workflow\|ragflow\|graphflow`），多进程横向扩展；图谱比解析更耗时，拆开后互不抢占槽位，graph 与 rag 共用同一份 Nacos 配置 |
+| 数据与中间件 | MySQL 8.x · Redis（登录态/限流/缓存/进度的 arq 四队列）· 阿里云 OSS · Elasticsearch 8.x · Neo4j 5.x |
+| 异步任务 | arq 0.28，Redis 分片队列；workflow / ragflow / graphflow / harness **四条流水线完全隔离消费**（`-t workflow\|ragflow\|graphflow\|harness`），多进程横向扩展；图谱比解析更耗时、harness 每轮占一条模型流+一个沙箱，拆开后互不抢占槽位；graph 与 rag 共用同一份 Nacos 配置 |
 | 通信 | httpx 全局连接池（HTTP/2）· WebSocket · SSE（sse-starlette） |
 | 模型接入 | 每类能力一个 `openai_impl` / `dashscope_impl` / `zhipu_impl`，统一由 `common_model.entry` 按（能力, 供应商）分发 |
-| 智能体 | MCP 官方 Python SDK · 沙箱进程隔离（psutil）· 代码节点走同一沙箱；自主规划框架 deepagents 仅声明了依赖，循环未落地 |
+| 智能体 | agentscope 2.x（ReAct 循环 + workspace/技能框架）· OpenSandbox 自托管云沙箱（每用户独立 workspace、文件跨轮次保留）· MCP 官方 Python SDK · 工作流代码/工具节点走进程隔离沙箱（psutil） |
 | 向量与检索 | ES 双索引 `rag_knowledge_chunk`（切片）+ `rag_kg_vector`（图谱实体/关系投影）：BM25 + 1024 维 dense_vector kNN 按请求动态加权融合 · 重排模型按请求选（不选就不重排）· 可叠加 LightRAG 式图谱检索一路 · 文本/图片/音视频共用一个向量空间 |
 | 文档解析 | `common_file_parser`：native（pypdf/docx/xlsx…）· minerU（私有化 HTTP）双引擎 + auto 调度，8 种分块策略（单块上限 20000 字） |
 | 知识评测 | RAGAS（SingleTurnSample + EvaluationDataset）5 大指标，自写 langchain-core 适配器（`RagasChatModel`/`RagasEmbeddings`）将本仓模型服务接入 ragas 裁判，评测走 ragflow 队列并发与后台异步 |
@@ -292,8 +324,10 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 │   ├── service_rag/              #   :9002  知识库：三类库配置/文档/解析进度/混合检索/图谱/评测/开放 API
 │   │   ├── services/             #     kb·doc·task·parse·graph·retrieval·rag_eval·ragas_adapter·kg_search/kg_vector·rag_settings
 │   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / eval / open
+│   ├── service_harness/          #   :9005  深度探索：会话/轮次/SSE/沙箱文件代理 + agent（ReAct/workspace 工厂/技能种入）
+│   │   ├── agent|services|routers|schemas|models/
 │   └── service_datasets|train|inference|eval_model|notebook/   # 规划中，空包
-├── arq_tasks/                    # 三条流水线的 worker 配置 + 任务函数 + 多进程启动入口（run_workers -t workflow|ragflow|graphflow）
+├── arq_tasks/                    # 四条流水线的 worker 配置 + 任务函数 + 多进程启动入口（run_workers -t workflow|ragflow|graphflow|harness）
 ├── ui-ai/                        # 前端 vben v5 monorepo（apps/web-antd 是实际使用的 app）
 ├── scripts/                      # 启动脚本：容器与裸机共用同一份
 ├── docker/                       # Dockerfile（后端）· Dockerfile.ui（前端）· compose · nginx 模板
@@ -317,21 +351,22 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 │  路由规范 /api/{service_name}/{path} → Nacos 服务发现 → 转发           │
 │  JWT 鉴权 · 模块限流 · 操作日志 · x-trace-id · API Key 鉴权翻译          │
 │  /api/model：OpenAI 兼容模型入口（api-key → 限流 → 厂商直连 → SSE）      │
-└──────┬──────────────┬───────────────┬───────────────┬─────────────┘
-       ▼              ▼               ▼               ▼
-  system :9001    login :9004    workflow :9003    rag :9002
-  RBAC/模型广场    JWT+会话       画布/submit/审批    知识库(三类库)
-  审计/ACL/限流                  工具/MCP/技能       配置/文档/检索/图谱/评测/开放API
-       │                             │                   │
-       │                             ▼ 异步执行（Redis 分片队列，三条独立流水线）
-       │        ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-       │        │ arq workflow      │  │ arq ragflow       │  │ arq graphflow     │
-       │        │ worker 快照恢复  │  │ worker 解析向量化│  │ worker 图谱抽取  │
-       │        └──────────────────┘  └─────────┬─────────┘  └─────────┬─────────┘
-       │                                         ▼                       ▼
-       │                            ES rag_knowledge_chunk · Neo4j · OSS
+└──────┬─────────────┬───────────────┬───────────────┬───────────────┬────────┘
+       ▼             ▼               ▼               ▼               ▼
+  system :9001   login :9004    workflow :9003    rag :9002       harness :9005
+  RBAC/模型广场    JWT+会话       画布/submit/审批   知识库(三类)     深度探索
+  审计/ACL/限流                  工具/MCP/技能      配置/文档/检索     ReAct+云沙箱
+                                                    /图谱/评测/开放API  挂载技能/工具/MCP/KB
+       │                             │                  │                  │
+       │                             ▼ 异步执行（Redis 分片队列，四条独立流水线）
+       │   ┌─────────────┐ ┌─────────────┐ ┌──────────────┐ ┌─────────────┐
+       │   │ arq workflow  │ │ arq ragflow │ │ arq graphflow │ │ arq harness  │
+       │   │ 快照恢复      │ │ 解析·向量化  │ │ 图谱抽取       │ │ 对话轮次     │
+       │   └─────────────┘ └──────┬──────┘ └────────┬─────┘ └──────┬──────┘
+       │                          ▼                 ▼              ▼
+       │        ES rag_knowledge_chunk · Neo4j · OSS · OpenSandbox 云沙箱（每用户独立 workspace）
 ┌───────────────────────────────────────────────────────────────────┐
-│ 基础设施  Nacos（注册 + 全部业务配置）· MySQL · Redis · 阿里云 OSS · ES · Neo4j │
+│ 基础设施  Nacos（注册 + 全部业务配置）· MySQL · Redis · 阿里云 OSS · ES · Neo4j · OpenSandbox │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -351,7 +386,7 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 ## 七、路线图
 
 1. 知识库：图谱向量投影（`rag_kg_vector`）与检索融合策略持续调优；音视频库分型展示深化；graphflow worker 支持多切片横向扩容
-2. harness 智能体：在技能 / 工具 / MCP 三个资源中心之上做自主规划循环（`:9005` / `:9006`）
+2. **智能体团队编排**：在深度探索单智能体之上升级为多智能体协作——可把多个不同角色/模型/工具/挂载资源的智能体组合成一个「团队」，任务分派、消息交接与沙箱产物共享
 3. 数据集 / 训练 / 推理 / 评估 / Notebook 模块落地
 4. K8s 清单与 Helm chart
 

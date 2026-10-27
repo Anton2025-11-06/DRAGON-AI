@@ -24,7 +24,7 @@
 | Row-level ACL (one engine, whole platform) | **Seven resource types**: knowledge base / document / workflow / workflow template / tool / skill / MCP connection; granted per **action** (view / use / edit / delete / share / upload / reparse / graph / chunk / preview / content / doc_delete / eval / chat / copy / apikey / template / history / export / test / tools / rename / replace — 20+ codes) to **user / role / department (with sub-tree) / user group / everyone**. The decision is `ADMIN ∪ owner ∪ data scope ∪ explicit grant`; `service_system/acl_router` is the single read/write surface, `common_permission/resource_guard` is the single evaluator, and list push-down / per-row button / 403 all consume the same rule set — no service is allowed to hand-write a second copy |
 | Authentication | JWT signature + Redis session (`login:{jti}`); logout revokes immediately; hashed password storage; brute-force rate limit on login |
 | Audit log | End-to-end `x-trace-id`, sensitive fields masked automatically, one request traceable across every row it touched |
-| Online users / ARQ monitor | Force-logout sessions; worker liveness, queue backlog, split count adjustable at runtime; the dropdown switches between the **workflow / ragflow / graphflow** pipelines |
+| Online users / ARQ monitor | Force-logout sessions; worker liveness, queue backlog, split count adjustable at runtime; the dropdown switches between the **workflow / ragflow / graphflow / harness** pipelines |
 | Rate-limit config centre | Per-module-bucket QPS & daily quota, atomic Redis counters, hot reload in the gateway |
 
 ![Role management](docs/role-manager.png)
@@ -68,9 +68,18 @@
 
 
 
-### 1.5 Execution engine & infrastructure
+### 1.5 Deep exploration (Harness agent)
 
-- **Async execution**: arq + Redis sharded queues, **three pipelines consuming independently** — `workflow_queue:split_{N}` / `ragflow_queue:split_{N}` / `graphflow_queue:split_{N}`; routed by `crc32(task_id) % shardCount` so one execution_id / doc_id always lands on the same shard, multi-process scalable. The shard count lives in Redis (not Nacos) so the monitor page can resize on the fly
+- **AgentScope ReAct agent**: every conversation turn is enqueued to its own `harness_queue:split_{N}` pipeline (one model stream + one sandbox session per turn), fully isolated from workflow / ragflow / graphflow
+- **One self-hosted OpenSandbox workspace per user**: `workspace_id = harness-{user_id}` is idempotent; the filesystem survives turns (natural pause, then reattach + resume); the custom image ships the gateway venv so first-time bootstrap commands are skipped entirely
+- **Streaming timeline chat**: thinking / tool calls / answers render in frame-arrival order with spinners while running, every segment collapsible; SSE frame protocol `turn.started` / `text.delta` / `thinking.delta` / `tool.started` / `tool.completed` / `turn.completed | interrupted | failed`
+- **Human-in-the-loop (AskUser)**: the agent can pause mid-turn to ask the user for a parameter/confirmation and resumes on the answer; manual interrupt is supported with the terminal status owned by the message row (idempotent resolution); AgentState lives in Redis so the API and worker processes hand turns across processes
+- **Mountable resources**: skills (SKILL.zip seeded into the sandbox `skills/` partition), tools, MCP connections, knowledge-base retrieval — ACL-checked with the same engine as the picker; each turn can carry its own model & mount config
+- **Sandbox file browser**: list / preview / upload / download proxy the sandbox as a file tree; uploads go base64-chunked around the single-argument limit, large binary downloads read whole bytes through the backend's dedicated file API (the exec channel truncates big stdout)
+
+### 1.6 Execution engine & infrastructure
+
+- **Async execution**: arq + Redis sharded queues, **four pipelines consuming independently** — `workflow_queue:split_{N}` / `ragflow_queue:split_{N}` / `graphflow_queue:split_{N}` / `harness_queue:split_{N}`; routed by `crc32(task_id) % shardCount` so one execution_id / doc_id / turn always lands on the same shard, multi-process scalable. The shard count lives in Redis (not Nacos) so the monitor page can resize on the fly
 - **Storage abstraction**: one `StorageBackend` with a local-directory and an Aliyun OSS implementation (official SDK V2 async client), switched by the Nacos `storage:` section or env vars; **diskless** — the backend only moves bytes, document parsing happens in memory
 - **Registration & configuration**: Nacos owns every environment difference (database / Redis / storage / vector store); a service registers and pulls config on startup, no connection string is hard-coded
 - **Observability**: loguru plus a home-grown `x-trace-id` that survives gateway → service → worker
@@ -83,22 +92,21 @@
 
 | Module | Service | Content |
 |---|---|---|
-| System management | `service_system` :9001 | Full RBAC, **the single read/write surface for row-level ACL (acl_router, shared by the seven resource types)**, model square & approvals, API keys, audit log, online users, rate-limit config, three-pipeline ARQ monitor (workflow / ragflow / graphflow), gateway route config |
+| System management | `service_system` :9001 | Full RBAC, **the single read/write surface for row-level ACL (acl_router, shared by the seven resource types)**, model square & approvals, API keys, audit log, online users, rate-limit config, four-pipeline ARQ monitor (workflow / ragflow / graphflow / harness), gateway route config |
 | Login / register | `service_login` :9004 | Login / register / logout / token refresh (sliding expiry), JWT + Redis session |
 | Business gateway | `service_gateway` :18000 | Route forwarding (Nacos discovery), JWT auth, module rate limiting, audit log, trace-id, API-key translation |
 | AI model gateway | `service_gateway` | `/api/model` OpenAI-compatible entry, 12-type dispatch, streaming passthrough, two-layer quotas |
 | Workflow orchestration | `service_workflow` :9003 | Canvas, 21 node types, submit contract, nested approval, SSE/WS, snapshot recovery, timeouts & watchdog, memory, tool/MCP/skill/sandbox, templates, API-key serving; workflow / template / tool / skill / MCP are all wired into the ACL engine |
 | Knowledge base / RAG | `service_rag` :9002 | Three kb types, upload & ingestion progress, hybrid retrieval (BM25+dense+rerank+graph enhancement), Neo4j graph pipeline running on the dedicated **graphflow** worker, ACL on knowledge base / document via the platform engine, RAGAS evaluation, open retrieval API |
 | Knowledge retrieval node | `service_workflow` | `KNOWLEDGE_RETRIEVAL` is wired up (calls `service_rag` retrieval over HTTP); selectable and configurable in the node palette |
-| Async execution | `arq_tasks` | Sharded queues, multi-process workers (**three pipelines: workflow / ragflow / graphflow**, `-t workflow\|ragflow\|graphflow`), health reporting, idempotent enqueue |
+| Deep exploration (Harness) | `service_harness` :9005 | AgentScope ReAct agent on per-user OpenSandbox cloud workspaces: streaming timeline, AskUser pause/resume, skill / tool / MCP / knowledge-base mounts, sandbox file browser, cross-process AgentState hand-off; turns consumed by the dedicated **harness** pipeline |
+| Async execution | `arq_tasks` | Sharded queues, multi-process workers (**four pipelines: workflow / ragflow / graphflow / harness**, `-t workflow\|ragflow\|graphflow\|harness`), health reporting, idempotent enqueue |
 | Storage abstraction | `common_storage` | Local + Aliyun OSS, presigned URLs, diskless byte transfer |
 | Front end | `ui-ai` :5666 | vben v5 SPA covering every module above |
 
 ### 🔄 In progress (code exists, not a usable capability)
 
-| Module | Status |
-|---|---|
-| Harness agent | Skill / tool / MCP centres are usable inside the workflow service; the standalone autonomous planning loop is not, ports :9005 / :9006 and constants are reserved |
+(none at the moment — the previously in-progress harness agent has shipped; see the Done table above)
 
 ### 📋 Planned (empty skeletons only)
 
@@ -119,6 +127,7 @@ These reserve a package directory, a rate-limit bucket name and a gateway alias 
 | Redis | 5+ (7.x recommended) | Sessions / rate limits / queues / config cache |
 | Nacos | 2.x+                 | Registry + config centre, **mandatory** — every environment difference lives there |
 | Aliyun OSS | optional             | Enabled with `storage.type=oss` |
+| OpenSandbox Server | self-hosted (optional) | Cloud sandbox runtime for the deep-exploration agent (reserved, commented out, in the compose file); not needed if the feature stays off |
 
 ### 3.2 Initialising a fresh environment (four steps)
 
@@ -134,8 +143,8 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 ```
 
 **2) Create the Nacos configs**, one per `data_id` = service name: `service_system` / `service_login` /
-`service_workflow` / `service_gateway` / `service_rag` / `arq_workflow` / `arq_ragflow`. Copy
-`sql/init_nacos.yaml` and change the connection details.
+`service_workflow` / `service_gateway` / `service_rag` / `service_harness` / `arq_workflow` /
+`arq_ragflow` (`arq_harness` optional). Copy `sql/init_nacos.yaml` and change the connection details.
 
 > ★ The `arq_workflow` section must contain `redis.url`, and it must point at the same Redis the
 > `service_workflow` producer uses — otherwise jobs are enqueued where nobody consumes them.
@@ -147,10 +156,15 @@ mysql --default-character-set=utf8mb4 -h <host> -u root -p < sql/v2_init.sql
 > ★ **graphflow does not need its own data_id**: the graph worker reads the same `arq_ragflow` Nacos
 >   section as ragflow (same Redis, same back-ends); only the queue name (`graphflow_queue`) and the
 >   worker name (`graphflow_worker`) are separate. The split is about isolating concurrency, not storage.
+> ★ Deep exploration needs the `service_harness` section: `opensandbox` (sandbox endpoint / key / image /
+>   timeouts), `agentscope` (AgentState Redis; falls back to the platform `redis` section with db=1) and
+>   `skills` (local unpack cache). `arq_harness` may stay unset — the turn worker's Redis falls back to
+>   the `arq_workflow` section. The sandbox is connected lazily inside a turn (not a start-up dependency),
+>   so opensandbox coming up later is still consumable.
 > The `storage:` section is only needed when workflow files go to object storage; without it the
 > local directory backend is used.
 
-**3) Start the back end** — five services plus the three worker pipelines; see 3.3 (bare metal) or 3.4 (containers).
+**3) Start the back end** — six services plus the four worker pipelines; see 3.3 (bare metal) or 3.4 (containers).
 
 **4) Start the front end** — `pnpm build:antd` produces static files; serve them with nginx and proxy
 `/api` to the gateway. With the front-end image from 3.4 you only pass `GATEWAY_URL`.
@@ -172,12 +186,14 @@ python -m service.service_login.login          # :9004
 python -m service.service_system.system        # :9001
 python -m service.service_workflow.workflow    # :9003
 python -m service.service_rag.rag              # :9002 (knowledge base; needs ES + Neo4j)
+python -m service.service_harness.harness      # :9005 (deep exploration; needs an OpenSandbox server)
 python -m service.service_gateway.gateway      # :18000
 
 # arq workers: -t is required, one process group per pipeline (fully separated queues)
 python -m arq_tasks.run_workers -t workflow   -n 4 -p 1    # 4 processes on workflow_queue:split_1
 python -m arq_tasks.run_workers -t ragflow    -n 2 -p 1    # 2 processes on ragflow_queue:split_1 (parse/chunk/vectorise)
 python -m arq_tasks.run_workers -t graphflow  -n 2 -p 1    # 2 processes on graphflow_queue:split_1 (KG build, slower than parse)
+python -m arq_tasks.run_workers -t harness    -n 2 -p 1    # 2 processes on harness_queue:split_1 (each turn holds one model stream + one sandbox)
 
 cd ui-ai && pnpm install && pnpm dev:antd      # :5666 (vite already proxies /api → 127.0.0.1:18000)
 ```
@@ -217,6 +233,12 @@ docker run -d --name arq-graph --init \
   -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
   dragon-ai-backend:latest
 
+# deep-exploration turn worker (harness queue; each turn holds one model stream + one sandbox session)
+docker run -d --name arq-harness --init \
+  -e SERVICE_NAME=arq_harness -e NACOS_ADDR=10.0.0.9:8848 \
+  -e ARQ_WORKERS=2 -e SPLIT_NUMBER=1 \
+  dragon-ai-backend:latest
+
 # Front end: GATEWAY_URL tells nginx where to send /api
 docker run -d --name ui --init -p 8080:80 \
   -e GATEWAY_URL=http://10.0.0.9:18000 \
@@ -237,13 +259,14 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `SERVICE_NAME` | Which process the container runs: `service_login` / `service_system` / `service_gateway` / `service_workflow` / `service_rag` / `arq_workflow` / `arq_ragflow` / `arq_graphflow` | none (required) |
+| `SERVICE_NAME` | Which process the container runs: `service_login` / `service_system` / `service_gateway` / `service_workflow` / `service_rag` / `service_harness` / `arq_workflow` / `arq_ragflow` / `arq_graphflow` / `arq_harness` | none (required) |
 | `NACOS_ADDR` `NACOS_NAME` `NACOS_PASSWD` `NACOS_NS_ID` | Registry and config centre | none |
 | `<service_name>_port` | Override the listening port (lower-case service name — that is the format the code reads) | per-service default |
 | `WORKERS` | gunicorn worker count per micro-service | 4 |
 | `ARQ_WORKERS` / `SPLIT_NUMBER` | worker process count / queue shard this instance consumes | 4 / 1 |
 | `RAG_ARQ_WORKERS` / `RAG_SPLIT_NUMBER` | compose-only overrides for the `arq_ragflow` container, so ingestion scales independently | 2 / 1 |
 | `GRAPH_ARQ_WORKERS` / `GRAPH_SPLIT_NUMBER` | compose-only overrides for the `arq_graphflow` container, so the graph pipeline scales independently too | 2 / 1 |
+| `HARNESS_ARQ_WORKERS` / `HARNESS_SPLIT_NUMBER` | compose-only overrides for the `arq_harness` container (deep-exploration turns) | 2 / 1 |
 | `GATEWAY_URL` / `LISTEN_PORT` | Front-end container: gateway address / listening port | `http://127.0.0.1:18000` / 80 |
 
 **All start-up scripts live in `scripts/`** — the container and a bare-metal run use the same file:
@@ -255,6 +278,7 @@ docker compose -f docker/docker-compose.ui.yml up -d --build
 | `scripts/run_arq_workflow.sh` | Starts N workflow arq workers (`-t workflow`) and translates `docker stop`'s TERM into the INT path that the graceful shutdown branch handles |
 | `scripts/run_arq_ragflow.sh` | Same with `-t ragflow`: knowledge-ingestion workers, 2 processes by default (the real concurrency knob is `arq_ragflow.worker.max_jobs` in Nacos) |
 | `scripts/run_arq_graphflow.sh` | Same with `-t graphflow`: knowledge-graph builder on its own queue. Redis and back-ends are still read from the `arq_ragflow` Nacos section, only the queue / worker name are separate; per-job timeout is 4 h (longer than parse), no auto-retry, reruns default to checkpoint resume |
+| `scripts/run_arq_harness.sh` | Same with `-t harness`: deep-exploration turn worker on its own `harness_queue`; each job holds one model stream + one sandbox session, per-process concurrency is capped (max_jobs=4) and failures never auto-retry (a chat turn is not idempotent — rerunning double-spends model quota) |
 | `scripts/run_ui.sh` | Renders `GATEWAY_URL` into the nginx site config and runs nginx in the foreground |
 
 ### 3.5 Kubernetes
@@ -269,11 +293,11 @@ The `k8s/` directory is reserved; no manifests yet.
 |---|---|
 | Back end | Python 3.11 · FastAPI (fully async) · SQLAlchemy 2.0 + aiomysql · Pydantic v2 |
 | Process & deploy | gunicorn + UvicornWorker · Docker · Nacos (registry / config centre) |
-| Data & middleware | MySQL 8.x · Redis (sessions / rate limits / cache / ingestion progress + the three arq queues) · Aliyun OSS · Elasticsearch 8.x · Neo4j 5.x |
-| Async tasks | arq 0.28 with Redis sharded queues and multi-process scaling; the **workflow / ragflow / graphflow pipelines consume independently** (`-t workflow\|ragflow\|graphflow`) — graph extraction is slower than parsing, so the split stops it from starving the ingestion workers; graph and rag share one Nacos section |
+| Data & middleware | MySQL 8.x · Redis (sessions / rate limits / cache / ingestion progress + the four arq queues) · Aliyun OSS · Elasticsearch 8.x · Neo4j 5.x |
+| Async tasks | arq 0.28 with Redis sharded queues and multi-process scaling; the **workflow / ragflow / graphflow / harness pipelines consume independently** (`-t workflow\|ragflow\|graphflow\|harness`) — graph extraction is slower than parsing and each harness turn holds one model stream + one sandbox, so the split stops them from starving each other; graph and rag share one Nacos section |
 | Communication | httpx global connection pool (HTTP/2) · WebSocket · SSE (sse-starlette) |
 | Model access | One `openai_impl` / `dashscope_impl` / `zhipu_impl` per capability, dispatched by `common_model.entry` on (capability, provider) |
-| Agents | Official MCP Python SDK · sandboxed process isolation (psutil) · code nodes share the same sandbox; `deepagents` is declared as a dependency but the planning loop is not implemented |
+| Agents | agentscope 2.x (ReAct loop + workspace/skill framework) · self-hosted OpenSandbox cloud sandbox (one persistent workspace per user) · official MCP Python SDK · workflow code/tool nodes still run in a process-isolated sandbox (psutil) |
 | Retrieval | two ES indexes, `rag_knowledge_chunk` (chunks) + `rag_kg_vector` (entity/relation projection): BM25 + 1024-dim dense_vector kNN fused with per-request weights · rerank model chosen per request (no model, no rerank) · an optional LightRAG-style graph retrieval path can be merged in · text / image / audio-video share one vector space |
 | Document parsing | `common_file_parser`: native (pypdf/docx/xlsx…) · minerU (private HTTP API), auto engine selection, 8 chunking strategies (20000 chars per chunk cap) |
 | Evaluation | RAGAS (SingleTurnSample + EvaluationDataset), 5 metrics; a home-grown langchain-core adapter (`RagasChatModel`/`RagasEmbeddings`) wires this repo's model services into the ragas judge; runs concurrently and asynchronously on the ragflow queue |
@@ -308,8 +332,10 @@ The `k8s/` directory is reserved; no manifests yet.
 │   ├── service_rag/              #   :9002  knowledge base: configs / documents / progress / retrieval / graph / evaluation / open API
 │   │   ├── services/             #     kb·doc·task·parse·graph·retrieval·rag_eval·ragas_adapter·kg_search/kg_vector·rag_settings
 │   │   ├── routers/              #     knowledge-bases / documents / retrieve / graph / eval / open
+│   ├── service_harness/          #   :9005  deep exploration: sessions/turns/SSE/sandbox file proxy + agent (ReAct / workspace factory / skill seeding)
+│   │   ├── agent|services|routers|schemas|models/
 │   └── service_datasets|train|inference|eval_model|notebook/   # planned, empty packages
-├── arq_tasks/                    # worker settings for all three pipelines + task functions + multi-process launcher
+├── arq_tasks/                    # worker settings for all four pipelines + task functions + multi-process launcher (run_workers -t workflow|ragflow|graphflow|harness)
 ├── ui-ai/                        # front end, vben v5 monorepo (apps/web-antd is the one we ship)
 ├── scripts/                      # start-up scripts, shared by containers and bare metal
 ├── docker/                       # Dockerfile (back end) · Dockerfile.ui (front end) · compose · nginx template
@@ -333,21 +359,23 @@ The `k8s/` directory is reserved; no manifests yet.
 │  /api/{service_name}/{path} → Nacos discovery → forward              │
 │  JWT · module rate limit · audit log · x-trace-id · API-key translate │
 │  /api/model: OpenAI-compatible entry (key → quota → vendor → SSE)     │
-└──────┬──────────────┬───────────────┬───────────────┬─────────────┘
-       ▼              ▼               ▼               ▼
-  system :9001    login :9004    workflow :9003    rag :9002
-  RBAC / ACL      JWT+session    canvas/submit     knowledge base (3 types)
-  audit/monitors                 approval/tools    configs/docs/retrieval/graph/eval/open API
-       │                             │                   │
-       │                             ▼ async execution (Redis sharded queue, three pipelines)
-       │        ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
-       │        │ arq workflow   │  │ arq ragflow    │  │ arq graphflow  │
-       │        │ worker recovery│  │ worker parse   │  │ worker KG build│
-       │        └────────────────┘  └───────┬────────┘  └───────┬────────┘
-       │                                    ▼                    ▼
-       │                  ES rag_knowledge_chunk · Neo4j · OSS
+└──────┬─────────────┬───────────────┬───────────────┬───────────────┬────────┘
+       ▼             ▼               ▼               ▼               ▼
+  system :9001   login :9004    workflow :9003    rag :9002        harness :9005
+  RBAC / ACL     JWT+session    canvas/submit     knowledge base   deep exploration
+  audit/monitors                approval/tools    (3 types)        ReAct + cloud sandbox
+                                retrieval/graph/  configs/docs/    mounts skills/tools/
+                                eval/open API     retrieval        MCP/KB
+       │                             │                  │                  │
+       │                             ▼ async execution (Redis sharded queue, four pipelines)
+       │   ┌─────────────┐ ┌─────────────┐ ┌──────────────┐ ┌─────────────┐
+       │   │ arq workflow │ │ arq ragflow │ │ arq graphflow │ │ arq harness  │
+       │   │ recovery    │ │ parse·vec   │ │ KG build     │ │ chat turns  │
+       │   └─────────────┘ └──────┬──────┘ └────────┬─────┘ └──────┬──────┘
+       │                          ▼                 ▼              ▼
+       │     ES rag_knowledge_chunk · Neo4j · OSS · OpenSandbox cloud sandbox (one workspace per user)
 ┌───────────────────────────────────────────────────────────────────┐
-│ Infra: Nacos (registry + all business config) · MySQL · Redis · OSS · ES · Neo4j │
+│ Infra: Nacos (registry + all business config) · MySQL · Redis · OSS · ES · Neo4j · OpenSandbox │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -367,7 +395,7 @@ The `k8s/` directory is reserved; no manifests yet.
 ## 7. Roadmap
 
 1. Knowledge base: keep tuning the graph vector projection (`rag_kg_vector`) and the retrieval fusion strategy; deepen the audio-video kb layout; expand the graphflow worker to more shards as needed
-2. Harness agent: an autonomous planning loop on top of the skill / tool / MCP resource centres (`:9005` / `:9006`)
+2. **Multi-agent team orchestration**: evolve deep exploration from a single agent into multi-agent collaboration — compose several agents (each with its own role / model / tools / mounted resources) into one *team* with task delegation, message hand-off and shared sandbox artifacts
 3. Datasets / training / inference / evaluation / Notebook
 4. Kubernetes manifests and a Helm chart
 
