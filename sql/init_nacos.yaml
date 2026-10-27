@@ -253,8 +253,8 @@ service_harness:
   opensandbox:
     domain: ''
     api_key: ''                    # server 开了鉴权才填
+    image: 'sandbox-python:3.12.15-slim-full-pre-v2'      # 沙箱镜像，留空用 opensandbox 默认。自定义件/docker/customSandbox.file
     # protocol: http               # http | https
-    # image: ''                    # 沙箱镜像，留空用 opensandbox 默认（含 agentscope gateway）
     # request_timeout_seconds: 600 # SDK 单请求超时，对齐 agentscope 引导命令超时（首建 bootstrap 分钟级，不能比它短）
     # timeout_seconds: 3600        # 单条命令/首次引导上限（bootstrap 分钟级）
   # agentscope AgentState 的 RedisStorage（跨轮记忆窗口/HITL 待答上下文）：

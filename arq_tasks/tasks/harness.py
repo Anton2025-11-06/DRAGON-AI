@@ -234,6 +234,85 @@ def _is_confirm_reply(message: str) -> bool:
     return any(word in lowered for word in _CONFIRM_WORDS)
 
 
+def _build_ask_user_metadata(tool_call, message: str) -> dict:
+    """AskUser 回灌结果按 AskUserMetadata schema 组装 metadata。
+
+    tool.check_external_result 会用 jsonschema 校验 metadata：顶层 required
+    ["answers"]，每条 answer required ["question"]，可带 selected（标签数组）
+    与 other（自由文本）。原来写死 metadata={} 会直接被挡下报
+    "'answers' is a required property"。非 AskUser 的外部执行工具没有这条
+    schema 约束，沿用空 metadata（维持原行为）。
+
+    答案来源二选一：
+    1. message 是 {"answers": [...]} 的 JSON（前端结构化答题口），直接采用；
+    2. 否则把整条消息作为每个待答问题的 other 兜底，兼容纯文本回复。
+    """
+    import json
+
+    from agentscope.tool import AskUser
+
+    if tool_call.name != AskUser.name:
+        return {}
+
+    questions: list = []
+    try:
+        questions = json.loads(tool_call.input or "{}").get("questions") or []
+    except (ValueError, TypeError, AttributeError):
+        questions = []
+
+    structured = None
+    try:
+        parsed = json.loads(message) if message else None
+    except (ValueError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("answers"), list):
+        structured = parsed["answers"]
+
+    answers: list = []
+    if structured is not None:
+        for item in structured:
+            if not isinstance(item, dict):
+                continue
+            selected = item.get("selected")
+            if not isinstance(selected, list):
+                selected = [str(selected)] if selected not in (None, "") else []
+            other = item.get("other")
+            answers.append({
+                "question": str(item.get("question") or ""),
+                "selected": [str(s) for s in selected],
+                "other": other if isinstance(other, str) and other else None,
+            })
+    else:
+        for q in questions:
+            q_text = str((q or {}).get("question") or "")
+            if not q_text:
+                continue
+            answers.append({
+                "question": q_text, "selected": [], "other": message or None,
+            })
+
+    if not answers:
+        # 一个问题都没解析出来：给一条兜底，既满足 required 又不丢用户文本
+        answers = [{"question": _awaiting_question([tool_call]),
+                    "selected": [], "other": message or None}]
+    return {"answers": answers}
+
+
+def _render_answers(answers):
+    """把 AskUser 的结构化答案渲染成模型可读文本（每题一行：问题：选项 / 补充）。
+
+    output 是 ToolResultBlock 里给模型读的那一半，不能把 answers 的 JSON 原文
+    直接喂给模型；非结构化（纯文本）回复时这里返回空串，调用方回落到原消息。
+    """
+    lines = []
+    for a in answers or []:
+        picked = "、".join(a.get("selected") or [])
+        other = str(a.get("other") or "")
+        val = " / ".join(x for x in (picked, other) if x)
+        lines.append(f"{a.get('question', '')}：{val or '（未作答）'}")
+    return "\n".join(lines)
+
+
 def _hitl_resume_inputs(agent, message: str):
     """上轮挂起的 HITL 待答 → 本轮用户消息转成的恢复事件（无挂起返回 None）。
 
@@ -253,15 +332,19 @@ def _hitl_resume_inputs(agent, message: str):
         return None
     tool_call = awaiting[0]
     if getattr(tool_call, "state", None) == ToolCallState.SUBMITTED:
-        # AskUser / 外部工具在等执行结果：用户本轮消息整体即答案
+        # AskUser / 外部工具在等执行结果：用户本轮消息整体即答案。
+        # metadata 走 AskUserMetadata schema，output 是给模型读的人类文本：
+        # 结构化答题时渲染成「问题：选项 / 补充」，别把 answers JSON 原文喂模型。
+        metadata = _build_ask_user_metadata(tool_call, message)
+        readable = _render_answers(metadata.get("answers"))
         return ExternalExecutionResultEvent(
             reply_id=agent.state.reply_id,
             execution_results=[ToolResultBlock(
                 id=tool_call.id,
                 name=tool_call.name,
-                output=message or "（用户未作答）",
+                output=readable or message or "（用户未作答）",
                 state=ToolResultState.SUCCESS,
-                metadata={},
+                metadata=metadata,
             )],
         )
     return UserConfirmResultEvent(
@@ -297,6 +380,51 @@ def _awaiting_question(awaiting: list) -> str:
             pass
     snippet = raw.strip()[:200]
     return f"{tool_call.name}({snippet})" if snippet else tool_call.name
+
+
+def _pending_questions(awaiting: list) -> list[dict]:
+    """AskUser 挂起 → 结构化待答问题（供前端渲染可填写选项列表）。
+
+    AskUser 入参是 {questions:[{question, options:[{label,description}],
+    multiSelect}]} JSON；每项折成 {question, options:[{label,description}],
+    multiSelect} 带出。非 AskUser 挂起（授权确认）或入参不合法时返回
+    []（前端退回纯文本回复）。
+    """
+    import json
+
+    from agentscope.tool import AskUser
+
+    tool_call = awaiting[0]
+    if tool_call.name != AskUser.name:
+        return []
+    raw = getattr(tool_call, "input", None) or "{}"
+    try:
+        questions = json.loads(raw).get("questions") or []
+    except (ValueError, TypeError, AttributeError):
+        return []
+    out: list[dict] = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        q_text = str(q.get("question") or "")
+        if not q_text:
+            continue
+        opts: list[dict] = []
+        for o in (q.get("options") or []):
+            if not isinstance(o, dict):
+                continue
+            label = str(o.get("label") or "")
+            if not label:
+                continue
+            opts.append({"label": label,
+                         "description": str(o.get("description") or "")})
+        # multiSelect 兼容大小写两种写法（模型传 multiSelect、AskUserParams 存 multiselect）
+        multi = q.get("multiSelect")
+        if multi is None:
+            multi = q.get("multiselect")
+        out.append({"question": q_text, "options": opts,
+                    "multiSelect": bool(multi)})
+    return out
 
 
 async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
@@ -431,6 +559,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
         # 用户消息经 _hitl_resume_inputs 续答；问题文本随帧与落库行带出，
         # 前端挂起提示优先显示 question（计划帧协议 turn.interrupted 的口径）
         question = _awaiting_question(awaiting)
+        pending = _pending_questions(awaiting)
         error = "智能体正在等待你的答复"
         if question:
             error = f"{error}：{question}"
@@ -439,7 +568,8 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                 "thinking": "".join(thinking_chunks) or None,
                 "tool_calls": tool_calls_trace or None,
                 "error": error,
-                "question": question}
+                "question": question,
+                "pending": pending}
     return {"status": TURN_COMPLETED,
             "content": "".join(text_chunks) or None,
             "thinking": "".join(thinking_chunks) or None,
@@ -493,6 +623,9 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
                 if result.get("question"):
                     # HITL 挂起：问题文本单列一域，前端提示优先显示它
                     payload["question"] = result["question"]
+                if result.get("pending"):
+                    # AskUser 结构化待答问题：前端据此渲染可填写选项表单
+                    payload["pendingQuestions"] = result["pending"]
                 await _publish(turn_id, EVT_TURN_INTERRUPTED, payload)
     except BaseException as e:  # noqa: BLE001  兼 CancelledError：取消也算没跑完
         reason = f"{type(e).__name__}: {e}"[:1000]

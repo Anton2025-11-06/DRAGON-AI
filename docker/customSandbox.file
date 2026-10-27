@@ -1,0 +1,43 @@
+FROM lpshubd8c3xdtgach7.xuanyuan.run/library/python:3.12.15-slim
+
+# 1. 替换 Debian apt 源为清华源（安全源 security.debian.org 也一并替换，否则构建机只放通清华时会卡在 update）
+RUN sed -i -e 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' \
+           -e 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' \
+           /etc/apt/sources.list.d/debian.sources
+
+# 2. 预装系统依赖 curl ca-certificates ripgrep（内置 Bash/Grep 等工具依赖）
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        ripgrep \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. 装 uv（用系统 pip 引导即可）
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+
+# 校验 uv 安装
+RUN uv --version
+
+# ========== 构建阶段直接创建固定路径 venv，安装全部依赖 ==========
+ENV GATEWAY_VENV=/root/.agentscope/.venv
+ENV GATEWAY_PYTHON=/usr/local/bin/python
+
+RUN uv venv --python ${GATEWAY_PYTHON} ${GATEWAY_VENV}
+
+# 往 venv 里装包：mcp<2.0.0 uvicorn fastapi httpx + agentscope
+RUN uv pip install --python ${GATEWAY_VENV}/bin/python \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "mcp<2.0.0" uvicorn fastapi httpx httpx2
+# 关键：去掉 --no-deps，否则 agentscope 的依赖一个都不装，import 直接 ModuleNotFoundError
+# 版本与宿主 worker（requirements.txt: agentscope>=2.0.9）对齐，避免两端协议不一致
+RUN uv pip install --python ${GATEWAY_VENV}/bin/python \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "agentscope==2.0.9"
+
+# 校验：venv 内 python 能 import 全部包（框架就是靠这个 python 拉网关）
+RUN ${GATEWAY_VENV}/bin/python -c "import mcp, uvicorn, fastapi, httpx, httpx2, agentscope; print('all ok')"
+
+
+# docker build -f customSandbox.file -t sandbox-python:3.12.15-slim-full-pre-v2 .

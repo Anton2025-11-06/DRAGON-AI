@@ -82,6 +82,19 @@ export interface HarnessModelOption {
   category: string;
 }
 
+/** AskUser 选项（worker 从挂起工具入参折出，供前端渲染可点选项） */
+export interface AskUserOption {
+  label: string;
+  description?: string;
+}
+
+/** AskUser 结构化待答问题（turn.interrupted 帧的 pendingQuestions 元素） */
+export interface PendingQuestion {
+  question: string;
+  options: AskUserOption[];
+  multiSelect: boolean;
+}
+
 /** SSE 协议帧（data: {json}；type 与 worker 侧 publish 的口径一致） */
 export interface HarnessFrame {
   type:
@@ -108,6 +121,8 @@ export interface HarnessFrame {
   reason?: string;
   /** HITL 挂起的问题文本（智能体在等答复；优先于 reason 显示） */
   question?: string;
+  /** AskUser 结构化待答问题（有则前端渲染选项表单，无则退回文本回复） */
+  pendingQuestions?: PendingQuestion[];
 }
 
 // ==================== API 接口（harness 深度探索） ====================

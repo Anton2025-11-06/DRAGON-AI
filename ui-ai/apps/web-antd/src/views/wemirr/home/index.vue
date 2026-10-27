@@ -41,6 +41,12 @@ interface ChatMsg {
   running?: boolean;
   /** 失败/中断提示（终态帧或历史行带出） */
   error?: string;
+  /** AskUser 结构化待答问题（turn.interrupted 帧带出，渲染成可填写表单） */
+  pending?: api.PendingQuestion[];
+  /** 表单作答草稿：question → { selected: 选项 label 数组, other: 自由文本 } */
+  answers?: Record<string, { other: string; selected: string[] }>;
+  /** 该挂起表单是否已提交（提交后收起、防重复提交） */
+  answered?: boolean;
 }
 
 /** 已挂载条目 */
@@ -360,12 +366,17 @@ export default defineComponent({
         message.warning('请先在下方选择一个已授权的模型');
         return;
       }
+      inputValue.value = '';
+      await postTurn(text, text);
+    }
 
+    /** 发一轮：messageText 给后端，displayText 给用户气泡（AskUser 走 JSON 时用可读文本回显） */
+    async function postTurn(messageText: string, displayText: string) {
       // 首条消息自动建会话：只落标题，模型与挂载随每次发消息传
       if (!sessionId.value) {
         try {
           const s = await api.HarnessSessionCreate({
-            title: text.slice(0, 24),
+            title: displayText.slice(0, 24) || '新探索',
           });
           sessionId.value = s.id;
         } catch (error: any) {
@@ -374,14 +385,13 @@ export default defineComponent({
         }
       }
 
-      messages.value.push({ role: 'user', content: text });
-      inputValue.value = '';
+      messages.value.push({ role: 'user', content: displayText });
       sending.value = true;
       scrollToBottom();
       try {
         const res = await api.HarnessChat({
           sessionId: sessionId.value,
-          message: text,
+          message: messageText,
           modelId: modelId.value,
           mounts: currentMounts(),
         });
@@ -396,6 +406,61 @@ export default defineComponent({
       } finally {
         sending.value = false;
       }
+    }
+
+    /** AskUser 单选/多选点选：多选切换该 label，单选整题替换为该 label */
+    function toggleAskOption(
+      msg: ChatMsg,
+      q: api.PendingQuestion,
+      label: string,
+    ) {
+      const draft = msg.answers || {};
+      const cur = draft[q.question] || { selected: [], other: '' };
+      cur.selected = q.multiSelect
+        ? cur.selected.includes(label)
+          ? cur.selected.filter((x) => x !== label)
+          : [...cur.selected, label]
+        : [label];
+      draft[q.question] = cur;
+      msg.answers = draft;
+    }
+
+    /** 提交 AskUser 表单：拼 answers JSON 走 message 字段，气泡显示可读文本 */
+    async function submitAskUser(msg: ChatMsg) {
+      if (msg.answered || sending.value) return;
+      if (!modelId.value) {
+        message.warning('请先在下方选择一个已授权的模型');
+        return;
+      }
+      const pending = msg.pending || [];
+      const draft = msg.answers || {};
+      const answers = pending.map((q) => {
+        const a = draft[q.question] || { selected: [], other: '' };
+        return {
+          question: q.question,
+          selected: a.selected || [],
+          other: (a.other || '').trim() || null,
+        };
+      });
+      const display = answers
+        .map((a) => {
+          const picked = a.selected.join('、');
+          const val =
+            [picked, a.other || ''].filter(Boolean).join(' / ') || '（未作答）';
+          return `${a.question}：${val}`;
+        })
+        .join('\n');
+      msg.answered = true;
+      await postTurn(JSON.stringify({ answers }), display);
+    }
+
+    /** AskUser “其他”自由文本写入草稿（避开 v-model 绑可能未定义路径） */
+    function setAskOther(msg: ChatMsg, q: api.PendingQuestion, val: string) {
+      const draft = msg.answers || {};
+      const cur = draft[q.question] || { selected: [], other: '' };
+      cur.other = val;
+      draft[q.question] = cur;
+      msg.answers = draft;
     }
 
     /** 订阅本轮事件流（传 msg = 刷新恢复的执行中历史行，复用同一条气泡） */
@@ -486,6 +551,17 @@ export default defineComponent({
           // HITL 挂起时优先显示智能体的问题（reason 是「等待答复」占位，
           // 回放路径下 question 已拼进 reason）
           msg.error = frame.question || frame.reason || '本轮已中断';
+          // AskUser 带结构化问题 → 初始化作答草稿，模板据此渲染选项表单
+          if (frame.pendingQuestions && frame.pendingQuestions.length > 0) {
+            msg.pending = frame.pendingQuestions;
+            const draft: Record<string, { other: string; selected: string[] }> =
+              {};
+            for (const q of frame.pendingQuestions) {
+              draft[q.question] = { selected: [], other: '' };
+            }
+            msg.answers = draft;
+            msg.answered = false;
+          }
           closeStream();
           break;
         }
@@ -679,6 +755,9 @@ export default defineComponent({
       mountedItems,
       renderMarkdown,
       handleSend,
+      toggleAskOption,
+      submitAskUser,
+      setAskOther,
       removeMounted,
       // 会话 / 模型
       sessions,
@@ -841,6 +920,74 @@ export default defineComponent({
             </div>
             <div v-if="msg.error" class="hermes-msg-error">
               <a-tag color="warning">{{ msg.error }}</a-tag>
+            </div>
+            <!-- AskUser 人工审批：把待答问题渲染成可点选的选项表单（仅最新一条、未提交、非流式中） -->
+            <div
+              v-if="
+                msg.pending &&
+                msg.pending.length > 0 &&
+                !msg.answered &&
+                !streaming &&
+                idx === messages.length - 1
+              "
+              class="hermes-askuser"
+            >
+              <div
+                v-for="q in msg.pending"
+                :key="q.question"
+                class="hermes-askuser-q"
+              >
+                <div class="hermes-askuser-title">{{ q.question }}</div>
+                <div v-if="q.options.length > 0" class="hermes-askuser-opts">
+                  <label
+                    v-for="opt in q.options"
+                    :key="opt.label"
+                    class="hermes-askuser-opt"
+                    :class="{
+                      checked: msg.answers
+                        ? msg.answers[q.question].selected.includes(opt.label)
+                        : false,
+                    }"
+                  >
+                    <input
+                      :type="q.multiSelect ? 'checkbox' : 'radio'"
+                      :name="`ask-${idx}-${q.question}`"
+                      :checked="
+                        msg.answers
+                          ? msg.answers[q.question].selected.includes(opt.label)
+                          : false
+                      "
+                      @change="toggleAskOption(msg, q, opt.label)"
+                    />
+                    <span class="hermes-askuser-opt-label">{{ opt.label }}</span>
+                    <small
+                      v-if="opt.description"
+                      class="hermes-askuser-opt-desc"
+                    >
+                      {{ opt.description }}
+                    </small>
+                  </label>
+                </div>
+                <a-textarea
+                  :value="
+                    msg.answers ? msg.answers[q.question].other : ''
+                  "
+                  :auto-size="{ minRows: 1, maxRows: 3 }"
+                  placeholder="其他（可选，自由补充）"
+                  class="hermes-askuser-other"
+                  @change="
+                    (e: any) => setAskOther(msg, q, e.target.value)
+                  "
+                />
+              </div>
+              <a-button
+                type="primary"
+                size="small"
+                :loading="sending"
+                @click="submitAskUser(msg)"
+              >
+                提交答复
+              </a-button>
             </div>
           </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -1741,6 +1888,70 @@ export default defineComponent({
       max-width: 100%;
       white-space: normal;
       height: auto;
+    }
+  }
+
+  .hermes-askuser {
+    margin-top: 8px;
+    padding: 12px 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+
+    .hermes-askuser-q {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .hermes-askuser-title {
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .hermes-askuser-opts {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .hermes-askuser-opt {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+
+      &:hover {
+        background: #f0f0ff;
+      }
+
+      &.checked {
+        background: #eef2ff;
+      }
+
+      input {
+        margin: 0;
+        flex: none;
+      }
+
+      .hermes-askuser-opt-label {
+        font-weight: 500;
+        color: #1f2937;
+      }
+
+      .hermes-askuser-opt-desc {
+        color: #6b7280;
+      }
+    }
+
+    .hermes-askuser-other {
+      width: 100%;
     }
   }
 
