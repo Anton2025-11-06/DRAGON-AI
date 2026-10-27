@@ -82,8 +82,14 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> OpenSan
     workspace = await manager.get_workspace(
         user_key, AGENT_ID, session_key, workspace_id)
     # 挂载技能：本地解压目录 → 沙箱 skills/（List_skills 侧自动可见，重复种入无害）
-    if skill_paths:
-        await workspace.add_skill(skill_paths)
+    # add_skill 一次只收「单个技能目录」（内部直接 os.path.join(skill_path, "SKILL.md")，
+    # 传 list 会 TypeError: expected str, bytes or os.PathLike object, not list），须逐个种；
+    # 单个技能种入失败只跳过并记 warning，不炸整轮对话（同 mount_loader 静默跳过口径）。
+    for skill_path in skill_paths or []:
+        try:
+            await workspace.add_skill(skill_path)
+        except Exception as e:  # noqa: BLE001  单技能失败不影响本轮其它能力
+            log.warning("harness skill seed skipped: path={} {}", skill_path, e)
     workdir = str(getattr(workspace, "workdir", "") or "")
     log.info("harness workspace ready: {} workdir={}", workspace_id, workdir)
     return workspace
