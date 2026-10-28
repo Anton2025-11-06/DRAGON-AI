@@ -26,6 +26,10 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase, ToolChunk
 
+from service.service_harness.agent.tools.purpose import (
+    PURPOSE_KEY, with_purpose_schema,
+)
+
 # 单个 MCP 连接最多注册的工具数（超过截断，见模块 docstring）
 MAX_TOOLS_PER_SERVER = 30
 
@@ -89,6 +93,11 @@ def make_mcp_tool(mcp_id: int, server_name: str, tool: dict) -> ToolBase:
             )
 
         async def call(self, **kwargs: Any):
+            # purpose 是平台加给模型的「用途自述」，只给前端当工具行标题，
+            # 默认不能透传到远端 MCP server（对方按自己的 schema 校参数）。
+            # 例外：远端自己声明了同名 purpose 参数——那是它的业务字段，留着递过去
+            if PURPOSE_KEY not in (schema.get("properties") or {}):
+                kwargs.pop(PURPOSE_KEY, None)
             try:
                 from service.service_workflow.services.mcp_service import (
                     McpServerService,
@@ -117,7 +126,8 @@ def make_mcp_tool(mcp_id: int, server_name: str, tool: dict) -> ToolBase:
                 )
             return ToolChunk(content=[TextBlock(text=text)])
 
-    return McpBridge()
+    # schema 里补 purpose（远端给的 schema 不含它，不声明模型就不会写）
+    return with_purpose_schema(McpBridge())
 
 
 async def build_mcp_tools(mcp_ids: list[int]) -> tuple[list[ToolBase], list[str]]:

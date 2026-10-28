@@ -446,6 +446,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     from agentscope.app.storage import RedisStorage, SessionConfig
 
     from service.service_harness.agent.harness_agent import AGENT_ID, build_agent
+    from service.service_harness.agent.tools.purpose import extract_purpose
     from service.service_harness.agent.workspace_factory import workspace_id_of
     from service.service_harness.services.harness_settings import storage_options
 
@@ -508,12 +509,20 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                 elif isinstance(evt, ToolCallEndEvent):
                     name, arg_chunks = calls.pop(evt.tool_call_id, ("", []))
                     arguments = "".join(arg_chunks)
-                    tool_calls_trace.append({
-                        "tool": name, "toolCallId": evt.tool_call_id,
-                        "arguments": arguments})
-                    await _publish(turn_id, EVT_TOOL_COMPLETED,
-                                   {"tool": name, "toolCallId": evt.tool_call_id,
-                                    "arguments": arguments})
+                    # 工具入参里的 purpose（模型每轮被提示词要求填写）就是这次
+                    # 调用给用户看的一句话说明；发帧与落库同一个口径，回放才不
+                    # 会跟实时流对不上。取不到时前端按入参派生标签兜住。
+                    purpose = extract_purpose(name, arguments)
+                    trace = {"tool": name, "toolCallId": evt.tool_call_id,
+                             "arguments": arguments}
+                    if purpose:
+                        trace["purpose"] = purpose
+                    tool_calls_trace.append(trace)
+                    payload = {"tool": name, "toolCallId": evt.tool_call_id,
+                               "arguments": arguments}
+                    if purpose:
+                        payload["purpose"] = purpose
+                    await _publish(turn_id, EVT_TOOL_COMPLETED, payload)
                 # ReplyEndEvent 不发帧（终态帧唯一出口见模块头说明）；
                 # ToolResult* / *Start 事件 M1 也不发帧，落库素材不收
 

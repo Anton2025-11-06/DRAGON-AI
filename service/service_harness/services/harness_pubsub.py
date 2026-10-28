@@ -11,6 +11,9 @@
 
 帧协议（SSE）：``data: {"type": ..., "turnId": ..., "ts": ..., ...payload}\\n\\n``，
 终态集合 = {turn.completed, turn.failed, turn.interrupted}，前端收到即关流。
+``tool.completed`` 的 payload 可能带 ``purpose``：模型在这次工具调用的入参里
+写的用途一句话，前端把它当工具行标题（注入/取值口径见
+service/service_harness/agent/tools/purpose.py）。
 """
 from __future__ import annotations
 
@@ -178,9 +181,13 @@ async def _replay_finished_turn(turn_id: str, snap: dict) -> AsyncIterator[str]:
         tool = str(call.get("tool") or "")
         yield sse_frame(EVT_TOOL_STARTED, turn_id, {"tool": tool,
                                                     "toolCallId": call.get("toolCallId")})
-        yield sse_frame(EVT_TOOL_COMPLETED, turn_id,
-                        {"tool": tool, "toolCallId": call.get("toolCallId"),
-                         "arguments": call.get("arguments")})
+        # purpose 只在 completed 帧里带（实时流同口径：Start 时入参还没攒完），
+        # 历史回放不带就会退化成工具名标题，与刚跑完的那轮看着不一样
+        completed_payload = {"tool": tool, "toolCallId": call.get("toolCallId"),
+                             "arguments": call.get("arguments")}
+        if call.get("purpose"):
+            completed_payload["purpose"] = call.get("purpose")
+        yield sse_frame(EVT_TOOL_COMPLETED, turn_id, completed_payload)
     if snap["content"]:
         yield sse_frame(EVT_TEXT_DELTA, turn_id, {"content": snap["content"]})
     frame = await _final_frame_from_snapshot(turn_id, snap)

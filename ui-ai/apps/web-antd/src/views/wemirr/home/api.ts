@@ -53,6 +53,8 @@ export interface ToolCallTrace {
   tool: string;
   toolCallId?: string;
   arguments?: string;
+  /** 模型在这次调用入参里写的用途一句话（工具行标题的首选文案，可能缺失） */
+  purpose?: string;
 }
 
 /** 深度探索消息（一轮两行：USER + ASSISTANT，按 turnId 关联） */
@@ -115,6 +117,8 @@ export interface HarnessFrame {
   toolCallId?: string;
   /** tool.completed 的调用入参 */
   arguments?: string;
+  /** tool.completed 的用途说明（模型写在入参里，前端当工具行标题） */
+  purpose?: string;
   /** turn.failed 的错误信息 */
   error?: string;
   /** turn.interrupted 的中断原因 */
@@ -138,9 +142,7 @@ export function HarnessSessionPage(params: { current: number; size: number }) {
 }
 
 /** 新建会话（只建标题：模型与挂载不绑会话，发消息时逐轮现选） */
-export function HarnessSessionCreate(body: {
-  title: string;
-}) {
+export function HarnessSessionCreate(body: { title: string }) {
   return defHttp.post<HarnessSession>('/api/harness/session', body);
 }
 
@@ -201,12 +203,16 @@ export function HarnessSubscribeUrl(turnId: string) {
 
 /** 沙箱工作区目录列表（path 默认工作区根 /workspace）*/
 export function SandboxFiles(path = '/workspace') {
-  return defHttp.get<SandboxFilesRep>('/api/harness/sandbox/files', { params: { path } });
+  return defHttp.get<SandboxFilesRep>('/api/harness/sandbox/files', {
+    params: { path },
+  });
 }
 
 /** 查看沙箱文件内容（binary=true 时 content 为占位说明） */
 export function SandboxFile(path: string) {
-  return defHttp.get<SandboxFileRep>('/api/harness/sandbox/file', { params: { path } });
+  return defHttp.get<SandboxFileRep>('/api/harness/sandbox/file', {
+    params: { path },
+  });
 }
 
 /** 上传文件到当前目录（path 通过 FormData 传递，单次≤20MB） */

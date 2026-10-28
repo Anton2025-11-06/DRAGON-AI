@@ -26,6 +26,10 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase, ToolChunk
 
+from service.service_harness.agent.tools.purpose import (
+    PURPOSE_KEY, with_purpose_schema,
+)
+
 # 参数定义 type → JSON Schema type 的折算表；认不出的回落 string
 #（严格拒掉会让「定义里 type 拼错」的工具直接不可用，宽松回落只是少一层校验）
 _TYPE_MAP = {
@@ -113,6 +117,11 @@ def make_platform_tool(row: dict, parameters: list[dict]) -> ToolBase:
             )
 
         async def call(self, **kwargs: Any):
+            # purpose 只给前端当工具行标题：既不能当成缺的必填参数，也不能
+            # 跟着递进动态函数的形参里（对方根本没声明这个参数）。
+            # 例外：平台工具自己的参数表里就叫 purpose——那是业务字段，留着
+            if PURPOSE_KEY not in (schema.get("properties") or {}):
+                kwargs.pop(PURPOSE_KEY, None)
             missing = sorted(required - set(kwargs or {}))
             if missing:
                 return ToolChunk(
@@ -137,7 +146,8 @@ def make_platform_tool(row: dict, parameters: list[dict]) -> ToolBase:
                 content=[TextBlock(text=_format_result(result))],
             )
 
-    return PlatformBridge()
+    # schema 里补 purpose（平台工具自己的参数定义不含它，不声明模型就不会写）
+    return with_purpose_schema(PlatformBridge())
 
 
 async def build_platform_tools(tool_ids: list[int]) -> tuple[list[Any], list[str]]:

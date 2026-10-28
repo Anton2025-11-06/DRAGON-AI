@@ -57,7 +57,9 @@ class HarnessMessage(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False, comment="角色 USER/ASSISTANT")
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="消息正文")
     thinking: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="思考流全文")
-    # 工具调用轨迹 [{tool, arguments, state}]（result 的裁剪口径同工作流 hide_tool_call_results）
+    # 工具调用轨迹 [{tool, toolCallId, arguments, purpose}]（purpose 是模型在入参
+    # 里写给用户看的用途一句话，前端当工具行标题；result 的裁剪口径同工作流
+    # hide_tool_call_results）
     tool_calls: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="工具调用轨迹")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=TURN_RUNNING,
                                         comment="轮次状态 RUNNING/COMPLETED/FAILED/INTERRUPTED")

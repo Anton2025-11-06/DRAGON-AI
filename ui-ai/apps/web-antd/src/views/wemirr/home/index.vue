@@ -36,7 +36,122 @@ import * as api from './api';
 type Segment =
   | { kind: 'thinking'; id: string; text: string; active?: boolean }
   | { kind: 'text'; id: string; text: string }
-  | { kind: 'tool'; id: string; tool: string; arguments: string; done: boolean };
+  | {
+      kind: 'tool';
+      id: string;
+      tool: string;
+      arguments: string;
+      done: boolean;
+      /** 模型在这次调用入参里写的用途（工具行标题首选文案，可能缺失） */
+      purpose?: string;
+    };
+
+/** 工具技术名 → 中文动作名：模型没写 purpose 时的次级回落标题 */
+const TOOL_KIND_LABELS: Record<string, string> = {
+  AskUser: '向你提问',
+  Bash: '执行命令',
+  Edit: '编辑文件',
+  Glob: '查找文件',
+  Grep: '搜索内容',
+  PowerShell: '执行命令',
+  Read: '读取文件',
+  TaskCreate: '新建任务',
+  TaskGet: '查看任务',
+  TaskList: '查看任务清单',
+  TaskUpdate: '更新任务',
+  Write: '写入文件',
+  kb_search: '检索知识库',
+};
+
+/** 入参里最能说明「这次在对什么动手」的字段，按优先级取第一个非空串 */
+const TOOL_ARG_HINT_KEYS = [
+  'file_path',
+  'path',
+  'pattern',
+  'query',
+  'question',
+  'command',
+  'url',
+];
+
+/** 一行放得下的字数：标题超宽会把整条时间线挤乱 */
+const TOOL_LABEL_MAX = 80;
+const TOOL_HINT_MAX = 60;
+const THINKING_HINT_MAX = 48;
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** 工具入参 JSON → 对象（非法/未收全返回 null，由调用方回落原文） */
+function parseToolArgs(raw: string): null | Record<string, unknown> {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null; // 入参可能还在流式拼装中，不是错误
+  }
+  return null;
+}
+
+/** 路径只留最后一段：/workspace/data/sales.csv → sales.csv（整条路径放不进一行标题） */
+function shortPath(value: string): string {
+  const parts = value.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? value;
+}
+
+/** 模型没写 purpose 时从入参派生一句关键信息（文件名 / 命令 / 查询词） */
+function toolArgHint(argumentsText: string): string {
+  const args = parseToolArgs(argumentsText);
+  if (!args) return '';
+  for (const key of TOOL_ARG_HINT_KEYS) {
+    const value = args[key];
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const text =
+      key === 'file_path' || key === 'path'
+        ? shortPath(value.trim())
+        : value.trim();
+    return clip(text, TOOL_HINT_MAX);
+  }
+  return '';
+}
+
+/**
+ * 工具行标题：模型写的用途 → 入参派生 → 中文动作名。
+ * 三级回落是为了任何一条工具行都有人话标题——purpose 是选填的（写进 required
+ * 会让模型漏填时整个调用被 schema 校验打回重试），缺了不能只显示 Edit 这种生硬名字。
+ */
+function toolLabel(seg: Segment): string {
+  if (seg.kind !== 'tool') return '';
+  const purpose = (seg.purpose || '').trim();
+  if (purpose) return clip(purpose, TOOL_LABEL_MAX);
+  const kind = TOOL_KIND_LABELS[seg.tool] || seg.tool || '调用工具';
+  const hint = toolArgHint(seg.arguments);
+  return hint ? `${kind} · ${hint}` : kind;
+}
+
+/** 折叠里的入参：剔掉 purpose（已当标题显示）并格式化，命令行一眼可读 */
+function toolArgsView(seg: Segment): string {
+  if (seg.kind !== 'tool') return '';
+  const args = parseToolArgs(seg.arguments);
+  if (!args) return seg.arguments; // 非 JSON（非法或未收全）原样给排障看
+  const rest = { ...args };
+  delete rest.purpose;
+  if (Object.keys(rest).length === 0) return '';
+  return JSON.stringify(rest, null, 2);
+}
+
+/** 思考块折叠时的一行摘要：末行非空文本，不点开也能看到模型在想什么 */
+function thinkingHint(text: string): string {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return clip(lines.at(-1) ?? '', THINKING_HINT_MAX);
+}
 
 /** 对话条（前端渲染模型）：assistant 消息聚合思考流/工具轨迹/正文 */
 interface ChatMsg {
@@ -199,8 +314,7 @@ export default defineComponent({
       await ensurePickerOptions();
       // 模型与挂载不绑会话：切会话时按该会话最近一轮回显 composer 选择，无历史则保留当前草稿
       const last =
-        [...rows].reverse().find((r) => r.role === 'ASSISTANT') ||
-        rows.at(-1);
+        [...rows].reverse().find((r) => r.role === 'ASSISTANT') || rows.at(-1);
       if (last) {
         if (last.modelId) modelId.value = last.modelId;
         mountedItems.value = mountsToItems(last.mounts || {});
@@ -413,7 +527,8 @@ export default defineComponent({
       } catch (error: any) {
         messages.value.push({
           role: 'assistant',
-          content: error?.message || '请求失败，深度探索服务暂不可用，请稍后重试。',
+          content:
+            error?.message || '请求失败，深度探索服务暂不可用，请稍后重试。',
         });
         scrollToBottom();
       } finally {
@@ -539,6 +654,7 @@ export default defineComponent({
       tool: string,
       argumentsText: string,
       toolCallId?: string,
+      purpose?: string,
     ) {
       const segs = msg.segments || [];
       let target = toolCallId
@@ -555,6 +671,8 @@ export default defineComponent({
       }
       if (target && target.kind === 'tool') {
         target.arguments = argumentsText;
+        // 本轮没有 purpose 不要把已有的抹掉（实时流下 purpose 只会随 completed 帧到）
+        if (purpose) target.purpose = purpose;
         target.done = true;
       } else {
         segs.push({
@@ -563,6 +681,7 @@ export default defineComponent({
           tool,
           arguments: argumentsText,
           done: true,
+          purpose,
         });
       }
     }
@@ -585,6 +704,7 @@ export default defineComponent({
           tool: call.tool,
           arguments: call.arguments || '',
           done: true,
+          purpose: call.purpose,
         });
       }
       if (row.content) {
@@ -657,6 +777,7 @@ export default defineComponent({
             frame.tool || '',
             frame.arguments || '',
             frame.toolCallId,
+            frame.purpose,
           );
           break;
         }
@@ -789,7 +910,9 @@ export default defineComponent({
     });
 
     /** 已在工作区根时禁用回退 */
-    const atWorkspaceRoot = computed(() => currentPath.value === WORKSPACE_ROOT);
+    const atWorkspaceRoot = computed(
+      () => currentPath.value === WORKSPACE_ROOT,
+    );
 
     function goBack() {
       if (atWorkspaceRoot.value) return;
@@ -878,6 +1001,9 @@ export default defineComponent({
       streaming,
       mountedItems,
       renderMarkdown,
+      toolLabel,
+      toolArgsView,
+      thinkingHint,
       handleSend,
       toggleAskOption,
       submitAskUser,
@@ -1028,11 +1154,14 @@ export default defineComponent({
                   <LoadingOutlined v-if="seg.active" spin />
                   <BulbOutlined v-else />
                   <span>{{ seg.active ? '思考中…' : '已完成思考' }}</span>
+                  <span v-if="thinkingHint(seg.text)" class="hermes-seg-hint">{{
+                    thinkingHint(seg.text)
+                  }}</span>
                 </summary>
                 <pre class="hermes-seg-body">{{ seg.text }}</pre>
               </details>
 
-              <!-- 工具调用块：未完成转圈，完成打勾，入参折叠 -->
+              <!-- 工具调用块：标题是模型写的用途（不是 Edit/Read 这种技术名），入参折叠 -->
               <details
                 v-else-if="seg.kind === 'tool'"
                 class="hermes-seg hermes-call"
@@ -1040,10 +1169,15 @@ export default defineComponent({
                 <summary class="hermes-seg-summary">
                   <LoadingOutlined v-if="!seg.done && msg.running" spin />
                   <CheckCircleOutlined v-else class="hermes-seg-done" />
-                  <span>调用工具 · {{ seg.tool }}</span>
+                  <span class="hermes-call-title" :title="seg.tool">{{
+                    toolLabel(seg)
+                  }}</span>
+                  <span v-if="seg.tool" class="hermes-call-kind">{{
+                    seg.tool
+                  }}</span>
                 </summary>
-                <pre v-if="seg.arguments" class="hermes-seg-body">{{
-                  seg.arguments
+                <pre v-if="toolArgsView(seg)" class="hermes-seg-body">{{
+                  toolArgsView(seg)
                 }}</pre>
               </details>
 
@@ -1105,7 +1239,9 @@ export default defineComponent({
                       "
                       @change="toggleAskOption(msg, q, opt.label)"
                     />
-                    <span class="hermes-askuser-opt-label">{{ opt.label }}</span>
+                    <span class="hermes-askuser-opt-label">{{
+                      opt.label
+                    }}</span>
                     <small
                       v-if="opt.description"
                       class="hermes-askuser-opt-desc"
@@ -1115,15 +1251,11 @@ export default defineComponent({
                   </label>
                 </div>
                 <a-textarea
-                  :value="
-                    msg.answers ? msg.answers[q.question].other : ''
-                  "
+                  :value="msg.answers ? msg.answers[q.question].other : ''"
                   :auto-size="{ minRows: 1, maxRows: 3 }"
                   placeholder="其他（可选，自由补充）"
                   class="hermes-askuser-other"
-                  @change="
-                    (e: any) => setAskOther(msg, q, e.target.value)
-                  "
+                  @change="(e: any) => setAskOther(msg, q, e.target.value)"
                 />
               </div>
               <a-button
@@ -1246,7 +1378,9 @@ export default defineComponent({
       <!-- 路径面包屑 -->
       <a-breadcrumb class="hermes-path">
         <a-breadcrumb-item>
-          <a class="hermes-path-item" @click="loadSandboxFiles(WORKSPACE_ROOT)">工作区</a>
+          <a class="hermes-path-item" @click="loadSandboxFiles(WORKSPACE_ROOT)"
+            >工作区</a
+          >
         </a-breadcrumb-item>
         <a-breadcrumb-item v-for="seg in subSegments" :key="seg.path">
           <a class="hermes-path-item" @click="loadSandboxFiles(seg.path)">{{
@@ -2021,6 +2155,36 @@ export default defineComponent({
       word-break: break-word;
       max-height: 260px;
       overflow-y: auto;
+    }
+
+    // 工具行标题：模型写的用途作主体，技术名退成右侧弱化 chip
+    .hermes-call-title {
+      flex: 0 1 auto;
+      min-width: 0;
+      color: var(--text-color-1, #1f2937);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .hermes-call-kind {
+      flex: none;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: rgb(124 58 237 / 8%);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    // 折叠摘要后面的一行预览（思考块）：不点开也能跟上
+    .hermes-seg-hint {
+      flex: 0 1 auto;
+      min-width: 0;
+      font-size: 11px;
+      opacity: 0.75;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
   }
 

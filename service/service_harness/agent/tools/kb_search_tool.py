@@ -26,6 +26,8 @@ from agentscope.permission import (
 from agentscope.tool import ToolBase, ToolChunk
 from pydantic import BaseModel, Field
 
+from service.service_harness.agent.tools.purpose import PURPOSE_DESCRIPTION
+
 # 检索后端可用标记：tasks/harness.py bootstrap 成功装载 rag 段后置 True
 backend_ready = False
 
@@ -37,6 +39,7 @@ CONTENT_MAX_CHARS = 800
 class KbSearchParams(BaseModel):
     """kb_search 的入参。"""
 
+    purpose: str = Field(default="", description=PURPOSE_DESCRIPTION)
     query: str = Field(
         min_length=1, max_length=512,
         description="检索关键词，中英文均可；具体一些更容易命中。",
@@ -120,12 +123,16 @@ def make_kb_search_tool(login_user: dict, kb_ids: list[int],
         async def call(
                 self,
                 query: str,
+                purpose: str = "",
                 kb_ids: list[int] | None = None,
                 top_k: int = 10,
                 with_graph: bool = False,
                 graph_depth: int = 2,
                 graph_scale: int = 20,
         ):
+            # purpose 是给用户读的工具行标题（schema 里声明供模型填），
+            # 检索本身不用它，收下即止
+            _ = purpose
             if not backend_ready:
                 return ToolChunk(
                     content=[TextBlock(
