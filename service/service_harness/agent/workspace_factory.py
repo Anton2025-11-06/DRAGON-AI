@@ -22,9 +22,10 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
-from agentscope.app.workspace_manager import IsolationPolicy
+from agentscope.app.workspace_manager import IsolationPolicy, DockerWorkspaceManager, PrewarmConfig
 from agentscope.workspace import OpenSandboxWorkspace
 from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
+from agentscope.workspace._sandboxed_base import SandboxedWorkspaceBase
 
 from common.common_log.log_init import log
 from service.service_harness.agent.custom_opensandbox import (
@@ -47,35 +48,51 @@ def workspace_id_of(user_id: int) -> str:
     return f"{WORKSPACE_PREFIX}-{int(user_id)}"
 
 
-manager = None
+def _docker_manager(opts: dict):
+    """Docker 后端：/data/workspace bind-mount，PER_SESSION + 预热池（兜底默认）。"""
+    return DockerWorkspaceManager(
+        basedir="/data/workspace",
+        isolation=IsolationPolicy.PER_SESSION,
+        base_image=opts["image"] or DEFAULT_IMAGE,
+        node_version="20",
+        gateway_port=8006,
+        prewarm=PrewarmConfig(size=5, max_creating=5),
+    )
 
 
-def _get_manager():
-    """按当前 opensandbox 配置初始化一个 CustomOpenSandboxWorkspaceManager
-    """
-    opts = opensandbox_options()
+def _opensandbox_manager(opts: dict):
+    """OpenSandbox 后端：domain 必填，PER_USER 每用户持久沙箱。"""
     if not opts["domain"]:
         raise ValueError("OpenSandbox Server 地址未配置")
-    # 用 Custom 子类而不是父类：父类 _build_and_start 写死了 new OpenSandboxWorkspace，
-    # 只有换 manager，携 skip-bootstrap 的 workspace 子类才会真正被实例化
-    log.info(opts)
-    global manager
-    if not manager:
-        manager = CustomOpenSandboxWorkspaceManager(
-            isolation=IsolationPolicy.PER_USER,
-            image=opts["image"] if opts["image"] else DEFAULT_IMAGE,
-            api_key=opts["api_key"],
-            domain=opts["domain"],
-            protocol=opts["protocol"],
-            request_timeout_seconds=opts["request_timeout_seconds"],
-            timeout_seconds=opts["timeout_seconds"],
-            resource=opts["resource"],
-            env=opts["env"],
-        )
-    return manager
+    return CustomOpenSandboxWorkspaceManager(
+        isolation=IsolationPolicy.PER_USER,
+        image=opts["image"] or DEFAULT_IMAGE,
+        api_key=opts["api_key"],
+        domain=opts["domain"],
+        protocol=opts["protocol"],
+        request_timeout_seconds=opts["request_timeout_seconds"],
+        timeout_seconds=opts["timeout_seconds"],
+        resource=opts["resource"],
+        env=opts["env"],
+    )
 
 
-async def _attach(manager, login_user: dict, session_id, skill_paths) -> OpenSandboxWorkspace:
+def _new_manager():
+    """按 opensandbox.type 选后端；缺省或未知值一律兜底 Docker。"""
+    opts = opensandbox_options()
+    backend = str(opts.get("type") or "").strip().lower()
+    log.info("harness workspace backend={} (type={!r})",
+             backend or "docker", opts.get("type"))
+    match backend:
+        case "opensandbox":
+            return _opensandbox_manager(opts)
+        case "docker":
+            return _docker_manager(opts)
+        case _:
+            return _docker_manager(opts)
+
+
+async def _attach(manager, login_user: dict, session_id, skill_paths) -> SandboxedWorkspaceBase:
     """在给定 manager 上取（并 initialize）当前用户的 workspace，按需种入技能。"""
     user_key = str(int(login_user.get("user_id") or 0))
     # PER_USER 隔离下 agent/session 只是 manager 定位入参，不参与 workspace 归属；
@@ -114,7 +131,7 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> OpenSan
 
 @asynccontextmanager
 async def workspace_scope(login_user: dict, session_id=None,
-                          skill_paths: list[str] | None = None) -> AsyncGenerator[OpenSandboxWorkspace, Any]:
+                          skill_paths: list[str] | None = None) -> AsyncGenerator[SandboxedWorkspaceBase, Any]:
     """async with 一整个使用范围（对话轮次 / 沙箱文件浏览）：进入起临时 manager，退出自动释放。
 
     ``async with OpenSandboxWorkspaceManager`` 的 ``__aexit__`` 会 close_all
@@ -124,6 +141,8 @@ async def workspace_scope(login_user: dict, session_id=None,
     manager 实际是 custom_opensandbox.CustomOpenSandboxWorkspaceManager（跳过首建
     引导命令，适配已预装网关 venv 的自建镜像），接口与父类一致。
     """
-    manager = _get_manager()
+    # 每次各起临时 manager、互不共享：并发轮次退出只 close_all 自己那份，
+    # 不会把别的在跑的轮次的沙箱 backend 一并关掉（详见 _new_manager 说明）。
+    manager = _new_manager()
     async with manager:
         yield await _attach(manager, login_user, session_id, skill_paths)

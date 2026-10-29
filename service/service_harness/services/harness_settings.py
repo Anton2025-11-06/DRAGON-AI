@@ -101,6 +101,8 @@ def opensandbox_options() -> dict:
     resource = cfg.get("resource")
     env = cfg.get("env")
     return {
+        # 选后端：docker / opensandbox；缺省或未知值由 workspace_factory 兜底 Docker
+        "type": str(cfg.get("type") or "").strip().lower(),
         "domain": str(cfg.get("domain") or "").strip(),
         "api_key": str(cfg.get("api_key") or "").strip(),
         "protocol": "https" if protocol == "https" else "http",

@@ -58,15 +58,15 @@ class WorkerSettingsHarness:
     redis_settings = CustomRedisSettings.get_redis_setting(PIPELINE_HARNESS)
 
     # ---------- 并发与超时 ----------
-    max_jobs = 4  # 进程内并发上限：每任务占一条模型流 + 一个沙箱会话
+    max_jobs = 20  # 进程内并发上限：每任务占一条模型流 + 一个沙箱会话
     # 对话轮次含分钟级沙箱命令（冷启动 bootstrap 更慢），不能被 arq 层判死，
     # 给 24h 大值；真正的挂起保护在事件循环（中断检查 + SSE 订阅兜底）
     job_timeout = 86400
     poll_delay = 0.2  # 空闲时轮询队列间隔(秒),越小任务启动越快
 
     # ---------- 失败与结果 ----------
-    max_tries = 1  # 失败不自动重试：对话轮次非幂等，重跑会重复消耗模型额度
-    retry_jobs = False  # 同上：取消/异常不重试，由消息行状态兜底
+    max_tries = 3  # 失败不自动重试：对话轮次非幂等，重跑会重复消耗模型额度
+    retry_jobs = True  # 同上：取消/异常不重试，由消息行状态兜底
     keep_result = 0  # 结果不存 Redis(权威结果在 tb_harness_message)
 
     # ---------- 健康检查(供 system 模块监控接口读取) ----------
