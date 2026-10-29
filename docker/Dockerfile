@@ -22,8 +22,11 @@ WORKDIR /app
 
 # 只补时区数据：依赖全都有 manylinux wheel（grpcio / psutil / pillow / docling 等），
 # 不需要装编译工具链；ragflow worker 纯 CPU，镜像内不带任何 GPU 依赖
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+ENV TZ=Asia/Shanghai
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null || true \
+    && DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && echo "${TZ}" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
