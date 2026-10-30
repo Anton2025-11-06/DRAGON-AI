@@ -92,29 +92,18 @@ def _as_int(value: Any, low: int, high: int, default: int) -> int:
 
 
 def opensandbox_options() -> dict:
-    """OpenSandbox 云沙箱连接参数（原样交给 workspace_factory，本模块不做连接）。
-
-    domain 不给默认值：见模块 docstring 第 3 条。
-    """
     cfg = dict(_SECTION.get(SECTION_OPENSANDBOX) or {})
     protocol = str(cfg.get("protocol") or "http").strip().lower()
     resource = cfg.get("resource")
     env = cfg.get("env")
     return {
-        # 选后端：docker / opensandbox；缺省或未知值由 workspace_factory 兜底 Docker
-        "type": str(cfg.get("type") or "").strip().lower(),
         "domain": str(cfg.get("domain") or "").strip(),
         "api_key": str(cfg.get("api_key") or "").strip(),
         "protocol": "https" if protocol == "https" else "http",
-        # 空串传 None：让 OpenSandboxWorkspace 用它自带的默认镜像
         "image": str(cfg.get("image") or "").strip() or None,
-        # SDK 单次 HTTP 请求超时：默认 600 对齐 agentscope 的
-        # BOOTSTRAP_COMMAND_TIMEOUT（首建沙箱的单条引导命令能合法流几分钟，
-        # 比它短会在首次 bootstrap 时把连接掐死）
         "request_timeout_seconds": _as_int(cfg.get("request_timeout_seconds"),
-                                           60, 3600, 600),
-        # 沙箱内单条命令/引导等待上限（首次 bootstrap 分钟级，默认给 1h）
-        "timeout_seconds": _as_int(cfg.get("timeout_seconds"), 30, 86400, 3600),
+                                           10, 600, 60),
+        "timeout_seconds": _as_int(cfg.get("timeout_seconds"), 30, 3600, 3600),
         "resource": dict(resource) if isinstance(resource, dict) else None,
         "env": {str(k): str(v) for k, v in env.items()}
         if isinstance(env, dict) else None,

@@ -48,20 +48,8 @@ def workspace_id_of(user_id: int) -> str:
     return f"{WORKSPACE_PREFIX}-{int(user_id)}"
 
 
-def _docker_manager(opts: dict):
-    """Docker 后端：/data/workspace bind-mount，PER_SESSION + 预热池（兜底默认）。"""
-    return DockerWorkspaceManager(
-        basedir="/data/workspace",
-        isolation=IsolationPolicy.PER_USER,
-        base_image=opts["image"] or DEFAULT_IMAGE,
-        node_version="20",
-        gateway_port=8006,
-        prewarm=PrewarmConfig(size=5, max_creating=5),
-    )
-
-
-def _opensandbox_manager(opts: dict):
-    """OpenSandbox 后端：domain 必填，PER_USER 每用户持久沙箱。"""
+def _new_manager():
+    opts = opensandbox_options()
     if not opts["domain"]:
         raise ValueError("OpenSandbox Server 地址未配置")
     return CustomOpenSandboxWorkspaceManager(
@@ -72,24 +60,9 @@ def _opensandbox_manager(opts: dict):
         protocol=opts["protocol"],
         request_timeout_seconds=opts["request_timeout_seconds"],
         timeout_seconds=opts["timeout_seconds"],
-        resource=opts["resource"],
+        resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512"},
         env=opts["env"],
     )
-
-
-def _new_manager():
-    """按 opensandbox.type 选后端；缺省或未知值一律兜底 Docker。"""
-    opts = opensandbox_options()
-    backend = str(opts.get("type") or "").strip().lower()
-    log.info("harness workspace backend={} (type={!r})",
-             backend or "docker", opts.get("type"))
-    match backend:
-        case "opensandbox":
-            return _opensandbox_manager(opts)
-        case "docker":
-            return _docker_manager(opts)
-        case _:
-            return _docker_manager(opts)
 
 
 async def _attach(manager, login_user: dict, session_id, skill_paths) -> SandboxedWorkspaceBase:
