@@ -100,11 +100,23 @@ services:
   # 深度探索智能体服务（AgentScope ReAct + OpenSandbox 沙箱）：会话/挂载/
   # SSE 事件流。沙箱与 AgentState 存储的连接参数在 Nacos 的 service_harness
   # 段里（见 sql/init_nacos.yaml），不在镜像里注入。
+  #
+  # 挂宿主 docker.sock：Nacos opensandbox.type 缺省（含未配置）会兜底到 docker
+  # 后端，agentscope DockerWorkspaceManager 走 aiodocker 连「本机」daemon 拉沙箱
+  # 容器——在容器里跑时本机 = 宿主 daemon，沙箱是宿主的兄弟容器，没这个 sock
+  # 就建不了沙箱（每轮对话在 aiodocker 建连处报 Missing valid docker_host）。
+  # 沙箱网关走 docker exec，不需要再发布端口或打通网络。
+  # 另一个同类要求：basedir（代码里写死 /data/workspace）会被当作宿主路径 bind
+  # 进沙箱容器，要用它就把宿主同名目录挂成同一路径（-v /data/workspace:/data/workspace）。
+  # 挂 sock 等于给这两个容器宿主 root 级权限，对外多租户环境请在 Nacos 里显式
+  # 设 type=opensandbox 并改用下面的 opensandbox 服务。
   harness:
     <<: *backend
     environment:
       <<: *backend-env
       SERVICE_NAME: service_harness
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - gateway
 
@@ -148,6 +160,7 @@ services:
   # 深度探索对话轮次的异步 worker（harness_queue:split_N）：每任务占一条
   # 模型流 + 一个用户沙箱会话，与 workflow/ragflow 队列完全隔离、可独立扩
   # 缩容；沙箱是轮次执行期才连的（非启动依赖），opensandbox 后起也能消费。
+  # 真正拉起沙箱容器的就是这个进程，docker.sock 与 harness 同源（说明见上面）。
   arq_harness:
     <<: *backend
     environment:
@@ -155,6 +168,8 @@ services:
       SERVICE_NAME: arq_harness
       ARQ_WORKERS: ${HARNESS_ARQ_WORKERS:-2}
       SPLIT_NUMBER: ${HARNESS_SPLIT_NUMBER:-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - harness
 

@@ -52,7 +52,7 @@ def _docker_manager(opts: dict):
     """Docker 后端：/data/workspace bind-mount，PER_SESSION + 预热池（兜底默认）。"""
     return DockerWorkspaceManager(
         basedir="/data/workspace",
-        isolation=IsolationPolicy.PER_SESSION,
+        isolation=IsolationPolicy.PER_USER,
         base_image=opts["image"] or DEFAULT_IMAGE,
         node_version="20",
         gateway_port=8006,
