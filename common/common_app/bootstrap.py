@@ -170,11 +170,11 @@ def create_app(service_name: str,
                     image=opts["image"] or DEFAULT_IMAGE,
                     api_key=opts["api_key"],
                     domain=opts["domain"],
-                    protocol=opts["protocol"],
-                    request_timeout_seconds=opts["request_timeout_seconds"],
-                    timeout_seconds=opts["timeout_seconds"],
+                    # protocol=opts["protocol"],
+                    # request_timeout_seconds=opts["request_timeout_seconds"],
+                    # timeout_seconds=opts["timeout_seconds"],
                     resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512m"},
-                    env=opts["env"],
+                    # env=opts["env"],
                 )
                 # 进入 API 进程级 manager 单例（__aenter__ 起 sweeper/预热）并登记到
                 # workspace_factory，使本进程的沙箱文件浏览经 attach_workspace 复用同一份；
