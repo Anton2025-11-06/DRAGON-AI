@@ -6,8 +6,6 @@ from typing import Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
 import yaml
-from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager, IsolationPolicy
-from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
 
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -29,7 +27,6 @@ from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 from common.common_httpx.httpx import httpx_pool
 from common.common_storage import close_storage, init_storage
-from service.service_harness.agent.custom_opensandbox import CustomOpenSandboxWorkspaceManager
 
 
 async def _init_redis(redis_cfg: dict):
@@ -164,6 +161,17 @@ def create_app(service_name: str,
 
         try:
             if enable_workspace_manager:
+                # 懒导入：这几个包（尤其 service.service_harness）若放在 bootstrap 顶层
+                # import，会和各服务自身的 `from common.common_app.bootstrap import
+                # create_app` 撞成循环导入；且只有开了沙箱的服务才需要 agentscope /
+                # service_harness，别的服务不该被迫装这些依赖。
+                from agentscope.app.workspace_manager import IsolationPolicy
+                from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
+                from service.service_harness.agent import workspace_factory
+                from service.service_harness.agent.custom_opensandbox import (
+                    CustomOpenSandboxWorkspaceManager,
+                )
+
                 opts = yml_config.get("opensandbox", {})
                 workspace_manager = CustomOpenSandboxWorkspaceManager(
                     isolation=IsolationPolicy.PER_USER,
@@ -179,8 +187,6 @@ def create_app(service_name: str,
                 # 进入 API 进程级 manager 单例（__aenter__ 起 sweeper/预热）并登记到
                 # workspace_factory，使本进程的沙箱文件浏览经 attach_workspace 复用同一份；
                 # 这里直接用 yml_config 建（on_ready 尚未跑，harness_settings 还没装载）。
-                from service.service_harness.agent import workspace_factory
-
                 await workspace_factory.start_manager(workspace_manager)
                 app.state.manager = workspace_manager
                 log.info("OpenSandbox Manager initialized")
