@@ -65,7 +65,9 @@ def build_manager() -> CustomOpenSandboxWorkspaceManager:
         protocol=opts["protocol"],
         request_timeout_seconds=opts["request_timeout_seconds"],
         timeout_seconds=opts["timeout_seconds"],
-        resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512"},
+        # memory 必须带 K8s 风格单位（Mi/Gi）：裸数字会被当字节解析，
+        # "512"=512B < 6MB 触发 docker "Minimum memory limit allowed is 6MB"。
+        resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512Mi"},
         env=opts["env"],
     )
 
