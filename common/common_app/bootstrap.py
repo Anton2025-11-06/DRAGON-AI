@@ -173,7 +173,7 @@ def create_app(service_name: str,
                     # protocol=opts["protocol"],
                     # request_timeout_seconds=opts["request_timeout_seconds"],
                     # timeout_seconds=opts["timeout_seconds"],
-                    resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512m"},
+                    resource={"cpu": "0.5", "memory": "512m"},
                     # env=opts["env"],
                 )
                 # 进入 API 进程级 manager 单例（__aenter__ 起 sweeper/预热）并登记到
