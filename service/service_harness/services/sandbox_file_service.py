@@ -15,12 +15,13 @@
   read_file 是后端专用文件 API、不经 shell、整份返回；目录先在沙箱内 tar.gz
   落临时文件再 read_file。
 
-workspace 生命周期（每请求临时 attach，作用域结束即释放）：
-- workspace 由 workspace_factory.workspace_scope 经临时 manager 分配：
+workspace 生命周期（复用进程级 manager 单例，跨请求缓存）：
+- workspace 由 workspace_factory.attach_workspace 经进程级 manager 单例分配：
   assign_workspace_id（PER_USER 幂等，与 arq 轮次指向同一只沙箱）+ get_workspace
   （内部已 initialize，沙箱还在时走 reattach+resume 快路径）；
-- 本服务不做进程级缓存；四口各自 `async with _sandbox_entry(...)`，作用域退出由
-  manager.__aexit__ close_all（pause 本轮沙箱、文件系统保留，下次请求 reattach）；
+- manager 单例在 API 进程启动时建立（bootstrap 的 enable_workspace_manager），退出
+  时 stop_manager 统一 close_all；四口不再每请求起临时 manager、作用域退出也不再
+  close_all——沙箱进 TTL 缓存跨请求复用；
 - PER_USER 下 session_id 只是 manager 定位入参、不参与 workspace 归属，
   文件浏览无会话上下文时留空即可。
 """
@@ -62,38 +63,39 @@ WORKSPACE_ROOT = "/workspace"
 
 @asynccontextmanager
 async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
-    """临时 attach 当前用户沙箱，包成一个 async with 作用域（与对话轮次同一套模型）。
+    """取当前用户沙箱并包成一个 async with 作用域（复用进程级 manager 单例）。
 
-    走 workspace_factory.workspace_scope：进入时获取 manager、assign_workspace_id
-    （PER_USER 幂等，与 arq 轮次指向同一 workspace）+ get_workspace（已 initialize），
-    退出自动 close_all 释放本轮沙箱。session_id 仅 manager 定位入参，PER_USER
-    下不影响归属，文件浏览无会话上下文时留空按固定值处理。
+    走 workspace_factory.attach_workspace：经进程级 manager 单例 assign_workspace_id
+    （PER_USER 幂等，与 arq 轮次指向同一 workspace）+ get_workspace（已 initialize）。
+    不再每请求临时起 manager、退出也不再 close_all——沙箱进 manager 的 TTL 缓存跨
+    请求复用，进程退出由 bootstrap 的 stop_manager 统一释放。session_id 仅 manager
+    定位入参，PER_USER 下不影响归属，文件浏览无会话上下文时留空即可。
     """
     from agentscope.tool import Bash
 
     from service.service_harness.agent.workspace_factory import (
-        workspace_scope, workspace_id_of,
+        attach_workspace, workspace_id_of,
     )
 
-    async with workspace_scope({"user_id": user_id}, session_id) as workspace:
-        backend = workspace.get_backend()
-        raw_workdir = str(getattr(workspace, "workdir", "") or "")
-        # 锁定 WORKSPACE_ROOT，不再拿 workspace.workdir 当错-与前端契约对齐；
-        # 两者不一致时只当情报留痕，不作为错误。
-        if raw_workdir and raw_workdir.rstrip("/") != WORKSPACE_ROOT:
-            log.warning(
-                "harness sandbox: workspace.workdir={} 与固定契约 {} 不一致，仍用 {}",
-                raw_workdir, WORKSPACE_ROOT, WORKSPACE_ROOT)
-        # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
-        # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
-        ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
-        yield {
-            "workspace_id": ws_id,
-            "workspace": workspace,
-            "backend": backend,
-            "bash": Bash(backend=backend),
-            "workdir": WORKSPACE_ROOT,
-        }
+    workspace = await attach_workspace({"user_id": user_id}, session_id)
+    backend = workspace.get_backend()
+    raw_workdir = str(getattr(workspace, "workdir", "") or "")
+    # 锁定 WORKSPACE_ROOT，不再拿 workspace.workdir 当错-与前端契约对齐；
+    # 两者不一致时只当情报留痕，不作为错误。
+    if raw_workdir and raw_workdir.rstrip("/") != WORKSPACE_ROOT:
+        log.warning(
+            "harness sandbox: workspace.workdir={} 与固定契约 {} 不一致，仍用 {}",
+            raw_workdir, WORKSPACE_ROOT, WORKSPACE_ROOT)
+    # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
+    # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
+    ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
+    yield {
+        "workspace_id": ws_id,
+        "workspace": workspace,
+        "backend": backend,
+        "bash": Bash(backend=backend),
+        "workdir": WORKSPACE_ROOT,
+    }
 
 
 async def _run(entry: dict, command: str) -> str:

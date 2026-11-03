@@ -6,6 +6,8 @@ from typing import Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
 import yaml
+from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager, IsolationPolicy
+from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
 
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -27,6 +29,7 @@ from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 from common.common_httpx.httpx import httpx_pool
 from common.common_storage import close_storage, init_storage
+from service.service_harness.agent.custom_opensandbox import CustomOpenSandboxWorkspaceManager
 
 
 async def _init_redis(redis_cfg: dict):
@@ -107,7 +110,9 @@ def create_app(service_name: str,
                enable_arq_harness_redis: bool = False,
                enable_es: bool = False,
                enable_neo4j: bool = False,
-               on_ready: Optional[Callable[[dict], Awaitable[None]]] = None
+               enable_workspace_manager: bool = False,
+               on_ready: Optional[Callable[[dict], Awaitable[None]]] = None,
+
                ) -> FastAPI:
     """
     统一的 FastAPI 服务引导工厂：
@@ -158,6 +163,27 @@ def create_app(service_name: str,
         app.state.config = yml_config
 
         try:
+            if enable_workspace_manager:
+                opts = yml_config.get("opensandbox", {})
+                workspace_manager = CustomOpenSandboxWorkspaceManager(
+                    isolation=IsolationPolicy.PER_USER,
+                    image=opts["image"] or DEFAULT_IMAGE,
+                    api_key=opts["api_key"],
+                    domain=opts["domain"],
+                    protocol=opts["protocol"],
+                    request_timeout_seconds=opts["request_timeout_seconds"],
+                    timeout_seconds=opts["timeout_seconds"],
+                    resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512m"},
+                    env=opts["env"],
+                )
+                # 进入 API 进程级 manager 单例（__aenter__ 起 sweeper/预热）并登记到
+                # workspace_factory，使本进程的沙箱文件浏览经 attach_workspace 复用同一份；
+                # 这里直接用 yml_config 建（on_ready 尚未跑，harness_settings 还没装载）。
+                from service.service_harness.agent import workspace_factory
+
+                await workspace_factory.start_manager(workspace_manager)
+                app.state.manager = workspace_manager
+                log.info("OpenSandbox Manager initialized")
             if enable_redis:
                 await _init_redis(yml_config.get("redis", {}))
                 log.info("Redis initialized")
@@ -219,6 +245,11 @@ def create_app(service_name: str,
         try:
             await nacos_client.deregister_service()
             await nacos_client.close()
+            if enable_workspace_manager:
+                # 释放 API 进程级 manager 单例（close_all 缓存沙箱 + 停 sweeper）
+                from service.service_harness.agent import workspace_factory
+
+                await workspace_factory.stop_manager()
             if enable_redis:
                 await redis.client.close()
             if enable_mysql:

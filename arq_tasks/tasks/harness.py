@@ -11,8 +11,8 @@ MySQL 那一行」模式）：
 4. 事件循环：reply_stream 的每个事件 publish 到 harness:evt:{turn_id}，同时
    累积 text/thinking/tool_calls（终态落库用）；事件间隙按时间窗查 DB 状态，
    INTERRUPTED 即收尾退出（interrupt 端点置的状态）；
-5. 收尾：finish_turn 终态回写 + 终态事件 + upsert state（沙箱由 workspace_scope
-   的 async with 退出时自动 close_all 释放，不再手工 _release_workspace）
+5. 收尾：finish_turn 终态回写 + 终态事件 + upsert state（沙箱由进程级 manager
+   单例的 TTL 缓存跨轮复用，轮末不关闭；worker 退出时 stop_manager 统一 close_all）
    （OpenSandboxWorkspace 没有 pause()：沙箱靠服务端 timeout_seconds 自然暂停，
    文件系统保留，下轮 initialize 按 workspace_id reattach+resume）。
 
@@ -146,6 +146,13 @@ async def bootstrap(ctx: dict) -> None:
 
     await harness_settings.bootstrap(yml_config)
 
+    # 3.1 进程级 workspace manager 单例：opensandbox 段装载后建一份并进入生命周期
+    # （__aenter__ 起 sweeper）。整 worker 进程只此一份，run_harness_turn 每轮经
+    # workspace_factory.attach_workspace 复用其 TTL 缓存，沙箱跨轮不关闭。
+    from service.service_harness.agent import workspace_factory
+
+    await workspace_factory.start_manager()
+
     # 4. rag 检索后端（kb_search 桥的依赖）：ES / storage / Neo4j / rag_settings
     #    从 Nacos 的 arq_ragflow 段装载（ragflow worker 同款初始化；与 service_rag
     #    进程同源同段）。整段 try 降级：段缺失或连不上时 kb_search 工具报「后端
@@ -180,6 +187,12 @@ async def bootstrap(ctx: dict) -> None:
 
 async def shutdown(ctx: dict) -> None:
     """harness worker 退出钩子：释放连接池（对未初始化单例是空操作）。"""
+    try:
+        from service.service_harness.agent import workspace_factory
+
+        await workspace_factory.stop_manager()
+    except Exception as e:  # noqa: BLE001
+        log.warning("workspace manager stop failed: {}", e)
     try:
         from common.common_es import close_es
 
@@ -455,7 +468,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     # RedisStorage 三级键（user/agent/session）一律字符串化：平台 id 是 int，
     # agentscope 的键拼接按 str 处理，两轮之间类型不一致会拆成两个会话
     user_key, session_key = str(user_id), str(session_id)
-    # 会话绑定的 workspace_id 用 manager 分配的那个（workspace_scope 内 assign_workspace_id
+    # 会话绑定的 workspace_id 用 manager 分配的那个（attach_workspace 内 assign_workspace_id
     # 产出、get_workspace 回填到 workspace 对象），不再是旧的 harness-{user_id} 手工约定；
     # 取不到才回落到 workspace_id_of 兜底（不应发生，仅避免写空 workspace_id）。
     ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
@@ -611,9 +624,9 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
     ACL（mount_loader 按 use 口径与 picker 同源校验）；模型已按 model_id 在可选
     清单接口收口授权，本轮不再回查。
 
-    沙箱 workspace 用 workspace_scope（async with）包住整轮：进入起临时 manager、
-    attach+initialize，整轮结束（含异常）由 __aexit__ 自动 close_all 释放，无需
-    手工 teardown/逐出。
+    沙箱 workspace 用进程级 manager 单例（worker bootstrap 起、shutdown 释放）：
+    每轮经 attach_workspace 复用同一份 manager 的 TTL 缓存，轮末不关闭沙箱，
+    跨轮命中同一只 workspace，到期由 sweeper 自动逐出。
     """
     snapshot = await HarnessSessionService.turn_snapshot(turn_id)
     if snapshot is None or snapshot["status"] != TURN_RUNNING:
@@ -625,33 +638,33 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
     try:
         from service.service_harness.agent.model_factory import build_model
         from service.service_harness.agent.tools.mount_loader import load_mounted
-        from service.service_harness.agent.workspace_factory import workspace_scope
+        from service.service_harness.agent.workspace_factory import attach_workspace
 
         model, _model_name = await build_model(int(snapshot["modelId"] or 0))
         # 挂载组装（三桥 + 技能种入）在 workspace 之前：技能解压目录要作为
         # skill_paths 传给 workspace（种入沙箱在 initialize 期完成）
         mounted = await load_mounted(login_user, snapshot.get("mounts") or {})
-        async with workspace_scope(login_user, snapshot["sessionId"],
-                                   skill_paths=mounted.skill_paths) as workspace:
-            result = await _stream_reply(turn_id, login_user, snapshot, model,
-                                         workspace, mounted)
-            await HarnessSessionService.finish_turn(
-                turn_id, result["status"], content=result["content"],
-                thinking=result["thinking"], tool_calls=result["tool_calls"],
-                error=result["error"], model_name=_model_name)
-            # 终态帧（订阅方可能错过了中途的实时帧，这一帧保证关流信号必达）
-            if result["status"] == TURN_COMPLETED:
-                await _publish(turn_id, EVT_TURN_COMPLETED,
-                               {"content": result["content"] or ""})
-            elif result["status"] == TURN_INTERRUPTED:
-                payload = {"reason": result["error"] or "本轮已中断"}
-                if result.get("question"):
-                    # HITL 挂起：问题文本单列一域，前端提示优先显示它
-                    payload["question"] = result["question"]
-                if result.get("pending"):
-                    # AskUser 结构化待答问题：前端据此渲染可填写选项表单
-                    payload["pendingQuestions"] = result["pending"]
-                await _publish(turn_id, EVT_TURN_INTERRUPTED, payload)
+        workspace = await attach_workspace(login_user, snapshot["sessionId"],
+                                           skill_paths=mounted.skill_paths)
+        result = await _stream_reply(turn_id, login_user, snapshot, model,
+                                     workspace, mounted)
+        await HarnessSessionService.finish_turn(
+            turn_id, result["status"], content=result["content"],
+            thinking=result["thinking"], tool_calls=result["tool_calls"],
+            error=result["error"], model_name=_model_name)
+        # 终态帧（订阅方可能错过了中途的实时帧，这一帧保证关流信号必达）
+        if result["status"] == TURN_COMPLETED:
+            await _publish(turn_id, EVT_TURN_COMPLETED,
+                           {"content": result["content"] or ""})
+        elif result["status"] == TURN_INTERRUPTED:
+            payload = {"reason": result["error"] or "本轮已中断"}
+            if result.get("question"):
+                # HITL 挂起：问题文本单列一域，前端提示优先显示它
+                payload["question"] = result["question"]
+            if result.get("pending"):
+                # AskUser 结构化待答问题：前端据此渲染可填写选项表单
+                payload["pendingQuestions"] = result["pending"]
+            await _publish(turn_id, EVT_TURN_INTERRUPTED, payload)
     except BaseException as e:  # noqa: BLE001  兼 CancelledError：取消也算没跑完
         reason = f"{type(e).__name__}: {e}"[:1000]
         log.error("harness turn failed: turn={} {}", turn_id, reason)
