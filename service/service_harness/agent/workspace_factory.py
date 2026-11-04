@@ -64,7 +64,7 @@ def build_manager() -> CustomOpenSandboxWorkspaceManager:
         domain=opts["domain"],
         # protocol=opts["protocol"],
         # request_timeout_seconds=opts["request_timeout_seconds"],
-        # timeout_seconds=opts["timeout_seconds"],
+        timeout_seconds=3600,
         # memory 必须带 K8s 风格单位（Mi/Gi）：裸数字会被当字节解析，
         # "512"=512B < 6MB 触发 docker "Minimum memory limit allowed is 6MB"。
         # resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512Mi"},
@@ -125,7 +125,7 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> Sandbox
     # 仍走删+加刷新——冷启动/被逐出后缓存为空，退回每轮重种（与旧行为一致，安全）。
     # 单个技能种入失败只跳过并记 warning，不炸整轮对话（同 mount_loader 口径）。
     backend = workspace.get_backend()
-    skills_root = workspace._skills_dir  # noqa: SLF001  框架属性：{workdir}/skills
+    skills_root = workspace._skills_dir  # 框架属性：{workdir}/skills
     partition = backend.join_path(skills_root, AGENT_ID)
     seeded: dict[str, str] = getattr(workspace, "_harness_seeded_skills", None)
     if seeded is None:

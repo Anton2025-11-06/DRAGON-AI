@@ -180,7 +180,7 @@ def create_app(service_name: str,
                     domain=opts["domain"],
                     # protocol=opts["protocol"],
                     # request_timeout_seconds=opts["request_timeout_seconds"],
-                    # timeout_seconds=opts["timeout_seconds"],
+                    timeout_seconds=3600,
                     # memory 带 K8s 风格单位（Mi/Gi），与 worker 侧 build_manager 口径一致；
                     # 裸数字会被当字节（<6MB 会被 docker 拒），小写 m 则是毫字节。
                     # resource={"cpu": "0.5", "memory": "512Mi"},
