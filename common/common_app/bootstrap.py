@@ -183,7 +183,7 @@ def create_app(service_name: str,
                     # timeout_seconds=opts["timeout_seconds"],
                     # memory 带 K8s 风格单位（Mi/Gi），与 worker 侧 build_manager 口径一致；
                     # 裸数字会被当字节（<6MB 会被 docker 拒），小写 m 则是毫字节。
-                    resource={"cpu": "0.5", "memory": "512Mi"},
+                    # resource={"cpu": "0.5", "memory": "512Mi"},
                     # env=opts["env"],
                 )
                 # 进入 API 进程级 manager 单例（__aenter__ 起 sweeper/预热）并登记到
