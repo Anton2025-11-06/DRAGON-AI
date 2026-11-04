@@ -30,6 +30,8 @@ import {
 import { message } from 'ant-design-vue';
 
 import { getTraceId } from '#/api/request';
+
+import MarkdownRenderer from '../ai/workflow/components/debug/MarkdownRenderer.vue';
 import * as api from './api';
 
 /** 时间线片段：assistant 消息按到达顺序拆成思考/工具/文本三类块，各自可折叠 */
@@ -173,6 +175,8 @@ interface ChatMsg {
   answered?: boolean;
   /** 时间线片段（assistant 按到达顺序渲染；历史行由落库字段合成） */
   segments?: Segment[];
+  /** 本轮 turnId：多会话并发时按会话定位在跑的轮（中断/关流用） */
+  turnId?: string;
 }
 
 /** 已挂载条目 */
@@ -194,6 +198,7 @@ export default defineComponent({
     FileTextFilled,
     FolderFilled,
     LoadingOutlined,
+    MarkdownRenderer,
     MoreOutlined,
     PlusOutlined,
     ReloadOutlined,
@@ -219,14 +224,37 @@ export default defineComponent({
     );
 
     // ==================== 对话框 ====================
-    const messages = ref<ChatMsg[]>([]);
+    /**
+     * 每个会话一份独立的消息缓冲：切会话不清空，后台在跑的 SSE 继续写自己那一份，
+     * 所以"离开再回来"实时片段不丢（Redis 频道不回放，只有持续订阅的那条流知道全貌）。
+     */
+    const sessionStore = reactive<Record<number, ChatMsg[]>>({});
+    /** 已拉过历史的会话：再切回去用缓冲、不重载（重载会把实时片段清掉，见 loadMessages） */
+    const loadedSessions = new Set<number>();
+    /** 会话最近一轮的模型/挂载快照：切换时回显 composer，不重新拉库 */
+    const composerMeta = new Map<
+      number,
+      { modelId?: number; mounts?: Partial<api.HarnessMounts> }
+    >();
+    /** turnId → 该轮订阅：一个在跑的轮各占一条流，与"当前在看哪个会话"无关 */
+    const turnStreams = new Map<
+      string,
+      { es: EventSource; sessionId: number }
+    >();
+    /** 取（必要时建）某会话的消息缓冲：所有读写都经这里，保证命中响应式代理 */
+    function bufFor(sid: number): ChatMsg[] {
+      if (!sessionStore[sid]) sessionStore[sid] = [];
+      return sessionStore[sid];
+    }
     const inputValue = ref('');
     const sending = ref(false);
-    const streaming = ref(false);
     const mountedItems = ref<MountedItem[]>([]);
-    /** SSE 连接（普通变量即可：同一时刻只允许一条流写本屏） */
-    let eventSource: null | EventSource = null;
-    let activeTurnId = '';
+    /** 展示的消息 = 当前会话那一份缓冲（切 sessionId 即换一份，不动别会话） */
+    const messages = computed<ChatMsg[]>(
+      () => sessionStore[sessionId.value] ?? [],
+    );
+    /** 当前会话是否有在跑的轮（决定 composer 是"发送"还是"中断"）：只看这一份缓冲 */
+    const streaming = computed(() => messages.value.some((m) => m.running));
 
     // 选择弹窗（四口候选：kb / mcp / tool / skill）
     const pickerVisible = ref(false);
@@ -248,6 +276,11 @@ export default defineComponent({
     const uploading = ref(false);
     const fileVisible = ref(false);
     const fileData = ref<api.SandboxFileRep | null>(null);
+    /** 沙箱工作区是否收起：true 时隐藏右栏、对话框横向铺满 */
+    const sandboxCollapsed = ref(false);
+    function toggleSandbox() {
+      sandboxCollapsed.value = !sandboxCollapsed.value;
+    }
 
     // ==================== 初始化 ====================
     onMounted(() => {
@@ -255,38 +288,8 @@ export default defineComponent({
       loadModels();
       loadSandboxFiles();
     });
-    // 离开页面即关 SSE（组件卸载后回调里再写 messages 已无意义）
-    onUnmounted(() => closeStream());
-
-    // ==================== 对话框逻辑 ====================
-    /** 轻量 markdown 渲染：加粗 / 引用 / 无序列表 / 换行 */
-    function renderMarkdown(text: string): string {
-      const esc = text
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
-      const lines = esc.split('\n');
-      const html = lines
-        .map((line) => {
-          const l = line.trim();
-          if (l.startsWith('> ')) {
-            return `<blockquote>${renderInline(l.slice(2))}</blockquote>`;
-          }
-          if (l.startsWith('- ')) {
-            return `<li>${renderInline(l.slice(2))}</li>`;
-          }
-          if (!l) {
-            return '<br/>';
-          }
-          return `<p>${renderInline(l)}</p>`;
-        })
-        .join('');
-      return html.replaceAll(/<li>(.*?)<\/li>/g, '<ul>$&</ul>');
-    }
-
-    function renderInline(text: string): string {
-      return text.replaceAll(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    }
+    // 离开页面即关所有 SSE（组件卸载后回调再写各会话缓冲已无意义）
+    onUnmounted(() => closeAllStreams());
 
     // ==================== 会话管理 ====================
 
@@ -307,17 +310,17 @@ export default defineComponent({
     }
 
     async function switchSession(s: api.HarnessSession) {
-      closeStream();
       sessionId.value = s.id;
-      const rows = await loadMessages(s.id);
+      // 已加载过的会话直接复用缓冲（后台流一直在往里写），不重载：
+      // 重载会用库里"截至落库"的内容覆盖，而 Redis 频道不回放 → 实时片段反而丢了
+      if (!loadedSessions.has(s.id)) await loadMessages(s.id);
       // 先拉齐候选再匹配名称（挂载回显要按 id 找 name）
       await ensurePickerOptions();
-      // 模型与挂载不绑会话：切会话时按该会话最近一轮回显 composer 选择，无历史则保留当前草稿
-      const last =
-        [...rows].reverse().find((r) => r.role === 'ASSISTANT') || rows.at(-1);
-      if (last) {
-        if (last.modelId) modelId.value = last.modelId;
-        mountedItems.value = mountsToItems(last.mounts || {});
+      // 模型与挂载不绑会话：按该会话最近一轮回显 composer；无历史则清空草稿
+      const meta = composerMeta.get(s.id);
+      if (meta) {
+        if (meta.modelId) modelId.value = meta.modelId;
+        mountedItems.value = mountsToItems(meta.mounts || {});
       } else {
         mountedItems.value = [];
       }
@@ -411,10 +414,11 @@ export default defineComponent({
     async function loadMessages(sid: number): Promise<api.HarnessMessage[]> {
       try {
         const rows = (await api.HarnessSessionMessages(sid)) || [];
-        const list: ChatMsg[] = [];
+        const buf = bufFor(sid);
+        buf.length = 0;
         for (const row of rows) {
           if (row.role === 'USER') {
-            list.push({ role: 'user', content: row.content });
+            buf.push({ role: 'user', content: row.content });
             continue;
           }
           // 历史轮：落库正文/思考/轨迹合成时间线片段后渲染
@@ -422,21 +426,28 @@ export default defineComponent({
             role: 'assistant',
             content: row.content,
             segments: legacyToSegments(row),
+            turnId: row.turnId,
           };
           if (row.status === 'RUNNING') {
             // 刷新撞上执行中：接回实时流续渲染（Redis 频道不回放，丢的只是刷新前帧）
             msg.running = true;
-            list.push(msg);
-            subscribeTurn(row.turnId, msg);
+            buf.push(msg);
+            subscribeTurn(sid, row.turnId, msg);
           } else {
             if (row.status === 'FAILED') msg.error = row.error || '执行失败';
             if (row.status === 'INTERRUPTED') {
               msg.error = row.error || '本轮已中断';
             }
-            list.push(msg);
+            buf.push(msg);
           }
         }
-        messages.value = list;
+        loadedSessions.add(sid);
+        // 记住该会话最近一轮的模型/挂载，切回来时回显 composer（不重拉库）
+        const last =
+          [...rows].reverse().find((r) => r.role === 'ASSISTANT') || rows.at(-1);
+        if (last) {
+          composerMeta.set(sid, { modelId: last.modelId, mounts: last.mounts });
+        }
         return rows;
       } catch {
         message.error('历史消息加载失败');
@@ -445,9 +456,11 @@ export default defineComponent({
     }
 
     function newSession() {
-      closeStream();
+      // 只重置"新建"草稿会话(0)的视图，不动其它会话的缓冲与其后台流
       sessionId.value = 0;
-      messages.value = [];
+      sessionStore[0] = [];
+      loadedSessions.delete(0);
+      composerMeta.delete(0);
       mountedItems.value = [];
       inputValue.value = '';
     }
@@ -456,6 +469,13 @@ export default defineComponent({
       if (!id) return;
       try {
         await api.HarnessSessionDelete(id);
+        // 关掉该会话所有在跑的流并清缓冲（不关后台流会继续占连接）
+        for (const [turnId, st] of [...turnStreams]) {
+          if (st.sessionId === id) closeTurnStream(turnId);
+        }
+        delete sessionStore[id];
+        loadedSessions.delete(id);
+        composerMeta.delete(id);
         // 删的是当前会话才回到新建草稿；删侧栏里的历史项不打断当前对话
         if (sessionId.value === id) newSession();
         await loadSessions(true);
@@ -512,20 +532,21 @@ export default defineComponent({
         }
       }
 
-      messages.value.push({ role: 'user', content: displayText });
+      const sid = sessionId.value;
+      bufFor(sid).push({ role: 'user', content: displayText });
       sending.value = true;
       scrollToBottom();
       try {
         const res = await api.HarnessChat({
-          sessionId: sessionId.value,
+          sessionId: sid,
           message: messageText,
           modelId: modelId.value,
           mounts: currentMounts(),
         });
         void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
-        subscribeTurn(res.turnId);
+        subscribeTurn(sid, res.turnId);
       } catch (error: any) {
-        messages.value.push({
+        bufFor(sid).push({
           role: 'assistant',
           content:
             error?.message || '请求失败，深度探索服务暂不可用，请稍后重试。',
@@ -714,26 +735,23 @@ export default defineComponent({
     }
 
     /** 订阅本轮事件流（传 msg = 刷新恢复的执行中历史行，复用同一条气泡） */
-    function subscribeTurn(turnId: string, msg?: ChatMsg) {
-      closeStream();
-      activeTurnId = turnId;
+    function subscribeTurn(sid: number, turnId: string, msg?: ChatMsg) {
+      // 该轮已有活动订阅：不重复连（EventSource 重连会回放已收帧、双写会乱时序）
+      if (turnStreams.has(turnId)) return;
+      const buf = bufFor(sid);
       // reactive 包装：SSE 回调里改字段才能驱动视图更新（与已入列的普通对象共享底层，
       // 数组里的同源代理由渲染侧惰性生成，依赖能被同一代理触发）
       const target: ChatMsg = reactive(
-        msg || {
-          role: 'assistant',
-          content: '',
-          segments: [],
-        },
+        msg || { role: 'assistant', content: '', segments: [], turnId },
       );
+      target.turnId = turnId;
       if (!msg) {
         target.running = true;
-        messages.value.push(target);
+        buf.push(target);
       }
-      streaming.value = true;
 
       const es = new EventSource(api.HarnessSubscribeUrl(turnId));
-      eventSource = es;
+      turnStreams.set(turnId, { es, sessionId: sid });
       es.onmessage = (ev: MessageEvent) => {
         let frame: api.HarnessFrame;
         try {
@@ -741,23 +759,28 @@ export default defineComponent({
         } catch {
           return;
         }
-        applyFrame(target, frame);
-        scrollToBottom();
+        applyFrame(target, frame, turnId);
+        // 只有正在看这个会话才跟滚动，后台会话流只更新缓冲不打扰当前视图
+        if (sid === sessionId.value) scrollToBottom();
       };
       es.onerror = () => {
-        // 终态帧先到时 closeStream 已把连接关掉，这里只会因异常断流触发：
+        // 终态帧先到时已 closeTurnStream，这里只会因异常断流触发：
         // 关连接防 EventSource 自动重连（重连会重复回放已收帧），结果以刷新后历史为准
         if (target.running) {
           target.running = false;
           target.error = '事件连接已断开，本轮结果稍后刷新查看';
         }
-        closeStream();
+        closeTurnStream(turnId);
       };
       scrollToBottom();
     }
 
     /** 协议帧 → 消息条增量渲染（帧字段口径见 api.ts 的 HarnessFrame） */
-    function applyFrame(msg: ChatMsg, frame: api.HarnessFrame) {
+    function applyFrame(
+      msg: ChatMsg,
+      frame: api.HarnessFrame,
+      turnId: string,
+    ) {
       switch (frame.type) {
         case 'text.delta': {
           appendText(msg, frame.content || '');
@@ -786,7 +809,7 @@ export default defineComponent({
           // 不再用整段 content 覆盖（会打乱与工具/思考交错的时序）
           settleThinking(msg);
           msg.running = false;
-          closeStream();
+          closeTurnStream(turnId);
           break;
         }
         case 'turn.interrupted': {
@@ -806,14 +829,14 @@ export default defineComponent({
             msg.answers = draft;
             msg.answered = false;
           }
-          closeStream();
+          closeTurnStream(turnId);
           break;
         }
         case 'turn.failed': {
           settleThinking(msg);
           msg.running = false;
           msg.error = frame.error || '执行失败';
-          closeStream();
+          closeTurnStream(turnId);
           break;
         }
         default:
@@ -821,19 +844,28 @@ export default defineComponent({
       }
     }
 
-    function closeStream() {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
+    /** 关闭某一轮的订阅（终态/异常/切走只关这一条，别会话的后台流不受影响） */
+    function closeTurnStream(turnId?: string) {
+      if (!turnId) return;
+      const st = turnStreams.get(turnId);
+      if (st) {
+        st.es.close();
+        turnStreams.delete(turnId);
       }
-      activeTurnId = '';
-      streaming.value = false;
+    }
+
+    /** 关所有在跑的流（离开页面用：组件卸载后回调再写各会话缓冲已无意义） */
+    function closeAllStreams() {
+      for (const turnId of [...turnStreams.keys()]) closeTurnStream(turnId);
     }
 
     async function interruptTurn() {
-      if (!activeTurnId) return;
+      // 中断当前会话在跑的那一轮（别的会话后台流不受影响）
+      const sid = sessionId.value;
+      const hit = [...turnStreams].find(([, v]) => v.sessionId === sid);
+      if (!hit) return;
       try {
-        await api.HarnessInterrupt(activeTurnId);
+        await api.HarnessInterrupt(hit[0]);
         message.info('已请求中断，稍候生效');
       } catch {
         message.error('中断请求失败');
@@ -1000,7 +1032,6 @@ export default defineComponent({
       sending,
       streaming,
       mountedItems,
-      renderMarkdown,
       toolLabel,
       toolArgsView,
       thinkingHint,
@@ -1048,13 +1079,15 @@ export default defineComponent({
       subSegments,
       atWorkspaceRoot,
       WORKSPACE_ROOT,
+      sandboxCollapsed,
+      toggleSandbox,
     };
   },
 });
 </script>
 
 <template>
-  <div class="hermes-page">
+  <div class="hermes-page" :class="{ 'is-sandbox-collapsed': sandboxCollapsed }">
     <!-- 左侧：会话列表 -->
     <aside class="hermes-side">
       <a-button block ghost size="small" type="primary" @click="newSession">
@@ -1104,6 +1137,12 @@ export default defineComponent({
           <h2>深度探索 Hernes</h2>
           <p>连接云端沙箱运行时，描述你的问题，让 AI 帮你执行</p>
         </div>
+        <a-tooltip v-if="sandboxCollapsed" title="展开沙箱工作区">
+          <a-button size="small" @click="toggleSandbox">
+            <template #icon><FolderFilled /></template>
+            展开工作区
+          </a-button>
+        </a-tooltip>
       </header>
 
       <!-- 已挂载能力（始终可见的清单条；模型/工具每轮可切换，这份 composer 状态随每次发消息传给后端） -->
@@ -1181,13 +1220,12 @@ export default defineComponent({
                 }}</pre>
               </details>
 
-              <!-- 正文块：按 markdown 直出（renderMarkdown 已转义 HTML，仅输出受控标签） -->
-              <!-- eslint-disable-next-line vue/no-v-html -->
-              <div
+              <!-- 正文块：完整 markdown 渲染（标题/列表/表格/代码高亮，复用平台 MarkdownRenderer，内部已 sanitize） -->
+              <MarkdownRenderer
                 v-else-if="seg.kind === 'text'"
+                :content="seg.text"
                 class="hermes-bubble"
-                v-html="renderMarkdown(seg.text)"
-              ></div>
+              />
             </template>
 
             <!-- 本轮在跑但尚无任何可见片段时，兜底一个“正在思考” -->
@@ -1268,12 +1306,10 @@ export default defineComponent({
               </a-button>
             </div>
           </div>
-          <!-- eslint-disable-next-line vue/no-v-html -->
-          <div
-            v-else
-            class="hermes-bubble"
-            v-html="renderMarkdown(msg.content)"
-          ></div>
+          <!-- 用户气泡：原样文本（用户输入不做 md 渲染，保留换行即可） -->
+          <div v-else class="hermes-bubble" style="white-space: pre-wrap">
+            {{ msg.content }}
+          </div>
           <div v-if="msg.role === 'user'" class="hermes-avatar user">我</div>
         </div>
         <div v-if="messages.length === 0" class="hermes-empty">
@@ -1348,8 +1384,8 @@ export default defineComponent({
       </footer>
     </section>
 
-    <!-- 右侧：沙箱桌面 -->
-    <section class="hermes-sandbox">
+    <!-- 右侧：沙箱桌面（可收起，收起后对话框横向铺满） -->
+    <section v-show="!sandboxCollapsed" class="hermes-sandbox">
       <header class="hermes-sandbox-header">
         <span class="hermes-sandbox-title">
           <span class="sandbox-dot"></span>
@@ -1372,6 +1408,11 @@ export default defineComponent({
               上传
             </a-button>
           </a-upload>
+          <a-tooltip title="收起工作区">
+            <a-button size="small" @click="toggleSandbox">
+              <template #icon><ArrowLeftOutlined /></template>
+            </a-button>
+          </a-tooltip>
         </a-space>
       </header>
 
@@ -1570,6 +1611,13 @@ export default defineComponent({
   gap: 12px;
   height: calc(100vh - 140px);
   padding: 12px;
+}
+
+// 沙箱收起：右栏已 v-show 隐藏，对话框从固定 55% 改为撑满剩余宽度
+.hermes-page.is-sandbox-collapsed {
+  .hermes-chat {
+    flex: 1 1 auto;
+  }
 }
 
 // ==================== 左侧对话框 ====================
