@@ -99,14 +99,14 @@ def opensandbox_options() -> dict:
     return {
         "domain": str(cfg.get("domain") or "").strip(),
         "api_key": str(cfg.get("api_key") or "").strip(),
-        "protocol": "https" if protocol == "https" else "http",
+        # "protocol": "https" if protocol == "https" else "http",
         "image": str(cfg.get("image") or "").strip() or None,
-        "request_timeout_seconds": _as_int(cfg.get("request_timeout_seconds"),
-                                           10, 600, 60),
-        "timeout_seconds": _as_int(cfg.get("timeout_seconds"), 30, 3600, 3600),
-        "resource": dict(resource) if isinstance(resource, dict) else None,
-        "env": {str(k): str(v) for k, v in env.items()}
-        if isinstance(env, dict) else None,
+        # "request_timeout_seconds": _as_int(cfg.get("request_timeout_seconds"),
+        #                                    10, 600, 60),
+        # "timeout_seconds": _as_int(cfg.get("timeout_seconds"), 30, 3600, 3600),
+        # "resource": dict(resource) if isinstance(resource, dict) else None,
+        # "env": {str(k): str(v) for k, v in env.items()}
+        # if isinstance(env, dict) else None,
     }
 
 
