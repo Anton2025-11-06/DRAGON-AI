@@ -18,6 +18,8 @@ import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
+  DoubleLeftOutlined,
+  DoubleRightOutlined,
   FileTextFilled,
   FolderFilled,
   LoadingOutlined,
@@ -195,6 +197,8 @@ export default defineComponent({
     CloudDownloadOutlined,
     CloudUploadOutlined,
     DeleteOutlined,
+    DoubleLeftOutlined,
+    DoubleRightOutlined,
     FileTextFilled,
     FolderFilled,
     LoadingOutlined,
@@ -245,6 +249,13 @@ export default defineComponent({
     function bufFor(sid: number): ChatMsg[] {
       if (!sessionStore[sid]) sessionStore[sid] = [];
       return sessionStore[sid];
+    }
+    /** 该会话是否还有活动订阅（有则在往缓冲实时写）：有就绝不重载，否则会清空正被写的 target */
+    function hasLiveStream(sid: number): boolean {
+      for (const st of turnStreams.values()) {
+        if (st.sessionId === sid) return true;
+      }
+      return false;
     }
     const inputValue = ref('');
     const sending = ref(false);
@@ -311,9 +322,10 @@ export default defineComponent({
 
     async function switchSession(s: api.HarnessSession) {
       sessionId.value = s.id;
-      // 已加载过的会话直接复用缓冲（后台流一直在往里写），不重载：
-      // 重载会用库里"截至落库"的内容覆盖，而 Redis 频道不回放 → 实时片段反而丢了
-      if (!loadedSessions.has(s.id)) await loadMessages(s.id);
+      // 已加载过、或还有活动流的会话直接复用缓冲（后台流一直在往里写），不重载：
+      // 重载会 buf.length=0 清空正被实时写入的 target，而 RUNNING 轮 Redis 不回放
+      // → 旧增量丢、新帧又进不了重建出的空气泡（永远“AI 正在思考…”）
+      if (!loadedSessions.has(s.id) && !hasLiveStream(s.id)) await loadMessages(s.id);
       // 先拉齐候选再匹配名称（挂载回显要按 id 找 name）
       await ensurePickerOptions();
       // 模型与挂载不绑会话：按该会话最近一轮回显 composer；无历史则清空草稿
@@ -533,6 +545,8 @@ export default defineComponent({
       }
 
       const sid = sessionId.value;
+      // 本轮由本屏发起、实时写入本会话缓冲：标为已加载，切走再回来不触发 DB 重载
+      loadedSessions.add(sid);
       bufFor(sid).push({ role: 'user', content: displayText });
       sending.value = true;
       scrollToBottom();
@@ -1139,7 +1153,7 @@ export default defineComponent({
         </div>
         <a-tooltip v-if="sandboxCollapsed" title="展开沙箱工作区">
           <a-button size="small" @click="toggleSandbox">
-            <template #icon><FolderFilled /></template>
+            <template #icon><DoubleLeftOutlined /></template>
             展开工作区
           </a-button>
         </a-tooltip>
@@ -1389,7 +1403,7 @@ export default defineComponent({
       <header class="hermes-sandbox-header">
         <span class="hermes-sandbox-title">
           <span class="sandbox-dot"></span>
-          沙箱工作区 <small>（{{ workspace }}）</small>
+          沙箱工作区
         </span>
         <a-space>
           <a-tooltip title="回退到上一级">
@@ -1410,7 +1424,7 @@ export default defineComponent({
           </a-upload>
           <a-tooltip title="收起工作区">
             <a-button size="small" @click="toggleSandbox">
-              <template #icon><ArrowLeftOutlined /></template>
+              <template #icon><DoubleRightOutlined /></template>
             </a-button>
           </a-tooltip>
         </a-space>
