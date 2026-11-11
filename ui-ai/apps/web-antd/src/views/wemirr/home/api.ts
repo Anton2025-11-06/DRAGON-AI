@@ -247,6 +247,9 @@ export function SandboxUpload(
           onProgress(Math.round((e.loaded / e.total) * 100));
         }
       },
+      // 后端把文件同步写进沙箱走 base64-over-Bash 分块通道，大文件耗时远超客户端默认 10s
+      // 超时（超时即被 axios abort，连接中断，故表现为“网络异常/请求日志皆无”），单文件上限 200MB 这里放宽到 10 分钟
+      timeout: 600_000,
     },
   );
 }

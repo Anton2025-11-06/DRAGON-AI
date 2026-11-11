@@ -70,7 +70,7 @@ server {
         proxy_send_timeout 3600s;
 
         # 上传上限：深度探索 harness 沙箱文件上传单文件 200MB，这里留 multipart 边界余量放到 220m
-        # client_max_body_size 220m;
+        client_max_body_size 220m;
     }
 
     # vite 构建已产出 .gz（VITE_COMPRESS=gzip），有预压缩文件就直接发，省 CPU

@@ -1221,12 +1221,10 @@ export default defineComponent({
       uploading.value = false;
       if (ok > 0) message.success(`${ok} 个文件上传成功`);
       loadSandboxFiles();
-      // 完成后短暂驻留：成功项 3s 后自动收起，失败项留下便于排障
+      // 完成后短暂驻留：无论成功还是失败，进度条都在 2s 后自动清除（失败已有 toast 提示，不长期占用列表）
       setTimeout(() => {
-        sandboxUploads.value = sandboxUploads.value.filter(
-          (e) => e.status === 'error',
-        );
-      }, 3000);
+        sandboxUploads.value = [];
+      }, 2000);
     }
 
     /** 对话框“添加附件”：多文件不限格式，同样只在首个启动整批顺序上传 */
