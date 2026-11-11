@@ -733,6 +733,7 @@ CREATE TABLE IF NOT EXISTS `tb_harness_message` (
     `model_name`  VARCHAR(128) DEFAULT NULL COMMENT '本轮实际使用的模型标识（ASSISTANT 行，worker 构造模型后回写）',
     `model_id`    BIGINT    NOT NULL DEFAULT 0 COMMENT '本轮模型 id（模型/工具每轮可切换，随消息行落库；worker 按它命中 Redis model_rate_limit_config）',
     `mounts`      JSON         COMMENT '本轮挂载快照 {kbIds:[],mcpIds:[],toolIds:[],skillIds:[]}（执行侧另有 ACL 二次校验）',
+    `attachments` JSON         COMMENT '本轮附件引用 [{name,path}]（落 USER 行；文件已存沙箱工作区，worker 注入路径提示让模型自行读取解析）',
     `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_hm_turn` (`turn_id`, `role`),

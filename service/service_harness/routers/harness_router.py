@@ -120,7 +120,8 @@ async def send_chat(request: Request, body: ChatReq):
     login_user = await get_login_user(request)
     try:
         turn = await HarnessSessionService.create_turn(
-            login_user, body.sessionId, body.message, body.modelId, body.mounts)
+            login_user, body.sessionId, body.message, body.modelId, body.mounts,
+            [a.model_dump() for a in body.attachments] if body.attachments else None)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 
@@ -243,7 +244,7 @@ async def harness_sandbox_file(request: Request, path: str = sandbox_file_servic
 async def harness_sandbox_upload(request: Request, path: str = Form(sandbox_file_service.WORKSPACE_ROOT),
                                  session_id: str = Form(""),
                                  file: UploadFile = File(...)):
-    """base64 分块写入（跟 agentscope 快照同款通道，单次≤20MB）。"""
+    """base64 分块写入（跟 agentscope 快照同款通道，单文件≤200MB）。"""
     login_user = await get_login_user(request)
     content = await file.read()
     try:

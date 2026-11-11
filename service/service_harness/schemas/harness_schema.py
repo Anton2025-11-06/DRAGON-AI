@@ -34,6 +34,17 @@ class SessionUpdateReq(BaseModel):
                                   description="会话状态 ACTIVE/ARCHIVED")
 
 
+class AttachmentItem(BaseModel):
+    """附件引用：文件已由前端上传进沙箱工作区，这里只带文件名与工作区绝对路径。
+
+    不做后端预解析：模型自带 Read/Glob/Grep/Bash 等工具，会在本轮自行读取解析；
+    服务端只把这个路径告知模型「工作区里有这个文件」。
+    """
+
+    name: str = Field(..., max_length=256, description="文件名")
+    path: str = Field(..., max_length=1024, description="沙箱工作区绝对路径")
+
+
 class ChatReq(BaseModel):
     """发一轮对话：建 turn（USER 行 + ASSISTANT 行 RUNNING）→ 投 arq harness 流水线。
 
@@ -45,3 +56,5 @@ class ChatReq(BaseModel):
     modelId: int = Field(..., ge=1, description="本轮选用的模型 id")
     mounts: Optional[MountsReq] = Field(
         None, description="本轮挂载快照（不传=本轮不挂载任何能力）")
+    attachments: Optional[list[AttachmentItem]] = Field(
+        None, max_length=20, description="本轮附件（已上传到沙箱工作区的文件引用，落 USER 行供 worker 注入提示）")

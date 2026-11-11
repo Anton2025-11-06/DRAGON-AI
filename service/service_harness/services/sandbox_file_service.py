@@ -47,9 +47,9 @@ class HarnessSandboxError(Exception):
 # ==================== 大小限制 ====================
 
 READ_TEXT_MAX = 200 * 1024  # 文本预览截断（字节）
-UPLOAD_MAX = 20 * 1024 * 1024  # 上传上限（分块传输，超过明显变慢）
-DOWNLOAD_MAX = 100 * 1024 * 1024  # 下载上限（backend.read_file 单次整份回传）
-_UPLOAD_CHUNK = 64 * 1024  # 单条命令携带的 base64 字符数（< 128KiB）
+UPLOAD_MAX = 200 * 1024 * 1024  # 上传上限（单文件 200MB；base64 分块落沙箱，大文件较慢）
+DOWNLOAD_MAX = 200 * 1024 * 1024  # 下载上限（backend.read_file 单次整份回传）
+_UPLOAD_CHUNK = 1024 * 1024  # 单条命令携带的 base64 字符数（< 128KiB）
 
 # 工作区绝对根目录（OpenSandbox 镜像契约，沙箱内固定为 /workspace）。
 # 历史上曾试过读 workspace.workdir，但那个属性有时是宿主机路径、有时直接读不到，
@@ -304,7 +304,10 @@ async def save_file(login_user: dict, dir_path: str, filename: str,
                 await _run(entry, f"{cd} && rm -f {tmp}")
             except HarnessSandboxError as e:
                 log.warning("harness sandbox temp cleanup failed: {}", e)
-        return {"name": posixpath.basename(target), "size": len(content)}
+        # 回绝对路径，前端添加附件时直接把它作为 attachment.path 传给 /chat
+        abs_path = f"{WORKSPACE_ROOT}/{target}"
+        return {"name": posixpath.basename(target), "size": len(content),
+                "path": abs_path}
 
 
 async def _stat_size(entry: dict, rel: str) -> int:

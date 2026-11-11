@@ -15,6 +15,7 @@ import {
   ArrowLeftOutlined,
   BulbOutlined,
   CheckCircleOutlined,
+  CloseOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
@@ -24,6 +25,7 @@ import {
   FolderFilled,
   LoadingOutlined,
   MoreOutlined,
+  PaperClipOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -179,6 +181,8 @@ interface ChatMsg {
   segments?: Segment[];
   /** 本轮 turnId：多会话并发时按会话定位在跑的轮（中断/关流用） */
   turnId?: string;
+  /** 本轮用户消息携带的附件引用（user 气泡展示 + 历史回显） */
+  attachments?: api.HarnessAttachment[];
 }
 
 /** 已挂载条目 */
@@ -188,12 +192,25 @@ interface MountedItem {
   source: 'kb' | 'mcp' | 'skill' | 'tool';
 }
 
+/** 上传任务条目：沙箱工作区面板与对话框附件共用（逐个顺序上传、各自进度） */
+interface UploadEntry {
+  uid: string;
+  name: string;
+  size: number;
+  /** 上传进度百分比 0-100 */
+  percent: number;
+  status: 'done' | 'error' | 'uploading';
+  /** 上传成功后的沙箱工作区绝对路径（附件发送时用） */
+  path?: string;
+}
+
 export default defineComponent({
   name: 'HernesExplorerPage',
   components: {
     ArrowLeftOutlined,
     BulbOutlined,
     CheckCircleOutlined,
+    CloseOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
     DeleteOutlined,
@@ -204,6 +221,7 @@ export default defineComponent({
     LoadingOutlined,
     MarkdownRenderer,
     MoreOutlined,
+    PaperClipOutlined,
     PlusOutlined,
     ReloadOutlined,
     RobotOutlined,
@@ -287,6 +305,20 @@ export default defineComponent({
     const uploading = ref(false);
     const fileVisible = ref(false);
     const fileData = ref<api.SandboxFileRep | null>(null);
+    // ==================== 文件上传（多文件、逐个顺序、各自进度）====================
+    /** 单文件上限 200MB（与后端 UPLOAD_MAX 对齐） */
+    const MAX_UPLOAD_MB = 200;
+    /** 对话框附件落工作区的子目录（保持工作区根整洁；后端 save_file 会 mkdir -p） */
+    const ATTACHMENT_DIR = `${WORKSPACE_ROOT}/attachments`;
+    /** 沙箱工作区面板的上传任务列表（带进度，完成后短暂驻留） */
+    const sandboxUploads = ref<UploadEntry[]>([]);
+    /** 对话框待发送的附件列表（发送后清空） */
+    const chatAttachments = ref<UploadEntry[]>([]);
+    let uploadSeq = 0;
+    function nextUploadUid(): string {
+      uploadSeq += 1;
+      return `up-${Date.now()}-${uploadSeq}`;
+    }
     /** 沙箱工作区是否收起：true 时隐藏右栏、对话框横向铺满 */
     const sandboxCollapsed = ref(false);
     function toggleSandbox() {
@@ -475,7 +507,11 @@ export default defineComponent({
         const askCache = readAskUserCache()[sid];
         for (const row of rows) {
           if (row.role === 'USER') {
-            buf.push({ role: 'user', content: row.content });
+            buf.push({
+              role: 'user',
+              content: row.content,
+              attachments: row.attachments,
+            });
             continue;
           }
           // 历史轮：落库正文/思考/轨迹合成时间线片段后渲染
@@ -582,17 +618,30 @@ export default defineComponent({
         interruptTurn();
         return;
       }
-      if (!text || sending.value) return;
+      if (sending.value) return;
+      if (chatAttachments.value.some((a) => a.status === 'uploading')) {
+        message.warning('还有文件在上传中，请稍候再发送');
+        return;
+      }
+      const atts = readyAttachments();
+      if (!text && atts.length === 0) return;
       if (!modelId.value) {
         message.warning('请先在下方选择一个已授权的模型');
         return;
       }
+      const messageText = text || '请分析我上传的附件';
+      const displayText = text || `已上传 ${atts.length} 个附件`;
       inputValue.value = '';
-      await postTurn(text, text);
+      chatAttachments.value = []; // 发送即清草稿附件
+      await postTurn(messageText, displayText, atts);
     }
 
-    /** 发一轮：messageText 给后端，displayText 给用户气泡（AskUser 走 JSON 时用可读文本回显） */
-    async function postTurn(messageText: string, displayText: string) {
+    /** 发一轮：messageText 给后端，displayText 给用户气泡（AskUser 走 JSON 时用可读文本回显），attachments 随消息传 */
+    async function postTurn(
+      messageText: string,
+      displayText: string,
+      attachments?: api.HarnessAttachment[],
+    ) {
       // 首条消息自动建会话：只落标题，模型与挂载随每次发消息传
       if (!sessionId.value) {
         try {
@@ -609,7 +658,11 @@ export default defineComponent({
       const sid = sessionId.value;
       // 本轮由本屏发起、实时写入本会话缓冲：标为已加载，切走再回来不触发 DB 重载
       loadedSessions.add(sid);
-      bufFor(sid).push({ role: 'user', content: displayText });
+      bufFor(sid).push({
+        role: 'user',
+        content: displayText,
+        attachments: attachments && attachments.length ? attachments : undefined,
+      });
       sending.value = true;
       scrollToBottom();
       try {
@@ -618,6 +671,7 @@ export default defineComponent({
           message: messageText,
           modelId: modelId.value,
           mounts: currentMounts(),
+          attachments: attachments && attachments.length ? attachments : undefined,
         });
         void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
         subscribeTurn(sid, res.turnId);
@@ -1086,26 +1140,122 @@ export default defineComponent({
       }
     }
 
-    /** 上传文件到当前目录 */
-    function beforeUpload(file: File) {
-      uploadFile(file);
+    /** 上传单个文件：写 entry 的 percent/status/path（entry 必须是回取的响应式代理） */
+    async function uploadOneFile(
+      entry: UploadEntry,
+      dir: string,
+      file: File,
+    ): Promise<boolean> {
+      entry.status = 'uploading';
+      entry.percent = 0;
+      try {
+        const res = await api.SandboxUpload(dir, file, (p) => {
+          entry.percent = p;
+        });
+        entry.name = res.name || file.name;
+        entry.path = res.path || `${dir}/${file.name}`;
+        entry.percent = 100;
+        entry.status = 'done';
+        return true;
+      } catch {
+        entry.status = 'error';
+        return false;
+      }
+    }
+
+    /** 建条目并 push 后回取响应式代理（直接改原始对象不触发视图更新） */
+    function pushUploadEntry(
+      list: typeof sandboxUploads,
+      file: File,
+    ): UploadEntry {
+      list.value.push({
+        uid: nextUploadUid(),
+        name: file.name,
+        size: file.size,
+        percent: 0,
+        status: 'uploading',
+      });
+      return list.value[list.value.length - 1] as UploadEntry;
+    }
+
+    /** 过滤掉超过 200MB 的文件并提示；返回可上传的批次 */
+    function filterBySize(files: File[]): File[] {
+      const max = MAX_UPLOAD_MB * 1024 * 1024;
+      const ok = files.filter((f) => f.size <= max);
+      const over = files.filter((f) => f.size > max);
+      if (over.length > 0) {
+        message.warning(
+          `已跳过超过 ${MAX_UPLOAD_MB}MB 的文件：${over
+            .map((f) => f.name)
+            .join('、')}`,
+        );
+      }
+      return ok;
+    }
+
+    /** 沙箱工作区上传：多文件选择，a-upload 对每个文件都回调一次，只在首个启动整批顺序上传 */
+    function beforeUpload(file: any, fileList: any[]) {
+      if (file === fileList[0]) {
+        void runSandboxBatch(filterBySize(fileList as File[]));
+      }
+      return false; // 阻止 a-upload 默认上传，改由我们手动顺序传
+    }
+
+    /** 顺序（不并发）上传一批到当前目录，每条带进度 */
+    async function runSandboxBatch(files: File[]) {
+      if (files.length === 0) return;
+      uploading.value = true;
+      let ok = 0;
+      for (const f of files) {
+        const entry = pushUploadEntry(sandboxUploads, f);
+        if (
+          await uploadOneFile(
+            entry,
+            currentPath.value || WORKSPACE_ROOT,
+            f,
+          )
+        ) {
+          ok += 1;
+        }
+      }
+      uploading.value = false;
+      if (ok > 0) message.success(`${ok} 个文件上传成功`);
+      loadSandboxFiles();
+      // 完成后短暂驻留：成功项 3s 后自动收起，失败项留下便于排障
+      setTimeout(() => {
+        sandboxUploads.value = sandboxUploads.value.filter(
+          (e) => e.status === 'error',
+        );
+      }, 3000);
+    }
+
+    /** 对话框“添加附件”：多文件不限格式，同样只在首个启动整批顺序上传 */
+    function onChatAttachPick(file: any, fileList: any[]) {
+      if (file === fileList[0]) {
+        void runChatAttachBatch(filterBySize(fileList as File[]));
+      }
       return false;
     }
 
-    async function uploadFile(file: File) {
-      uploading.value = true;
-      try {
-        const res = await api.SandboxUpload(
-          currentPath.value || WORKSPACE_ROOT,
-          file,
-        );
-        message.success(`文件 ${res.name} 上传成功`);
-        loadSandboxFiles();
-      } catch {
-        message.error('上传失败');
-      } finally {
-        uploading.value = false;
+    /** 附件顺序上传到工作区附件目录（不并发，各自进度） */
+    async function runChatAttachBatch(files: File[]) {
+      for (const f of files) {
+        const entry = pushUploadEntry(chatAttachments, f);
+        await uploadOneFile(entry, ATTACHMENT_DIR, f);
       }
+    }
+
+    /** 发送前移除某个附件（或移除上传失败项） */
+    function removeChatAttachment(entry: UploadEntry) {
+      const i = chatAttachments.value.indexOf(entry);
+      if (i !== -1) chatAttachments.value.splice(i, 1);
+    }
+
+    /** 就绪（上传成功）的附件引用：发送时随消息带上 */
+    function readyAttachments(): api.HarnessAttachment[] {
+      return chatAttachments.value
+        .filter((a) => a.status === 'done' && a.path)
+        .map((a) => ({ name: a.name, path: a.path as string }));
     }
 
     // pathBreadcrumbClick 已删：面包屑非根段改由 subSegments 直接递对应的绝对 path 给 loadSandboxFiles。
@@ -1166,6 +1316,11 @@ export default defineComponent({
       WORKSPACE_ROOT,
       sandboxCollapsed,
       toggleSandbox,
+      // 多文件上传 + 对话框附件
+      sandboxUploads,
+      chatAttachments,
+      onChatAttachPick,
+      removeChatAttachment,
     };
   },
 });
@@ -1391,9 +1546,19 @@ export default defineComponent({
               </a-button>
             </div>
           </div>
-          <!-- 用户气泡：原样文本（用户输入不做 md 渲染，保留换行即可） -->
-          <div v-else class="hermes-bubble" style="white-space: pre-wrap">
-            {{ msg.content }}
+          <!-- 用户气泡：原样文本（用户输入不做 md 渲染，保留换行即可）+ 附件小标签 -->
+          <div v-else class="hermes-user-wrap">
+            <div class="hermes-bubble" style="white-space: pre-wrap">
+              {{ msg.content }}
+            </div>
+            <div
+              v-if="msg.attachments && msg.attachments.length > 0"
+              class="hermes-msg-attach"
+            >
+              <a-tag v-for="f in msg.attachments" :key="f.path" color="blue">
+                <PaperClipOutlined /> {{ f.name }}
+              </a-tag>
+            </div>
           </div>
           <div v-if="msg.role === 'user'" class="hermes-avatar user">我</div>
         </div>
@@ -1437,6 +1602,15 @@ export default defineComponent({
           >
             <PlusOutlined /> 知识库
           </button>
+          <a-upload
+            :before-upload="onChatAttachPick"
+            :multiple="true"
+            :show-upload-list="false"
+          >
+            <button class="hermes-add-btn is-attach" type="button">
+              <PaperClipOutlined /> 附件
+            </button>
+          </a-upload>
           <span v-if="mountedItems.length > 0" class="hermes-add-count">
             已挂载 {{ mountedItems.length }} 项
           </span>
@@ -1448,6 +1622,39 @@ export default defineComponent({
             :value="modelId || undefined"
             @change="changeModel"
           />
+        </div>
+        <!-- 待发送附件：逐个上传进度条 + 百分比，可单个移除 -->
+        <div v-if="chatAttachments.length > 0" class="hermes-attach-list">
+          <div
+            v-for="a in chatAttachments"
+            :key="a.uid"
+            class="hermes-attach-item"
+            :class="a.status"
+          >
+            <PaperClipOutlined class="hermes-attach-icon" />
+            <div class="hermes-attach-main">
+              <span class="hermes-attach-name" :title="a.name">{{ a.name }}</span>
+              <a-progress
+                :percent="a.percent"
+                size="small"
+                :status="
+                  a.status === 'error'
+                    ? 'exception'
+                    : a.status === 'done'
+                      ? 'success'
+                      : 'active'
+                "
+              />
+            </div>
+            <a-button
+              type="text"
+              size="small"
+              class="hermes-attach-del"
+              @click="removeChatAttachment(a)"
+            >
+              <template #icon><CloseOutlined /></template>
+            </a-button>
+          </div>
         </div>
         <div class="hermes-input-row">
           <a-textarea
@@ -1487,7 +1694,11 @@ export default defineComponent({
               <template #icon><ReloadOutlined /></template>
             </a-button>
           </a-tooltip>
-          <a-upload :before-upload="beforeUpload" :show-upload-list="false">
+          <a-upload
+            :before-upload="beforeUpload"
+            :multiple="true"
+            :show-upload-list="false"
+          >
             <a-button size="small" type="primary" :loading="uploading">
               <template #icon><CloudUploadOutlined /></template>
               上传
@@ -1500,6 +1711,24 @@ export default defineComponent({
           </a-tooltip>
         </a-space>
       </header>
+
+      <!-- 多文件上传进度：每个文件一行进度条 + 百分比 -->
+      <div v-if="sandboxUploads.length > 0" class="hermes-upload-progress">
+        <div v-for="u in sandboxUploads" :key="u.uid" class="hermes-upload-row">
+          <span class="hermes-upload-name" :title="u.name">{{ u.name }}</span>
+          <a-progress
+            :percent="u.percent"
+            size="small"
+            :status="
+              u.status === 'error'
+                ? 'exception'
+                : u.status === 'done'
+                  ? 'success'
+                  : 'active'
+            "
+          />
+        </div>
+      </div>
 
       <!-- 路径面包屑 -->
       <a-breadcrumb class="hermes-path">
@@ -1795,6 +2024,26 @@ export default defineComponent({
           color: #fff;
           border-radius: 10px 2px 10px 10px;
         }
+
+        // 用户一侧靠右：文本 + 附件标签竖排，整块限宽
+        .hermes-user-wrap {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 6px;
+          max-width: 78%;
+
+          .hermes-bubble {
+            max-width: 100%;
+          }
+        }
+      }
+
+      .hermes-msg-attach {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: flex-end;
       }
 
       &.is-ai {
@@ -1939,6 +2188,12 @@ export default defineComponent({
           background: rgba(114, 46, 209, 0.1);
           border-color: rgba(114, 46, 209, 0.32);
         }
+
+        &.is-attach {
+          color: #13c2c2;
+          background: rgba(19, 194, 194, 0.1);
+          border-color: rgba(19, 194, 194, 0.32);
+        }
       }
 
       .hermes-add-count {
@@ -1950,6 +2205,56 @@ export default defineComponent({
         margin-left: auto;
         width: 160px;
         flex-shrink: 0;
+      }
+    }
+
+    // 待发送附件列表：每项一行（回形针 + 文件名/进度条 + 删除）
+    .hermes-attach-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 10px;
+
+      .hermes-attach-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border: 1px solid var(--border-color, #f0f0f0);
+        border-radius: 8px;
+        background: var(--hover-color, #f8fafc);
+
+        &.error {
+          border-color: #ffccc7;
+          background: rgba(255, 77, 79, 0.04);
+        }
+
+        .hermes-attach-icon {
+          flex-shrink: 0;
+          color: #13c2c2;
+        }
+
+        .hermes-attach-main {
+          flex: 1;
+          min-width: 0;
+
+          .hermes-attach-name {
+            display: block;
+            overflow: hidden;
+            font-size: 12px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+
+          :deep(.ant-progress) {
+            margin: 0;
+            line-height: 1.2;
+          }
+        }
+
+        .hermes-attach-del {
+          flex-shrink: 0;
+        }
       }
     }
 
@@ -2018,6 +2323,36 @@ export default defineComponent({
 
     .hermes-path-item {
       cursor: pointer;
+    }
+  }
+
+  // 多文件上传进度列表（每文件一行进度条 + 百分比）
+  .hermes-upload-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color, #f0f0f0);
+    background: var(--hover-color, #f8fafc);
+
+    .hermes-upload-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+
+      .hermes-upload-name {
+        flex: 0 0 40%;
+        min-width: 0;
+        overflow: hidden;
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      :deep(.ant-progress) {
+        flex: 1;
+        margin: 0;
+      }
     }
   }
 

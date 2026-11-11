@@ -57,6 +57,14 @@ export interface ToolCallTrace {
   purpose?: string;
 }
 
+/** 附件引用（文件已上传到沙箱工作区，发送时随消息带上，worker 注入路径提示给模型） */
+export interface HarnessAttachment {
+  /** 文件名 */
+  name: string;
+  /** 沙箱工作区绝对路径 */
+  path: string;
+}
+
 /** 深度探索消息（一轮两行：USER + ASSISTANT，按 turnId 关联） */
 export interface HarnessMessage {
   id: number;
@@ -72,6 +80,8 @@ export interface HarnessMessage {
   /** 本轮模型 id（切换会话时按最后一轮回显 composer 选择） */
   modelId?: number;
   mounts?: Partial<HarnessMounts>;
+  /** 本轮附件引用（USER 行才有；历史回显用） */
+  attachments?: HarnessAttachment[];
   createTime: string;
 }
 
@@ -181,6 +191,7 @@ export function HarnessModels() {
 
 /** 发送一轮对话：本轮模型与挂载一并传后端 → 建 turn → 投 arq harness 流水线 → 返回 turnId */
 export function HarnessChat(body: {
+  attachments?: HarnessAttachment[];
   message: string;
   modelId: number;
   mounts?: Partial<HarnessMounts>;
@@ -215,13 +226,27 @@ export function SandboxFile(path: string) {
   });
 }
 
-/** 上传文件到当前目录（path 通过 FormData 传递，单次≤20MB） */
-export function SandboxUpload(path: string, file: File) {
-  return defHttp.upload<{ name: string; size: number }>(
+/**
+ * 上传单个文件到指定目录（path 通过 FormData 传递，单文件≤200MB）。
+ * onProgress(percent 0-100) 回传浏览器→服务端的上传进度；返回落沙箱后的文件名/字节数/绝对路径。
+ */
+export function SandboxUpload(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+) {
+  return defHttp.upload<{ name: string; path: string; size: number }>(
     '/api/harness/sandbox/upload',
     {
       path,
       file,
+    },
+    {
+      onUploadProgress: (e) => {
+        if (onProgress && e.total) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      },
     },
   );
 }

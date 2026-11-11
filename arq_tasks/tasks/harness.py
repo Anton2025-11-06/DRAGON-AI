@@ -440,6 +440,28 @@ def _pending_questions(awaiting: list) -> list[dict]:
     return out
 
 
+def _compose_user_message(message: str, attachments: list) -> str:
+    """把附件引用拼进给模型的正文：告知工作区路径，让模型用自带工具自行读取解析。
+
+    后端不做预解析（模型会自己想办法读 pdf/docx/xlsx 等各种格式）：这里只
+    在用户正文后面追一段“工作区里有这些文件 + 绝对路径 + 用什么工具读”的提示。
+    无附件时原样返回正文（不添噪声）。
+    """
+    text = message or ""
+    files = [a for a in (attachments or [])
+             if isinstance(a, dict) and str(a.get("path") or "").strip()]
+    if not files:
+        return text
+    lines = []
+    for a in files:
+        name = str(a.get("name") or a["path"]).strip()
+        lines.append(f"- {name}（路径：{str(a['path']).strip()}）")
+    block = "\n".join(lines)
+    header = ("[用户上传了以下附件文件，已存放在沙箱工作区，"
+              "请用 Read/Glob/Grep/Bash 等工具自行读取并解析其内容]")
+    return f"{text}\n\n{header}\n{block}" if text else f"{header}\n{block}"
+
+
 async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                         model, workspace, mounted) -> dict:
     """恢复 state → 组装 Agent → 跑一轮 reply_stream，返回累积结果。
@@ -500,10 +522,14 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
             await _publish(turn_id, "turn.started", {})
             # M3 HITL 恢复：上轮挂起的待答（AskUser / 授权确认）由本轮用户
             # 消息续答（demo drain_hitl 的跨轮版，一轮答一个挂起）；无挂起才
-            # 走正常 UserMsg
+            # 走正常 UserMsg。注意：续答分支必须用原始消息（可能是 answers 的
+            # JSON，被附件提示拼进去会破坏 _build_ask_user_metadata 的 JSON 解析）。
             inputs = _hitl_resume_inputs(agent, snapshot["message"])
             if inputs is None:
-                inputs = UserMsg(name="user", content=snapshot["message"])
+                # 正常轮：把已上传沙箱工作区的附件路径注入正文，让模型自行读取解析
+                user_text = _compose_user_message(
+                    snapshot["message"], snapshot.get("attachments"))
+                inputs = UserMsg(name="user", content=user_text)
             stream = agent.reply_stream(inputs)
             async for evt in stream:
                 if isinstance(evt, TextBlockDeltaEvent):

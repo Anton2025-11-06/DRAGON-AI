@@ -68,4 +68,7 @@ class HarnessMessage(Base):
     # 本轮模型与挂载快照（模型/工具每轮可切换，随消息行落库；worker 据此按 model_id 取配置、组 toolkit）
     model_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="本轮模型 id")
     mounts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="本轮挂载快照")
+    # 本轮附件引用 [{name,path}]（落 USER 行）：文件已存沙箱工作区，worker 把路径注入
+    # 提示让模型用自带工具自行读取解析（后端不做预解析）。
+    attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="本轮附件引用")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

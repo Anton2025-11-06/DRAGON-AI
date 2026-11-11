@@ -63,6 +63,8 @@ def _message_dto(row: HarnessMessage) -> dict:
         # 本轮模型与挂载（前端切会话时按最后一轮回显）
         "modelId": row.model_id,
         "mounts": row.mounts or {},
+        # 本轮附件引用（USER 行才有，其余行返回空数组）
+        "attachments": row.attachments or [],
         "createTime": row.create_time.strftime("%Y-%m-%d %H:%M:%S") if row.create_time else None,
     }
 
@@ -188,19 +190,22 @@ class HarnessSessionService:
     @staticmethod
     async def create_turn(login_user: dict, session_id: int, message: str,
                           model_id: int,
-                          mounts: Optional[MountsReq]) -> dict:
+                          mounts: Optional[MountsReq],
+                          attachments: Optional[list[dict]] = None) -> dict:
         """开一轮对话：USER 行 + ASSISTANT 行（RUNNING），返回投递要用的全部事实。
 
         本轮的模型与挂载都落在消息行上（同一会话里逐轮可切换），worker 从
         ASSISTANT 行取它们跑本轮。模型的授权在可选清单接口已收口（这里不再回查），
         挂载的 ACL 校验在 worker 侧（ensure_action）做——这里是「本轮想用什么」
-        的记录口，不是信任边界。
+        的记录口，不是信任边界。附件引用（已上传沙箱的文件）落 USER 行，
+        worker 经 turn_snapshot 取到后注入提示让模型自行读取。
         :raises ValueError: 会话不存在 / 不属于本人 / 已归档
         """
         user_id = int(login_user.get("user_id") or 0)
         turn_id = str(uuid4())
         effective = mounts.model_dump() if mounts is not None else {}
         mid = int(model_id or 0)
+        files = attachments or []
         async with mysql_client.get_session() as session:
             row = await session.get(HarnessSession, session_id)
             if row is None or row.user_id != user_id:
@@ -210,7 +215,7 @@ class HarnessSessionService:
             session.add_all([
                 HarnessMessage(session_id=session_id, turn_id=turn_id, role=ROLE_USER,
                                content=message, status=TURN_COMPLETED,
-                               model_id=mid, mounts=effective),
+                               model_id=mid, mounts=effective, attachments=files),
                 HarnessMessage(session_id=session_id, turn_id=turn_id, role=ROLE_ASSISTANT,
                                status=TURN_RUNNING,
                                model_id=mid, mounts=effective),
@@ -232,15 +237,17 @@ class HarnessSessionService:
             sess = await session.get(HarnessSession, msg.session_id)
             if sess is None:
                 return None
+            user_row = (await session.execute(
+                select(HarnessMessage.content, HarnessMessage.attachments)
+                .where(HarnessMessage.turn_id == turn_id,
+                       HarnessMessage.role == ROLE_USER)
+            )).one_or_none()
             return {
                 "turnId": turn_id, "sessionId": sess.id, "userId": sess.user_id,
                 "modelId": msg.model_id, "modelName": msg.model_name,
                 "mounts": msg.mounts or {}, "status": msg.status,
-                "message": (await session.execute(
-                    select(HarnessMessage.content)
-                    .where(HarnessMessage.turn_id == turn_id,
-                           HarnessMessage.role == ROLE_USER)
-                )).scalar_one_or_none(),
+                "message": user_row[0] if user_row else None,
+                "attachments": (user_row[1] if user_row else None) or [],
             }
 
     @staticmethod
