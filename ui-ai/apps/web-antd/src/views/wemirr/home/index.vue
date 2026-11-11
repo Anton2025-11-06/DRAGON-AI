@@ -423,11 +423,56 @@ export default defineComponent({
       };
     }
 
+    // ==================== AskUser 挂起快照（纯前端持久化）====================
+    // askUser 的结构化待答问题只随 SSE turn.interrupted 帧到达、只活在内存缓冲里；
+    // 组件重建（刷新 / 离开页面再回来）时缓冲清空、重载历史只剩 question 文本、选项没了。
+    // 这里按会话在 sessionStorage 存一份最近挂起快照，重建消息时按 turnId 还原选项表单。
+    const ASK_USER_CACHE_KEY = 'harness:askuser';
+    type AskUserCache = Record<
+      string,
+      { pending: api.PendingQuestion[]; turnId: string }
+    >;
+    function readAskUserCache(): AskUserCache {
+      try {
+        return JSON.parse(sessionStorage.getItem(ASK_USER_CACHE_KEY) || '{}');
+      } catch {
+        return {};
+      }
+    }
+    /** 记某会话最近的挂起问题（只留最新一份：表单本就只在末条消息渲染） */
+    function saveAskUserCache(
+      sid: number,
+      turnId: string,
+      pending: api.PendingQuestion[],
+    ) {
+      const cache = readAskUserCache();
+      cache[sid] = { turnId, pending };
+      try {
+        sessionStorage.setItem(ASK_USER_CACHE_KEY, JSON.stringify(cache));
+      } catch {
+        // 容量满即放弃，不影响本会话实时显示
+      }
+    }
+    /** 作答后清快照，避免刷新又还原出已提交的历史表单 */
+    function clearAskUserCache(sid: number) {
+      const cache = readAskUserCache();
+      if (cache[sid]) {
+        delete cache[sid];
+        try {
+          sessionStorage.setItem(ASK_USER_CACHE_KEY, JSON.stringify(cache));
+        } catch {
+          // 忽略写失败
+        }
+      }
+    }
+
     async function loadMessages(sid: number): Promise<api.HarnessMessage[]> {
       try {
         const rows = (await api.HarnessSessionMessages(sid)) || [];
         const buf = bufFor(sid);
         buf.length = 0;
+        // 本会话若有挂起快照，按 turnId 命中还原选项表单（切走/刷新重建后不丢）
+        const askCache = readAskUserCache()[sid];
         for (const row of rows) {
           if (row.role === 'USER') {
             buf.push({ role: 'user', content: row.content });
@@ -449,6 +494,23 @@ export default defineComponent({
             if (row.status === 'FAILED') msg.error = row.error || '执行失败';
             if (row.status === 'INTERRUPTED') {
               msg.error = row.error || '本轮已中断';
+              // AskUser 挂起：按缓存 turnId 命中 → 还原可点选项表单（与实时流同口径）
+              if (
+                askCache &&
+                askCache.turnId === row.turnId &&
+                askCache.pending.length > 0
+              ) {
+                msg.pending = askCache.pending;
+                const draft: Record<
+                  string,
+                  { other: string; selected: string[] }
+                > = {};
+                for (const q of askCache.pending) {
+                  draft[q.question] = { selected: [], other: '' };
+                }
+                msg.answers = draft;
+                msg.answered = false;
+              }
             }
             buf.push(msg);
           }
@@ -614,6 +676,7 @@ export default defineComponent({
         })
         .join('\n');
       msg.answered = true;
+      clearAskUserCache(sessionId.value);
       await postTurn(JSON.stringify({ answers }), display);
     }
 
@@ -774,6 +837,14 @@ export default defineComponent({
           return;
         }
         applyFrame(target, frame, turnId);
+        // AskUser 挂起带结构化问题 → 落一份会话快照，切走/刷新重建历史时据此还原选项
+        if (
+          frame.type === 'turn.interrupted' &&
+          frame.pendingQuestions &&
+          frame.pendingQuestions.length > 0
+        ) {
+          saveAskUserCache(sid, turnId, frame.pendingQuestions);
+        }
         // 只有正在看这个会话才跟滚动，后台会话流只更新缓冲不打扰当前视图
         if (sid === sessionId.value) scrollToBottom();
       };
