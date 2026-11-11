@@ -43,6 +43,9 @@ EVT_TOOL_STARTED = "tool.started"
 EVT_TOOL_COMPLETED = "tool.completed"
 EVT_TOOL_RESULT_DELTA = "tool.result.delta"
 EVT_TOOL_RESULT_COMPLETED = "tool.result.completed"
+# 本轮最终输出物清单帧（present_output 工具声明的交付文件，非终态帧）：
+# payload {"artifacts": [{name,path,description}]}，实时流发累积快照、前端整表替换
+EVT_TURN_ARTIFACTS = "turn.artifacts"
 EVT_TURN_COMPLETED = "turn.completed"
 EVT_TURN_FAILED = "turn.failed"
 EVT_TURN_INTERRUPTED = "turn.interrupted"
@@ -101,7 +104,7 @@ async def _db_turn_row(turn_id: str) -> Optional[HarnessMessage]:
 def _row_snapshot(row: HarnessMessage) -> dict:
     """在 session 关闭前把兜底需要的字段拷出来（ORM 属性离开 session 不可读）。"""
     return {"status": row.status, "content": row.content, "thinking": row.thinking,
-            "tool_calls": row.tool_calls, "error": row.error}
+            "tool_calls": row.tool_calls, "error": row.error, "artifacts": row.artifacts}
 
 
 async def _final_frame_from_snapshot(turn_id: str, snap: dict) -> Optional[str]:
@@ -190,6 +193,9 @@ async def _replay_finished_turn(turn_id: str, snap: dict) -> AsyncIterator[str]:
         yield sse_frame(EVT_TOOL_COMPLETED, turn_id, completed_payload)
     if snap["content"]:
         yield sse_frame(EVT_TEXT_DELTA, turn_id, {"content": snap["content"]})
+    # 输出物帧：正文之后、终态帧之前（实时流同口径），只在有登记时补发
+    if snap.get("artifacts"):
+        yield sse_frame(EVT_TURN_ARTIFACTS, turn_id, {"artifacts": snap["artifacts"]})
     frame = await _final_frame_from_snapshot(turn_id, snap)
     if frame:
         yield frame

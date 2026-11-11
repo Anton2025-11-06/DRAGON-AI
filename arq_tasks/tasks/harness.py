@@ -45,7 +45,7 @@ from service.service_harness.models.harness_entity import (
 )
 from service.service_harness.services.harness_pubsub import (
     EVT_TEXT_DELTA, EVT_THINKING_DELTA, EVT_TOOL_COMPLETED, EVT_TOOL_STARTED,
-    EVT_TURN_COMPLETED, EVT_TURN_FAILED, EVT_TURN_INTERRUPTED,
+    EVT_TURN_ARTIFACTS, EVT_TURN_COMPLETED, EVT_TURN_FAILED, EVT_TURN_INTERRUPTED,
     publish_turn_event,
 )
 # 帧协议说明：终态帧（turn.completed / turn.interrupted / turn.failed）在本文件
@@ -227,6 +227,23 @@ INTERRUPT_CHECK_WINDOW_S = 2.0
 async def _publish(turn_id: str, event_type: str, payload: dict) -> None:
     """publish 的薄封装（worker 内统一出口，便于以后挂埋点）。"""
     await publish_turn_event(turn_id, event_type, payload)
+
+
+def _parse_present_output_args(arguments: str) -> list[dict]:
+    """present_output 的工具入参 JSON → 干净输出物列表。
+
+    校验复用工具侧同一个 normalize_artifacts（路径口径单一来源，实时帧与回放
+    不会因两套校验对不上）。入参非法/非 JSON 时返回空列表（不炸本轮）。
+    """
+    import json
+
+    from service.service_harness.agent.tools.present_output import normalize_artifacts
+    try:
+        data = json.loads(arguments) if arguments else {}
+    except (ValueError, TypeError):
+        return []
+    files = data.get("files") if isinstance(data, dict) else None
+    return normalize_artifacts(files)
 
 
 # ==================== HITL 挂起恢复（demo drain_hitl 的跨轮版） ====================
@@ -506,6 +523,8 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     tool_calls_trace: list[dict] = []
     # tool_call_id -> (工具名, 入参片段)；End 事件只有 id，入参全靠 Delta 累积
     calls: dict[str, tuple[str, list[str]]] = {}
+    # present_output 登记的最终输出物累积 [{name,path,description}]（按 path 去重）
+    artifacts: list[dict] = []
     interrupted = False
 
     async with RedisStorage(**storage_opts) as storage:
@@ -540,14 +559,30 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                     await _publish(turn_id, EVT_THINKING_DELTA, {"content": evt.delta})
                 elif isinstance(evt, ToolCallStartEvent):
                     calls[evt.tool_call_id] = (evt.tool_call_name, [])
-                    await _publish(turn_id, EVT_TOOL_STARTED,
-                                   {"tool": evt.tool_call_name,
-                                    "toolCallId": evt.tool_call_id})
+                    # present_output 是收尾登记工具，不作为用户可见的工具行进对话
+                    #（它的产物走下面的 turn.artifacts 帧渲染成文件卡片），故不发
+                    # tool.started；仍需登记进 calls 以便 End 取到工具名与累积入参
+                    if evt.tool_call_name != "present_output":
+                        await _publish(turn_id, EVT_TOOL_STARTED,
+                                       {"tool": evt.tool_call_name,
+                                        "toolCallId": evt.tool_call_id})
                 elif isinstance(evt, ToolCallDeltaEvent):
                     calls.setdefault(evt.tool_call_id, ("", []))[1].append(evt.delta)
                 elif isinstance(evt, ToolCallEndEvent):
                     name, arg_chunks = calls.pop(evt.tool_call_id, ("", []))
                     arguments = "".join(arg_chunks)
+                    if name == "present_output":
+                        # 收尾登记：不进 tool_calls_trace、不发 tool.completed，改按
+                        # path 去重合并进 artifacts，发累积快照帧（前端整表替换）
+                        known = {a["path"] for a in artifacts}
+                        for item in _parse_present_output_args(arguments):
+                            if item["path"] not in known:
+                                artifacts.append(item)
+                                known.add(item["path"])
+                        if artifacts:
+                            await _publish(turn_id, EVT_TURN_ARTIFACTS,
+                                           {"artifacts": artifacts})
+                        continue
                     # 工具入参里的 purpose（模型每轮被提示词要求填写）就是这次
                     # 调用给用户看的一句话说明；发帧与落库同一个口径，回放才不
                     # 会跟实时流对不上。取不到时前端按入参派生标签兜住。
@@ -616,6 +651,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                 "content": "".join(text_chunks) or None,
                 "thinking": "".join(thinking_chunks) or None,
                 "tool_calls": tool_calls_trace or None,
+                "artifacts": artifacts or None,
                 "error": "用户中断了本轮回复"}
     awaiting = agent.state.get_awaiting_tool_calls(agent.name)
     if awaiting:
@@ -631,6 +667,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                 "content": "".join(text_chunks) or None,
                 "thinking": "".join(thinking_chunks) or None,
                 "tool_calls": tool_calls_trace or None,
+                "artifacts": artifacts or None,
                 "error": error,
                 "question": question,
                 "pending": pending}
@@ -638,6 +675,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
             "content": "".join(text_chunks) or None,
             "thinking": "".join(thinking_chunks) or None,
             "tool_calls": tool_calls_trace or None,
+            "artifacts": artifacts or None,
             "error": None}
 
 
@@ -677,6 +715,7 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
         await HarnessSessionService.finish_turn(
             turn_id, result["status"], content=result["content"],
             thinking=result["thinking"], tool_calls=result["tool_calls"],
+            artifacts=result.get("artifacts"),
             error=result["error"], model_name=_model_name)
         # 终态帧（订阅方可能错过了中途的实时帧，这一帧保证关流信号必达）
         if result["status"] == TURN_COMPLETED:

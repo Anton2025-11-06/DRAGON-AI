@@ -32,6 +32,7 @@ from agentscope.tool import (
     TaskList, TaskUpdate, Toolkit, Write,
 )
 
+from service.service_harness.agent.tools.present_output import PresentOutput
 from service.service_harness.agent.tools.purpose import (
     purpose_middlewares, with_purpose_schema,
 )
@@ -88,6 +89,8 @@ residual: <未完成项；若为空数组 [] 才算真完成>
 [DONE]
 <面向用户的最终结论：结论先行 → 依据 → 路径>
 ```
+
+**交付文件登记**：若本轮确实产出了交付给用户的文件，在输出 `[DONE]` 结论之前，**必须先调用一次 `present_output`**，把这些文件的 `/workspace/` 绝对路径登记进来（页面据此渲染可点击的文件卡片并在右侧工作区自动预览）。只登记**最终交付物**——中间脚本、临时数据、下载缓存、`tmp/` 里的东西一律不登记；没有交付文件就不要调用 `present_output`。`present_output` 是纯声明性调用，登记完照常接着输出 `[DONE]`。
 
 ## 硬性禁令（违反即视为任务失败）
 
@@ -236,6 +239,9 @@ async def build_toolkit(workspace: Any, mounted_tools: list | None = None) -> To
             # 向用户提问（外部工具，HITL：挂起等答复）。它的入参本身就是给用户
             # 看的问题，再叠一层 purpose 自述只会多一个空字段，故不补 schema
             AskUser(),
+            # 收尾登记最终交付文件（纯声明、无副作用、自带 purpose 形参，
+            # 不经内置工具那套剥离中间件）；worker 侧识别这次调用发 turn.artifacts 帧
+            PresentOutput(),
             *(with_purpose_schema(tool) for tool in builtins),
             # 本轮挂载的平台能力（kb_search / MCP / 平台工具；无挂载时为空）
             *(mounted_tools or []),

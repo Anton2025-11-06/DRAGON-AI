@@ -65,6 +65,16 @@ export interface HarnessAttachment {
   path: string;
 }
 
+/** 最终输出物引用（present_output 工具登记的交付文件，ASSISTANT 行 artifacts） */
+export interface HarnessArtifact {
+  /** 展示用文件名 */
+  name: string;
+  /** 沙箱工作区绝对路径 */
+  path: string;
+  /** 一句话说明这个文件是什么/给用户看什么 */
+  description?: string;
+}
+
 /** 深度探索消息（一轮两行：USER + ASSISTANT，按 turnId 关联） */
 export interface HarnessMessage {
   id: number;
@@ -82,6 +92,8 @@ export interface HarnessMessage {
   mounts?: Partial<HarnessMounts>;
   /** 本轮附件引用（USER 行才有；历史回显用） */
   attachments?: HarnessAttachment[];
+  /** 本轮最终输出物引用（ASSISTANT 行才有；present_output 登记，文件卡片/自动预览用） */
+  artifacts?: HarnessArtifact[];
   createTime: string;
 }
 
@@ -114,6 +126,7 @@ export interface HarnessFrame {
     | 'text.delta'
     | 'tool.completed'
     | 'tool.started'
+    | 'turn.artifacts'
     | 'turn.completed'
     | 'turn.failed'
     | 'turn.interrupted'
@@ -137,6 +150,8 @@ export interface HarnessFrame {
   question?: string;
   /** AskUser 结构化待答问题（有则前端渲染选项表单，无则退回文本回复） */
   pendingQuestions?: PendingQuestion[];
+  /** turn.artifacts 的最终输出物清单（worker 发累积快照，前端整表替换） */
+  artifacts?: HarnessArtifact[];
 }
 
 // ==================== API 接口（harness 深度探索） ====================
@@ -257,6 +272,28 @@ export function SandboxUpload(
 /** 沙箱下载地址（文件原样 / 目录 zip） */
 export function SandboxDownloadUrl(path: string) {
   return `/api/harness/sandbox/download?path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * 读取沙箱文件的原始字节（Blob）。
+ * 预览按扩展名转 typed Blob + object URL 渲染，文本类直接解码字节——绕开 read_text_file
+ * 的 200KB 截断。token 从 accessStore.accessToken 取，与下载口同一鉴权口径。
+ */
+export async function SandboxFileBlob(
+  path: string,
+  token: string,
+  traceId?: string,
+): Promise<Blob> {
+  const resp = await fetch(SandboxDownloadUrl(path), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(traceId ? { 'X-Trace-Id': traceId } : {}),
+    },
+  });
+  if (!resp.ok) {
+    throw new Error(`文件读取失败：HTTP ${resp.status}`);
+  }
+  return resp.blob();
 }
 
 // ==================== 挂载候选（harness options 四口，use 口径） ====================

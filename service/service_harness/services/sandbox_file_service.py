@@ -9,7 +9,8 @@
 - ``Bash(backend=...)`` 在沙箱里执行 shell——镜像契约必含 python3 / tar /
   base64（agentscope 文件工具自身就靠它们），元信息用 python3 单行输出
   JSON、路径经环境变量传入（杜绝 shell 注入）；
-- 上传走 base64-over-exec 分块（绕开 Linux 单命令行参数 ~128KiB 的上限）；
+- 上传走 backend.write_file 直写原始字节（后端专用文件 API、不经 shell、内部先
+  mkdir -p 建父目录，不受单命令行参数 ~128KiB 限制，也无 base64 分块/解码开销）；
   下载直接走 backend.read_file 取原始字节——Bash 工具回传会截断大段 stdout，
   二进制的 base64 被切成非 4 倍长度就报 Incorrect padding（大文件必现），
   read_file 是后端专用文件 API、不经 shell、整份返回；目录先在沙箱内 tar.gz
@@ -27,7 +28,6 @@ workspace 生命周期（复用进程级 manager 单例，跨请求缓存）：
 """
 from __future__ import annotations
 
-import base64
 import posixpath
 import secrets
 import shlex
@@ -47,9 +47,8 @@ class HarnessSandboxError(Exception):
 # ==================== 大小限制 ====================
 
 READ_TEXT_MAX = 200 * 1024  # 文本预览截断（字节）
-UPLOAD_MAX = 200 * 1024 * 1024  # 上传上限（单文件 200MB；base64 分块落沙箱，大文件较慢）
+UPLOAD_MAX = 200 * 1024 * 1024  # 上传上限（单文件 200MB；backend.write_file 直写原始字节）
 DOWNLOAD_MAX = 200 * 1024 * 1024  # 下载上限（backend.read_file 单次整份回传）
-_UPLOAD_CHUNK = 1024 * 1024  # 单条命令携带的 base64 字符数（< 128KiB）
 
 # 工作区绝对根目录（OpenSandbox 镜像契约，沙箱内固定为 /workspace）。
 # 历史上曾试过读 workspace.workdir，但那个属性有时是宿主机路径、有时直接读不到，
@@ -283,29 +282,25 @@ async def read_text_file(login_user: dict, path: str, session_id=None) -> dict:
 
 async def save_file(login_user: dict, dir_path: str, filename: str,
                     content: bytes, session_id=None) -> dict:
-    """上传：base64 分块写临时文件再解码落位（绕开单参数 128KiB 上限）。"""
+    """上传：直接经 backend.write_file 写原始字节进沙箱。
+
+    后端专用文件 API（files.write_files），不经 shell、不受 Linux 单命令行参数
+    128KiB 上限约束，也没有 base64 分块/解码与多次命令往返的开销；父目录由
+    write_file 内部 mkdir -p 自建，无需再单独建目录。
+    """
     if len(content) > UPLOAD_MAX:
         raise HarnessSandboxError(f"文件超过 {UPLOAD_MAX // 1024 // 1024}MB 限制")
     async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
         target = _join_rel(dir_path, filename)
-        parent = posixpath.dirname(target)
-        b64 = base64.b64encode(content).decode("ascii")
-        tmp = f".harness_up_{secrets.token_hex(8)}"
-        cd = f"cd {_q(entry['workdir'])}"
+        abs_path = entry["backend"].join_path(entry["workdir"], target)
         try:
-            for i in range(0, len(b64), _UPLOAD_CHUNK):
-                part = b64[i:i + _UPLOAD_CHUNK]
-                await _run(entry, f"{cd} && printf '%s' {part} >> {tmp}")
-            mkdir = f"mkdir -p {_q(parent)}" if parent else "true"
-            await _run(entry, f"{cd} && {mkdir} && base64 -d {tmp} > {_q(target)}")
-        finally:
-            # 幂等清理：成功失败都删临时文件（失败只记日志不掩盖原异常）
-            try:
-                await _run(entry, f"{cd} && rm -f {tmp}")
-            except HarnessSandboxError as e:
-                log.warning("harness sandbox temp cleanup failed: {}", e)
+            await entry["backend"].write_file(abs_path, content)
+        except HarnessSandboxError:
+            raise
+        except Exception as e:  # noqa: BLE001  write_file 后端/传输异常
+            log.warning("harness sandbox write_file failed: path={} {}", abs_path, e)
+            raise HarnessSandboxError(f"文件写入沙箱失败：{e}") from e
         # 回绝对路径，前端添加附件时直接把它作为 attachment.path 传给 /chat
-        abs_path = f"{WORKSPACE_ROOT}/{target}"
         return {"name": posixpath.basename(target), "size": len(content),
                 "path": abs_path}
 

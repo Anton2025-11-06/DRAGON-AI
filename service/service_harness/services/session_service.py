@@ -65,6 +65,8 @@ def _message_dto(row: HarnessMessage) -> dict:
         "mounts": row.mounts or {},
         # 本轮附件引用（USER 行才有，其余行返回空数组）
         "attachments": row.attachments or [],
+        # 本轮最终输出物引用（ASSISTANT 行才有，其余行返回空数组）
+        "artifacts": row.artifacts or [],
         "createTime": row.create_time.strftime("%Y-%m-%d %H:%M:%S") if row.create_time else None,
     }
 
@@ -297,6 +299,7 @@ class HarnessSessionService:
                           content: Optional[str] = None,
                           thinking: Optional[str] = None,
                           tool_calls: Optional[list] = None,
+                          artifacts: Optional[list] = None,
                           error: Optional[str] = None,
                           model_name: Optional[str] = None) -> None:
         """轮次终态回写（worker 专用：reply_stream 收尾后调用）。
@@ -323,5 +326,7 @@ class HarnessSessionService:
                 msg.thinking = thinking
             if tool_calls is not None:
                 msg.tool_calls = tool_calls
+            if artifacts is not None:
+                msg.artifacts = artifacts
             msg.error = error
             await session.commit()

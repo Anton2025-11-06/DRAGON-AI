@@ -71,4 +71,7 @@ class HarnessMessage(Base):
     # 本轮附件引用 [{name,path}]（落 USER 行）：文件已存沙箱工作区，worker 把路径注入
     # 提示让模型用自带工具自行读取解析（后端不做预解析）。
     attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="本轮附件引用")
+    # 本轮最终输出物引用 [{name,path,description}]（落 ASSISTANT 行）：present_output
+    # 工具登记、worker 捕获后随终态落库；前端据此渲染文件卡片并自动预览。
+    artifacts: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="最终输出物引用")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
