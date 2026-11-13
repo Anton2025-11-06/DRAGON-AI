@@ -11,7 +11,7 @@ export const overridesPreferences = defineOverridesPreferences({
     name: import.meta.env.VITE_APP_TITLE,
     defaultAvatar:
       'https://unpkg.com/@vbenjs/static-source@0.1.7/source/avatar-v1.webp',
-    // 登录后默认首页：深度探索 Hernes（首页-深度探索）
+    // 登录后默认首页：深度探索 Harnes智能体（首页-深度探索）
     defaultHomePath: '/home/explorer',
     // 是否开启检查更新
     enableCheckUpdates: true,

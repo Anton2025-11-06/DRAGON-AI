@@ -266,7 +266,7 @@ interface UploadEntry {
 }
 
 export default defineComponent({
-  name: 'HernesExplorerPage',
+  name: 'Harnes智能体ExplorerPage',
   components: {
     ArrowLeftOutlined,
     BulbOutlined,
@@ -1551,14 +1551,14 @@ export default defineComponent({
       </div>
     </aside>
 
-    <!-- 中部：深度探索 Hernes 对话框 -->
+    <!-- 中部：深度探索 Harnes智能体 对话框 -->
     <section class="hermes-chat">
       <header class="hermes-chat-header">
         <div class="hermes-logo">
           <RobotOutlined />
         </div>
         <div class="hermes-title">
-          <h2>深度探索 Hernes</h2>
+          <h2>深度探索 Harnes智能体</h2>
           <p>连接云端沙箱运行时，描述你的问题，让 AI 帮你执行</p>
         </div>
         <a-tooltip v-if="sandboxCollapsed" title="展开沙箱工作区">
@@ -1779,7 +1779,7 @@ export default defineComponent({
         </div>
         <div v-if="messages.length === 0" class="hermes-empty">
           <RobotOutlined class="hermes-empty-icon" />
-          <p>你好，我是 Hernes。可以让我分析数据、处理文件、组织任务…</p>
+          <p>你好，我是 Harnes智能体。可以让我分析数据、处理文件、组织任务…</p>
           <p class="hermes-empty-tip">
             试着说：帮我统计 sample_data.csv 里的访问量趋势
           </p>

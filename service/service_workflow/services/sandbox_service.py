@@ -52,7 +52,7 @@ def _init_demo_files(root: Path) -> None:
         return
     try:
         root.joinpath("README.txt").write_text(
-            "欢迎来到深度探索 Hernes 沙箱工作区！\n\n"
+            "欢迎来到深度探索 Harnes智能体 沙箱工作区！\n\n"
             "这里是属于你的云端工作目录：\n"
             "  - 上传文件：点击右上角「上传」按钮\n"
             "  - 下载文件/文件夹：悬停条目，点击「下载」（文件夹会打包为 zip）\n"
@@ -61,7 +61,7 @@ def _init_demo_files(root: Path) -> None:
             encoding="utf-8")
         root.joinpath("notes").mkdir(exist_ok=True)
         root.joinpath("notes", "todo.md").write_text(
-            "# Hernes 待办\n\n- [ ] 体验沙箱文件浏览\n- [ ] 上传一个数据文件试试分析\n- [ ] 向 AI 提问",
+            "# Harnes智能体 待办\n\n- [ ] 体验沙箱文件浏览\n- [ ] 上传一个数据文件试试分析\n- [ ] 向 AI 提问",
             encoding="utf-8")
         root.joinpath("sample_data.csv").write_text(
             "日期,访问量,订单数\n2026-08-25,1024,88\n2026-08-26,1180,96\n2026-08-27,1355,110\n",
