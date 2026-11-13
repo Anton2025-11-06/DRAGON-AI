@@ -206,7 +206,7 @@ async def start_manager(
     if _MANAGER is not None:
         return _MANAGER
     _MANAGER = manager if manager is not None else build_manager()
-    await _MANAGER.__aenter__()
+    # await _MANAGER.__aenter__()
     return _MANAGER
 
 
