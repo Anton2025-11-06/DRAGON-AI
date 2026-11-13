@@ -1,0 +1,22 @@
+挂载OSS
+1、安装阿里云ossfs工具
+dnf install -y ossfs
+2、宿主机创建/data/opensandbox目录（创建沙箱时，会根据userid映射/data/opensandbox/userid->容器内/workspace）
+3、执行挂载命令
+ossfs your-bucket-name /data/opensandbox \
+  -o url=oss-cn-shenzhen-internal.aliyuncs.com \
+  -o allow_other \
+  -o umask=000
+
+挂载NAS
+1、安装NFS客户端
+rpm -q nfs-utils
+或者 yum install nfs-utils
+执行以下命令，提高同时发起的NFS请求数量：
+sudo echo "options sunrpc tcp_slot_table_entries=128" >> /etc/modprobe.d/sunrpc.conf
+sudo echo "options sunrpc tcp_max_slot_table_entries=128" >> /etc/modprobe.d/sunrpc.conf
+2、宿主机创建/data/opensandbox目录（创建沙箱时，会根据userid映射/data/opensandbox/userid->容器内/workspace）
+3、执行挂载命令
+sudo mount -t nfs -o vers=4,minorversion=0,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 阿里云NAS的端点地址:/ /data/opensandbox
+执行以下命令，如果结果中存在NFS文件系统的挂载地址，则说明挂载成功：
+df -h | grep aliyun

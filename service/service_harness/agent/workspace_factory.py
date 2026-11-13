@@ -64,10 +64,10 @@ def build_manager() -> CustomOpenSandboxWorkspaceManager:
         domain=opts["domain"],
         # protocol=opts["protocol"],
         # request_timeout_seconds=opts["request_timeout_seconds"],
+        # 沙箱存活时间，时间到自动销毁，需要手动触发renew-expire方法续期
         timeout_seconds=3600,
         # memory 必须带 K8s 风格单位（Mi/Gi）：裸数字会被当字节解析，
-        # "512"=512B < 6MB 触发 docker "Minimum memory limit allowed is 6MB"。
-        # resource=opts["resource"] if opts["resource"] else {"cpu": "0.5", "memory": "512Mi"},
+        resource={"cpu": "1", "memory": "1Gi"},
         # env=opts["env"],
     )
 
@@ -98,6 +98,29 @@ def _dir_signature(skill_path: str) -> str:
     return digest.hexdigest()
 
 
+async def _sandbox_is_alive(workspace) -> bool:
+    """探查 workspace 当前绑定的沙箱在 OpenSandbox 服务端是否真的 running。
+
+    manager 缓存命中时不会做远端校验，句柄可能对应一只已被服务端按**最大存活
+    时间**销毁/暂停的沙箱。这里用沙箱句柄向控制面查一次 lifecycle 状态：仅
+    RUNNING 判为“活着可直接复用”；其它状态（PAUSED/TERMINATED/FAILED/…）或查询
+    异常（沙箱已不存在）都判为失效，交由调用方逐出重建。state 为普通字符串
+    （框架自身 ``_attach_existing_sandbox`` 就是用 ``info.status.state.lower()`` 判的）。
+    """
+    sandbox = getattr(workspace, "_sandbox", None)
+    if sandbox is None:
+        return False
+    try:
+        info = await sandbox.get_info()
+    except Exception as e:  # noqa: BLE001  沙箱已被服务端回收 / 查不到
+        log.warning(
+            "harness workspace sandbox probe failed: workspace_id={} {}",
+            getattr(workspace, "workspace_id", ""), e)
+        return False
+    status = getattr(info, "status", None)
+    return str(getattr(status, "state", "") or "").lower() == "running"
+
+
 async def _attach(manager, login_user: dict, session_id, skill_paths) -> SandboxedWorkspaceBase:
     """在给定 manager 上取（并 initialize）当前用户的 workspace，按需种入技能。"""
     user_key = str(int(login_user.get("user_id") or 0))
@@ -109,6 +132,19 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> Sandbox
     # get_workspace 的 miss 路径 _build_and_start 内部已 initialize，返回的就是 live workspace
     workspace = await manager.get_workspace(
         user_key, AGENT_ID, session_key, workspace_id)
+    # OpenSandbox 服务端有沙箱最大存活时间，到期会把沙箱销毁/暂停，而 manager 的
+    # TTL 缓存只按本地时间记账、不会主动发现——此时缓存里的 workspace 句柄指向
+    # 一只已不在 running 的沙箱，后续 backend 调用必挂。取到 workspace 后向控制面
+    # 探一次真实状态：非 running 就 close 逐出缓存再 get 一次（第二趟是 cache miss，
+    # 走 _build_and_start→initialize→_find_existing_sandbox：同 id 沙箱若只是暂停就
+    # resume、若已被彻底销毁则新建一只），保证返回的句柄确实可用。只重试一次。
+    if not await _sandbox_is_alive(workspace):
+        log.warning(
+            "harness workspace {} 缓存句柄探活失败（沙箱非 running），逐出缓存后重建",
+            workspace_id)
+        await manager.close(workspace_id)
+        workspace = await manager.get_workspace(
+            user_key, AGENT_ID, session_key, workspace_id)
     # 挂载技能：本地解压目录 → 沙箱 ``skills/<agent_id>/`` 分区。
     # add_skill 不带 agent_id 会落进 skills/default，而 build_toolkit 的
     # list_skills(agent_id=AGENT_ID) 读的是 skills/harness_agent/——两套分区，

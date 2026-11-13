@@ -70,14 +70,11 @@ async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
     请求复用，进程退出由 bootstrap 的 stop_manager 统一释放。session_id 仅 manager
     定位入参，PER_USER 下不影响归属，文件浏览无会话上下文时留空即可。
     """
-    from agentscope.tool import Bash
-
     from service.service_harness.agent.workspace_factory import (
         attach_workspace, workspace_id_of,
     )
 
     workspace = await attach_workspace({"user_id": user_id}, session_id)
-    backend = workspace.get_backend()
     raw_workdir = str(getattr(workspace, "workdir", "") or "")
     # 锁定 WORKSPACE_ROOT，不再拿 workspace.workdir 当错-与前端契约对齐；
     # 两者不一致时只当情报留痕，不作为错误。
@@ -88,26 +85,43 @@ async def _sandbox_entry(user_id: int, session_id=None) -> AsyncGenerator[dict]:
     # 用 manager 分配的 workspace_id（回填在 workspace 对象上），取不到才回落
     # 旧的 harness-{user_id} 手工约定，仅避免写空 id。
     ws_id = str(getattr(workspace, "workspace_id", "") or "") or workspace_id_of(user_id)
+    # entry 只携 workspace 本体（+ id/workdir）：backend / bash 不入 dict，
+    # 一律用时经 _backend(entry)/_bash(entry) 从 workspace 现取（见下）。
     yield {
         "workspace_id": ws_id,
         "workspace": workspace,
-        "backend": backend,
-        "bash": Bash(backend=backend),
         "workdir": WORKSPACE_ROOT,
     }
+
+
+def _backend(entry: dict):
+    """统一从 workspace 现取执行后端。
+
+    OpenSandbox/Docker/E2B 在 reattach 时可能更换 backend 实例，agentscope
+    官方建议「beginning an operation 时从 workspace 解析」而非缓存私有的
+    ``_backend``，所以 backend/bash 不预先塞进 entry dict，而是用时现取。
+    """
+    return entry["workspace"].get_backend()
+
+
+def _bash(entry: dict):
+    """统一从 workspace 的后端现取一个 Bash 执行工具（每次新建、不缓存）。"""
+    from agentscope.tool import Bash
+
+    return Bash(backend=_backend(entry))
 
 
 async def _run(entry: dict, command: str) -> str:
     """在沙箱里执行一条命令并取 stdout 文本（失败抛业务异常）。
 
-    Bash.call 是 async generator function，await entry["bash"]() 返回的是
+    Bash.call 是 async generator function，await _bash(entry)() 返回的是
     AsyncGenerator[ToolChunk, None] 对象本身，而非 ToolChunk——必须用
     async for 消费才能拿到真正的 chunk；否则 getattr(chunk, "state") 永远为
     None、_chunk_text 永远为空字符串（命令失败静默不报错、成功也没输出）。
     Bash.call 每次只 yield 一个 chunk（is_last=True），取最后一个即可。
     """
     try:
-        gen = await entry["bash"](command=command)  # AsyncGenerator[ToolChunk, None]
+        gen = await _bash(entry)(command=command)  # AsyncGenerator[ToolChunk, None]
         chunk = None
         async for c in gen:
             chunk = c  # 正常只进一次循环，保留兼容多 chunk 的写法
@@ -292,9 +306,10 @@ async def save_file(login_user: dict, dir_path: str, filename: str,
         raise HarnessSandboxError(f"文件超过 {UPLOAD_MAX // 1024 // 1024}MB 限制")
     async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
         target = _join_rel(dir_path, filename)
-        abs_path = entry["backend"].join_path(entry["workdir"], target)
+        backend = _backend(entry)
+        abs_path = backend.join_path(entry["workdir"], target)
         try:
-            await entry["backend"].write_file(abs_path, content)
+            await backend.write_file(abs_path, content)
         except HarnessSandboxError:
             raise
         except Exception as e:  # noqa: BLE001  write_file 后端/传输异常
@@ -327,9 +342,10 @@ async def _read_bytes(entry: dict, rel: str) -> tuple[bytes, str, bool]:
     size = await _stat_size(entry, rel)
     if size > DOWNLOAD_MAX:
         raise HarnessSandboxError(f"文件超过 {DOWNLOAD_MAX // 1024 // 1024}MB 下载限制")
-    abs_path = entry["backend"].join_path(entry["workdir"], rel)
+    backend = _backend(entry)
+    abs_path = backend.join_path(entry["workdir"], rel)
     try:
-        data = await entry["backend"].read_file(abs_path)
+        data = await backend.read_file(abs_path)
     except Exception as e:  # noqa: BLE001  read_file 文件缺失/后端异常
         log.warning("harness sandbox read_file failed: path={} {}", abs_path, e)
         raise HarnessSandboxError("文件不存在或读取失败") from e
@@ -344,7 +360,7 @@ async def _pack_dir(entry: dict, rel: str) -> tuple[bytes, str, bool]:
     同样避开 Bash 回传 base64 的大 stdout 截断坑（见 _read_bytes）。响应头按
     zip 呈现给浏览器。在已连接 entry 内调用。
     """
-    backend = entry["backend"]
+    backend = _backend(entry)
     tmp = f"/tmp/harness-dl-{secrets.token_hex(8)}.tar.gz"
     try:
         await _run(entry,

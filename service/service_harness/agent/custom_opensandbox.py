@@ -36,15 +36,29 @@ write_file 上传它和 glob helper（那段上传不在 ``_bootstrap_commands``
 """
 from __future__ import annotations
 
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
 from agentscope.app.workspace_manager import OpenSandboxWorkspaceManager
 from agentscope.workspace import OpenSandboxWorkspace
-from agentscope.workspace._opensandbox._constants import DEFAULT_IMAGE
+from agentscope.workspace._opensandbox._constants import (
+    DEFAULT_IMAGE,
+    METADATA_WORKSPACE_ID_KEY,
+    SANDBOX_WORKDIR,
+)
 
 from common.common_log.log_init import log
 
+if TYPE_CHECKING:
+    from opensandbox import Sandbox
+
+
+HOST_WORKSPACE_BASE = "/data/opensandbox"
+USER_ID_METADATA_KEY = "agentscope.user.id"
+
 
 class CustomOpenSandboxWorkspace(OpenSandboxWorkspace):
-    """OpenSandboxWorkspace + 首建引导命令清空（镜像已自带网关 venv）。"""
+    """OpenSandboxWorkspace + 首建引导命令清空 + 按用户挂载持久化工作区卷。"""
 
     def _bootstrap_commands(self) -> list[str]:
         """覆盖父类：返回空列表 = 整段引导命令一步不跑。
@@ -56,6 +70,64 @@ class CustomOpenSandboxWorkspace(OpenSandboxWorkspace):
         所以不需要为「脚本没落盘」做任何补偿。
         """
         return []
+
+    async def _create_sandbox(self) -> Sandbox:
+        """覆盖父类：首建沙箱时把宿主机持久化目录 bind 到容器 /workspace。
+
+        父类实现不传 volumes（见其 ``Sandbox.create``），沙箱 pause/到期销毁后
+        容器文件系统随之回收，模型这轮产出的交付物（present_output 登记的最终
+        输出文件等）下次进来就没了。这里按用户挂持久卷：宿主机
+        ``/data/workspace/{user_id}`` ↔ 容器 ``/workspace``（读写），同一 user_id
+        跨沙箱生命周期持久；user_id 取 manager 写进 sandbox_metadata 的
+        ``agentscope.user.id``（PER_USER 隔离下必带）。仅首建走这里——reattach/
+        resume 复用同一只已挂载的容器，无需再声明 volumes。
+
+        取不到合法 user_id 直接 raise：持久化是硬要求，宁可让本轮沙箱起不来报错，
+        也不能静默退回不挂载建出一只「产出物留不住」的沙箱。
+
+        ⚠ 本方法逐字镜像父类 ``_create_sandbox``（只多传一个 ``volumes``）：
+        agentscope 升级若改了父类的 create 入参，本方法**不会报错、只会静默少传**
+        （多余的 kwarg 才炸）。升 agentscope 时记得 diff 一次父类 ``_create_sandbox``。
+        """
+        from opensandbox import Sandbox
+        from opensandbox.models.sandboxes import Host, Volume
+
+        user_id = str(self.sandbox_metadata.get(USER_ID_METADATA_KEY) or "").strip()
+        if not user_id.isdigit():
+            # 持久化是硬要求：缺合法 user_id 就 raise，绝不退回不挂载（那会建出一只
+            # 产出物留不住的沙箱），更不能把基目录整体挂进容器（用户间数据泄露）。
+            raise ValueError(
+                f"harness 沙箱缺合法 user_id（{USER_ID_METADATA_KEY}），无法定位持久化目录 "
+                f"{HOST_WORKSPACE_BASE}/{{user_id}}：workspace_id={self.workspace_id!r} "
+                f"user_id={user_id!r}"
+            )
+
+        volume = Volume(
+            name="harness-workspace",
+            host=Host(path=f"{HOST_WORKSPACE_BASE}/{user_id}"),
+            mount_path=SANDBOX_WORKDIR,
+            read_only=False,
+        )
+        kwargs: dict = {
+            "image": self.image,
+            "connection_config": self._connection_config(),
+            "metadata": {
+                **self.sandbox_metadata,
+                METADATA_WORKSPACE_ID_KEY: self.workspace_id,
+            },
+            "timeout": timedelta(seconds=self.timeout_seconds),
+            "ready_timeout": timedelta(seconds=self.timeout_seconds),
+            "volumes": [volume],
+        }
+        if self.env:
+            kwargs["env"] = self.env
+        if self.resource:
+            kwargs["resource"] = self.resource
+        if self.entrypoint:
+            kwargs["entrypoint"] = self.entrypoint
+        if self.network_policy is not None:
+            kwargs["network_policy"] = self.network_policy
+        return await Sandbox.create(**kwargs)
 
 
 class CustomOpenSandboxWorkspaceManager(OpenSandboxWorkspaceManager):
