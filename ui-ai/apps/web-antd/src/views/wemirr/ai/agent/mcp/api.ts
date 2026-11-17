@@ -12,13 +12,13 @@ export interface McpServerConfigPageReq {
 export interface McpServerConfig {
   id: number;
   name: string;
-  type: string; // STDIO/SSE
+  type: string; // STDIO/SSE/STREAMABLE_HTTP
   command?: string;
   args?: string; // JSON字符串
-  url?: string;
+  url?: string; // SSE / Streamable HTTP 连接地址
   env?: string; // JSON字符串
   description?: string;
-  /** 非创建人且非管理员时后端隐藏 SSE url（url 为空且此标记为真） */
+  /** 非创建人且非管理员时后端隐藏连接 url（url 为空且此标记为真） */
   urlHidden?: boolean;
   status: boolean;
   createdTime?: string;

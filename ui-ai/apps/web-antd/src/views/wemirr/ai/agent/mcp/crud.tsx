@@ -11,7 +11,7 @@ import { h } from 'vue';
 import { useAccess } from '@vben/access';
 
 import { ApiOutlined, ToolOutlined } from '@ant-design/icons-vue';
-import { dict } from '@fast-crud/fast-crud';
+import { compute, dict } from '@fast-crud/fast-crud';
 import { message, Modal } from 'ant-design-vue';
 
 import { aclRowButton } from '#/plugin/fast-crud/acl-row';
@@ -159,6 +159,11 @@ export default function createCrudOptions(
           dict: dict({
             data: [
               { value: 'SSE', label: 'SSE', color: 'green' },
+              {
+                value: 'STREAMABLE_HTTP',
+                label: 'Streamable HTTP',
+                color: 'purple',
+              },
               { value: 'STDIO', label: 'STDIO', color: 'blue' },
             ],
           }),
@@ -166,7 +171,7 @@ export default function createCrudOptions(
             value: 'SSE',
           },
           column: {
-            width: 120,
+            width: 150,
           },
         },
         command: {
@@ -205,16 +210,24 @@ export default function createCrudOptions(
           },
         },
         url: {
-          title: 'SSE URL',
+          title: '连接 URL',
           type: 'text',
           form: {
+            // STDIO 靠 command/args 起子进程，地址字段只在两种 HTTP 模式下有意义。
+            // fast-crud 运行时支持 form.show 传 compute（跟着当前表单值重算），但它的
+            // .d.ts 把 show 声明成了 boolean，只能断言回去
+            show: compute(
+              ({ form }: any) => form?.type !== 'STDIO',
+            ) as unknown as boolean,
             // rules: [
-            //   { required: true, message: '请输入SSE URL', trigger: 'change' },
+            //   { required: true, message: '请输入连接 URL', trigger: 'change' },
             // ],
             component: {
-              placeholder: '例如: http://localhost:3000/sse',
+              placeholder:
+                'SSE: http://localhost:3000/sse；HTTP: https://host/mcp',
             },
-            helper: 'SSE模式下的连接URL',
+            helper:
+              'SSE 填 sse 端点，Streamable HTTP 填 mcp 端点（两者不通用，按 server 文档选）',
           },
           column: { show: false },
         },

@@ -22,15 +22,28 @@ from service.service_workflow.models.agent_entity import McpServer
 # MCP 连接测试超时（秒）：SDK initialize + 工具清单握手必须在此时限内完成
 _PROBE_TIMEOUT = 5.0
 
+# 连接类型：两种 HTTP（SSE / Streamable HTTP）+ 本地子进程（STDIO）。
+# STREAMABLE_HTTP 是 15 字符，tb_mcp_server.type 是 VARCHAR(16)，加长名字前先看涨不涨。
+TYPE_SSE = "SSE"
+TYPE_STREAMABLE_HTTP = "STREAMABLE_HTTP"
+TYPE_STDIO = "STDIO"
+TRANSPORT_TYPES = (TYPE_SSE, TYPE_STREAMABLE_HTTP, TYPE_STDIO)
+
+
+def _norm_type(type_) -> str:
+    """连接类型归一：存小写/中划线写法（照抄外部 JSON 的 streamable-http）也能认。"""
+    return str(type_ or TYPE_SSE).strip().upper().replace("-", "_")
+
+
 # ==================== 连接模型：现场建连，用完即关 ====================
-# 不做进程内 ClientSession 缓存：缓存的会话底下是 async generator 流（SSE）或子进程（STDIO），
+# 不做进程内 ClientSession 缓存：缓存的会话底下是 async generator 流（SSE / Streamable HTTP）或子进程（STDIO），
 # 服务端回收或事件循环切换后就会变成一条已断的连接（报错表现为 "Connection closed"），
 # 且 API 进程与 arq worker 各持一份、多实例下根本无法共享。因此每次 list/call 都按配置
 # 现建一条连接，靠 SDK 上下文管理器在退出时逐层关闭，不留任何跨请求存活的对象。
 
 
 class McpServerService:
-    """MCP 服务器连接配置：CRUD + 连通性测试 + 工具探测（SSE/STDIO 两种模式）"""
+    """MCP 服务器连接配置：CRUD + 连通性测试 + 工具探测（SSE/Streamable HTTP/STDIO 三种模式）"""
 
     # ==================== 查询 ====================
     @staticmethod
@@ -150,12 +163,49 @@ class McpServerService:
     # ==================== SDK 连接与会话管理 ====================
 
     @staticmethod
-    def _transports(row: McpServer):
+    def _http_url(row: McpServer, type_label: str) -> str:
+        """两种 HTTP 传输共用的地址校验：非空 + http(s) 绝对地址。"""
+        url = row.url
+        if not url:
+            raise ValueError(f"{type_label} 连接地址不能为空")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"{type_label} 地址需以 http:// 或 https:// 开头")
+        return url
+
+    @classmethod
+    @asynccontextmanager
+    async def _streamable_http(cls, url: str):
+        """Streamable HTTP 传输层，出口统一成 (read, write) 两路。
+
+        mcp SDK 两个大版本在这里必须抹平，否则 _session 的解包当场炸：
+        - 函数名：1.x 叫 streamablehttp_client，2.x 改名 streamable_http_client；
+        - 元组长度：1.x yield (read, write, get_session_id)，2.x 只 yield (read, write)。
+        只取前两路、丢掉 get_session_id：本模块每次现建连用完即关（见文件头口径），
+        没有要复用的会话 id。
+
+        刻意不传 headers：2.x 的签名没有 headers 参数（要自定义头得自己构造 http_client
+        传进去），跨版本传参会挂。要带鉴权头的 server 请先走 SSE。
+        """
+        try:
+            from mcp.client.streamable_http import streamable_http_client as client
+        except ImportError:
+            try:
+                from mcp.client.streamable_http import streamablehttp_client as client
+            except ImportError as e:  # noqa: BLE001  模块在但名字没有 = SDK 太老
+                raise ValueError(
+                    'mcp SDK 版本过低，不支持 Streamable HTTP，请执行 pip install -U "mcp>=1.8"'
+                ) from e
+        async with client(url) as streams:
+            yield streams[0], streams[1]
+
+    @classmethod
+    def _transports(cls, row: McpServer):
         """按配置行返回传输层上下文管理器（此时尚未建连）。
     
         row 为 McpServer ORM 行（get_by_id 结果或 test_params 构造的临时对象），
         只读取 type/url/command/args/env 字段。
         - SSE：mcp.client.sse.sse_client(url, headers)
+        - STREAMABLE_HTTP：mcp.client.streamable_http（版本差异见 _streamable_http）
         - STDIO：mcp.client.stdio.stdio_client(StdioServerParameters(command, args, env))
         """
         try:
@@ -164,16 +214,13 @@ class McpServerService:
         except ImportError as e:  # noqa: BLE001
             raise ValueError("mcp SDK 未安装，请执行 pip install mcp") from e
     
-        type_ = str(row.type or "SSE").upper()
-        if type_ == "SSE":
-            url = row.url
-            if not url:
-                raise ValueError("SSE 连接地址不能为空")
-            if not url.startswith(("http://", "https://")):
-                raise ValueError("SSE 地址需以 http:// 或 https:// 开头")
+        type_ = _norm_type(row.type)
+        if type_ == TYPE_SSE:
             McpServerService._parse_json(row.env, "env")  # 仅校验 env 格式合法；沿用旧格式时静默
-            return sse_client(url, headers={"Accept": "text/event-stream"})
-        if type_ == "STDIO":
+            return sse_client(cls._http_url(row, "SSE"), headers={"Accept": "text/event-stream"})
+        if type_ in (TYPE_STREAMABLE_HTTP, "STREAMABLEHTTP"):
+            return cls._streamable_http(cls._http_url(row, "Streamable HTTP"))
+        if type_ == TYPE_STDIO:
             command = row.command
             if not command:
                 raise ValueError("STDIO 启动命令不能为空")
@@ -187,7 +234,7 @@ class McpServerService:
                 env=env_dict,
             )
             return stdio_client(params)
-        raise ValueError(f"不支持的连接类型: {type_}")
+        raise ValueError(f"不支持的连接类型: {row.type}（可选 {'/'.join(TRANSPORT_TYPES)}）")
 
     @classmethod
     @asynccontextmanager
@@ -374,14 +421,15 @@ class McpServerService:
                           command: str = None, args: str = None, env: str = None) -> dict:
         """
         按参数测试连接（添加/编辑表单"测试"按钮使用，无需保存即可验证）：
-        官方 SDK 真实握手——SSE/STDIO 都完成 initialize + tools/list，
+        官方 SDK 真实握手——SSE/Streamable HTTP/STDIO 都完成 initialize + tools/list，
         toolCount 返回真实工具数（_PROBE_TIMEOUT=5s 内未完成视为失败）。
         """
         start = time.perf_counter()
         try:
-            t = (type_ or 'SSE').upper()
-            if t not in ('SSE', 'STDIO'):
-                raise ValueError(f"不支持的连接类型: {type_}")
+            t = _norm_type(type_)
+            if t not in TRANSPORT_TYPES:
+                raise ValueError(
+                    f"不支持的连接类型: {type_}（可选 {'/'.join(TRANSPORT_TYPES)}）")
             # 临时对象：_transports 只读连接字段，不会落库
             row = McpServer(name=name or "MCP Server", type=t, url=url,
                             command=command, args=args, env=env)

@@ -17,14 +17,14 @@ from common.common_entity.base_entity import Base
 
 
 class McpServer(Base):
-    """MCP 服务器连接配置表（SSE / STDIO 两种模式）"""
+    """MCP 服务器连接配置表（SSE / Streamable HTTP / STDIO 三种模式）"""
     __tablename__ = "tb_mcp_server"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="服务名称")
-    # SSE / STDIO
+    # SSE / STREAMABLE_HTTP / STDIO（VARCHAR(16)，最长的 STREAMABLE_HTTP 占 15）
     type: Mapped[str] = mapped_column(String(16), nullable=False, default="SSE", comment="连接类型")
-    url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, comment="SSE 连接地址")
+    url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, comment="SSE / Streamable HTTP 连接地址")
     command: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment="STDIO 启动命令")
     args: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, comment="STDIO 启动参数 JSON 数组")
     env: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, comment="环境变量 JSON 对象")

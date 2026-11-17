@@ -65,7 +65,7 @@ class HarnessOptionsService:
     async def _mcp_options(login_user: dict) -> list[dict]:
         """MCP 连接候选：进程内 import 调 McpServerService.options（use 口径）。
 
-        返回自带 type 字段（SSE/STDIO），前端 picker 可展示连接类型，原样透传。
+        返回自带 type 字段（SSE/STREAMABLE_HTTP/STDIO），前端 picker 可展示连接类型，原样透传。
         """
         try:
             from service.service_workflow.services.mcp_service import McpServerService

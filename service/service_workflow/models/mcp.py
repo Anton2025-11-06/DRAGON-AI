@@ -5,8 +5,8 @@ from pydantic import Field, BaseModel
 
 class McpServerSaveRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="服务名称")
-    type: str = Field("SSE", description="连接类型 SSE/STDIO")
-    url: Optional[str] = Field(None, max_length=500, description="SSE 连接地址")
+    type: str = Field("SSE", description="连接类型 SSE/STREAMABLE_HTTP/STDIO")
+    url: Optional[str] = Field(None, max_length=500, description="SSE / Streamable HTTP 连接地址")
     command: Optional[str] = Field(None, max_length=255, description="STDIO 启动命令")
     args: Optional[str] = Field(None, max_length=1000, description="STDIO 参数 JSON 数组")
     env: Optional[str] = Field(None, max_length=1000, description="环境变量 JSON 对象")
