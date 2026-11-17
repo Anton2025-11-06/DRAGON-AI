@@ -410,6 +410,9 @@ class RetrieveReq(CamelModel):
     with_graph: bool = Field(False, description="是否开启知识图谱增强那一路召回（仅 doc 型生效）")
     chat_model_id: Optional[int] = Field(
         None, description="图谱增强的问句抽词模型 / 流式问答的对话模型；开图谱增强时必填")
+    thinking: bool = Field(
+        False, description="流式问答是否让对话模型开启深度思考（各家 enable_thinking/thinking 协议，"
+                           "按本次请求动态选择）；只影响模型内部推理，回答仍只回正文、不外泄思维链")
     graph_depth: Optional[int] = Field(
         None, ge=1, le=4, description="图谱邻域从命中实体向外扩几跳（空=默认 2，上限 4）")
     graph_scale: Optional[int] = Field(

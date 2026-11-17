@@ -122,6 +122,8 @@ const rerankOptions = ref<Array<{ label: string; value: number }>>([]);
 /** 需求 9：选了对话模型才有右栏流式回答；开图谱增强时它必填 */
 const chatModelId = ref<number | undefined>();
 const chatOptions = ref<Array<{ label: string; value: number }>>([]);
+// 深度思考：选了对话模型才谈得上，按本次问答动态开关（只让模型内部想得更深，不外泄思维链）
+const thinking = ref(false);
 const withGraph = ref(false);
 const graphDepth = ref(2);
 const graphScale = ref(10);
@@ -428,6 +430,8 @@ function buildPayload(): RetrieveReq {
     rerankModelId: rerankModelId.value,
     withGraph: graphAvailable.value ? withGraph.value : false,
     chatModelId: chatModelId.value,
+    // 没选对话模型就没什么可思考的（走的是普通检索，后端也不读这一位）；选了才按开关下发
+    thinking: chatModelId.value ? thinking.value : false,
     graphDepth: withGraph.value ? graphDepth.value : undefined,
     graphScale: withGraph.value ? graphScale.value : undefined,
     graphSourceChunks: withGraph.value ? graphSourceChunks.value : false,
@@ -549,6 +553,7 @@ function reset() {
   imageUrl.value = '';
   withGraph.value = false;
   graphSourceChunks.value = false;
+  thinking.value = false;
   result.value = null;
   searched.value = false;
   expanded.value = new Set();
@@ -1020,6 +1025,15 @@ onBeforeUnmount(() => {
             show-search
             :filter-option="(i: string, o: any) => o.label.includes(i)"
           />
+          <!-- 选了对话模型才谈得上深度思考：按本次问答动态开关，只让模型内部想得更深，右栏仍只回正文 -->
+          <template v-if="chatModelId">
+            <Tooltip
+              title="开启后让对话模型走深度思考（各家 enable_thinking/thinking 协议）再作答，回答更稳但更慢；右栏仍只展示结论，不展示思维链"
+            >
+              <span class="param-label">深度思考</span>
+            </Tooltip>
+            <Switch v-model:checked="thinking" size="small" />
+          </template>
         </div>
 
         <!-- 行 3：图谱增强（需求 9）只服务 doc 型；开了以后深度/规模/反查原文同一行排开 -->

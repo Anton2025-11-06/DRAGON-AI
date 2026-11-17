@@ -721,6 +721,11 @@ export interface RetrieveReq {
   withGraph?: boolean;
   /** 对话模型：图谱增强的问句抽词 + 流式问答都靠它（需求 9，开图谱时必填） */
   chatModelId?: number;
+  /**
+   * 流式问答是否让对话模型开启深度思考（各家 enable_thinking/thinking 协议）。
+   * 选了对话模型后可动态开关；只影响模型内部推理，右栏仍只回正文、不展示思维链。
+   */
+  thinking?: boolean;
   /** 图谱邻域从命中实体向外扩几跳（空=默认 2） */
   graphDepth?: number;
   /** 实体/关系各一路的向量召回条数（空=默认 10） */

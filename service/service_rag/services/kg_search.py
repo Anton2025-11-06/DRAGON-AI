@@ -23,6 +23,7 @@ Neo4j 侧只有实体全文索引、没有向量（见 kg_store 的建索引段�
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Optional, Sequence
 
 from common.common_constants import rag_constant as RC
@@ -187,6 +188,10 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 
     """
     depth = clamp_depth(depth)
     scale = clamp_scale(scale)
+    # 四段各自计时（抽词=大模型往返，匹配=向量化+ES kNN，展开=Neo4j，原文=ES mget）：
+    # 图谱这一路是全链里最容易慢的一段，四段的定位手段不同，必须先分开量
+    t_recall = time.perf_counter()
+    ms_extract = ms_match = ms_expand = ms_source = 0
     notes: list[str] = []
     kb_ids = sorted({int(i) for g in groups or [] for i in (g.get("kb_ids") or []) if int(i or 0)})
     empty = {"entities": [], "relations": [], "edges": [], "triples": [], "sources": [],
@@ -227,8 +232,10 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 
             chat_cfg, question, entity_types=list(etypes) if etypes else None)
 
     # 阶段 A：去重后的抽词并发（return_exceptions=True 让单 key 失败不连累其他 key）
+    t_stage = time.perf_counter()
     extracted = await asyncio.gather(
         *[_extract_one(tk) for tk in unique_tkeys], return_exceptions=True)
+    ms_extract = int((time.perf_counter() - t_stage) * 1000)
     term_cache: dict[tuple, Optional[dict]] = {}
     extract_err: dict[tuple, str] = {}
     for tk, res in zip(unique_tkeys, extracted):
@@ -262,7 +269,9 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 
         return local, terms, e_hits, r_hits
 
     # 阶段 B：每组的向量匹配并发；匹配本身已按组隔离，并发只改变完成顺序不改变结果
+    t_stage = time.perf_counter()
     matched = await asyncio.gather(*[_match_one(g, tk, em) for (g, tk, em) in valid_groups])
+    ms_match = int((time.perf_counter() - t_stage) * 1000)
 
     union_ent: list[str] = []
     union_rel: list[str] = []
@@ -324,8 +333,10 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 
     centers = [e["name"] for e in ent_list]
     if centers:
         try:
+            t_stage = time.perf_counter()
             sub = await kg_store.subgraph(kb_ids, centers=centers, depth=depth,
                                           limit=max(scale * 4, RC.KG_VIZ_DEFAULT_LIMIT))
+            ms_expand = int((time.perf_counter() - t_stage) * 1000)
             seen_triples = set(triples)
             for edge in sub.get("edges") or []:
                 text = f"{_node_name(edge.get('source'))} -[{edge.get('relation')}]-> "\
@@ -350,11 +361,17 @@ async def recall(groups: Sequence[dict], *, question: str, chat_model_id: int = 
 
     sources: list[dict] = []
     if with_context and centers:
+        t_stage = time.perf_counter()
         sources = await _source_chunks(kb_ids, ent_list, notes=notes)
+        ms_source = int((time.perf_counter() - t_stage) * 1000)
 
     log.info("图谱检索完成: kb={} 实体词={} 命中实体={} 关系={} 原文={} 深度={} 规模={}",
              kb_ids, len(terms["entities"]), len(ent_list), len(triples), len(sources),
              depth, scale)
+    # 抽词那一段是模型往返（常是这一路的大头）；它跳过了就是 0ms，与「快」区分看命中实体数
+    log.info("图谱检索耗时分布: 总计={}ms 抽词={}ms 向量匹配={}ms 邻域展开={}ms 原文回捞={}ms",
+             int((time.perf_counter() - t_recall) * 1000),
+             ms_extract, ms_match, ms_expand, ms_source)
     return {"entities": ent_list, "relations": rel_list[:scale], "edges": edges,
             "triples": triples,
             "sources": sources, "es_ids": [s["es_id"] for s in sources],

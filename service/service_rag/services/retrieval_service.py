@@ -216,6 +216,41 @@ def _meta_clause(es_field: str, kind: str, op: str, value: Any) -> Optional[dict
     return {"range": {es_field: {bounds[op]: low}}}
 
 
+# ==================== 分段耗时统计 ====================
+
+# 耗时分布日志里的环节顺序：前段是检索流水线（_SearchRunner），后段是流式问答（ask_stream）。
+# 父子两级都记：父级是那一段的整体墙钟时间，子级是其中的远程调用（模型/ES/Neo4j/存储）——
+# 「重排这一段慢」和「重排模型那一次调用慢」处置方式不同（前者查分组逻辑，后者换模型/换供应商）。
+_STAGE_ORDER = ("鉴权取库", "切片召回", "向量化", "ES查询", "库级裁剪",
+                "图谱增强", "图谱召回", "图谱原文", "重排", "重排模型",
+                "出口补全", "补全查文档", "媒体签名",
+                "检索", "组装回执", "构建上下文", "取模型配置", "模型生成")
+
+
+class _StageWatch:
+    """一次请求里各环节各花了多少毫秒（同名累加），用来把「慢」定位到具体某一段。
+
+    只记真花了时间的那几段：每段自己起表收表，没走到的环节压根不进这张表——
+    「图谱=0ms」（走了但快）和「本次没开图谱」在日志里必须长得不一样。
+    """
+
+    def __init__(self) -> None:
+        self.started = time.perf_counter()
+        self.ms: dict[str, int] = {}
+
+    def add(self, name: str, began: float) -> None:
+        """把 began 到现在的耗时累加进某环节（分组循环里同一环节会被调用多次）。"""
+        self.ms[name] = self.ms.get(name, 0) + int((time.perf_counter() - began) * 1000)
+
+    def total_ms(self) -> int:
+        return int((time.perf_counter() - self.started) * 1000)
+
+    def dump(self) -> str:
+        names = [n for n in _STAGE_ORDER if n in self.ms]
+        names += [n for n in self.ms if n not in _STAGE_ORDER]
+        return " ".join(f"{n}={self.ms[n]}ms" for n in names) or "无环节"
+
+
 # ==================== 单次检索的执行体 ====================
 
 class _SearchRunner:
@@ -268,7 +303,8 @@ class _SearchRunner:
         self.extra: list[dict] = []
         self.mode_label = RC.RETRIEVE_MODE_HYBRID
         self.took_ms = 0
-        self._started = time.perf_counter()
+        # 分段耗时：慢的时候要说得出慢在哪一段（见 execute 末尾那条「检索耗时分布」）
+        self.watch = _StageWatch()
         self.extra, notes = build_meta_filters(metadata_filters)
         self.warnings.extend(notes)
 
@@ -280,32 +316,49 @@ class _SearchRunner:
             # 「搜不到」和「服务没配好」在页面上长得一模一样，但只有后者能修
             raise ValueError("检索服务未就绪：ES 未初始化（检查 Nacos 的 es 配置段与"
                              "服务启动时的 enable_es）")
+        t_stage = time.perf_counter()
         self.targets = await self._load_targets()
+        self.watch.add("鉴权取库", t_stage)
         if not self.targets:
+            # 一个库都没鉴过也要留一行：页面显示「搜不到」时，这一行才能证明是权限问题而不是召回问题
             self.took_ms = self._elapsed()
+            log.info("检索耗时分布: 总计={}ms 无可见知识库 {}", self.took_ms, self.watch.dump())
             return []
         modes = {t["mode"] for t in self.targets}
         self.mode_label = next(iter(modes)) if len(modes) == 1 else "MIXED"
 
         rows: list[dict] = []
+        t_stage = time.perf_counter()
         for group in self._plan():
             rows.extend(await self._recall(group))
+        self.watch.add("切片召回", t_stage)
+        t_stage = time.perf_counter()
         rows = self._per_kb_cut(rows)
+        self.watch.add("库级裁剪", t_stage)
         # 需求 9：关键词+向量权重分配后的一路召回，与图谱检索的一路召回**叠加**后才是结果
+        t_stage = time.perf_counter()
         rows = await self._merge_graph(rows)
+        self.watch.add("图谱增强", t_stage)
+        t_stage = time.perf_counter()
         rows = await self._rerank(rows)
+        self.watch.add("重排", t_stage)
         rows.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
         if self.total_limit:
             rows = rows[:self.total_limit]
+        t_stage = time.perf_counter()
         rows = await self._attach(rows)
+        self.watch.add("出口补全", t_stage)
         self.took_ms = self._elapsed()
         log.info("检索完成: kb={} mode={} 图谱={} 候选={} 返回={} 耗时={}ms",
                  [t["kb_id"] for t in self.targets], self.mode_label,
                  bool(self.graph.get("applied")), len(rows), len(rows), self.took_ms)
+        # 分布行与「检索完成」分开打：一个只关心慢在哪一段、一个只关心召回质量，
+        # 混成一行时两边都没法按关键字过滤
+        log.info("检索耗时分布: 总计={}ms {}", self.took_ms, self.watch.dump())
         return rows
 
     def _elapsed(self) -> int:
-        return int((time.perf_counter() - self._started) * 1000)
+        return self.watch.total_ms()
 
     # ---------- 一、可见库 → 检索目标 ----------
     async def _load_targets(self) -> list[dict]:
@@ -446,7 +499,10 @@ class _SearchRunner:
 
         vector: Optional[list[float]] = None
         if mode != RC.RETRIEVE_MODE_KEYWORD:
+            t_stage = time.perf_counter()
             vector = await self._vector(group)
+            # 命中同模型缓存时这一段接近 0ms；没命中就是一次向量模型往返（几百毫秒量级）
+            self.watch.add("向量化", t_stage)
             if not vector:
                 # 向量算不出来时，KEYWORD/HYBRID 还能靠 BM25 出一批结果；
                 # 纯向量模式则这一组直接空（空结果 + 一句原因，胜过返回一堆无关文本）
@@ -456,6 +512,7 @@ class _SearchRunner:
                     return []
                 self.warnings.append("查询向量生成失败，本组本次只按关键词召回")
 
+        t_stage = time.perf_counter()
         try:
             hits = await es_client.search_hybrid(
                 kb_ids, query_text=self.query or None, query_vector=vector,
@@ -467,6 +524,9 @@ class _SearchRunner:
             log.exception(f"检索失败: kb={kb_ids} mode={mode}")
             self.warnings.append(f"知识库 {kb_ids} 检索失败：{str(e)[:150]}")
             return []
+        finally:
+            # 失败也要留下耗时：慢到超时的查询往往正是失败的那一条
+            self.watch.add("ES查询", t_stage)
         return [self._row(h) for h in hits]
 
     async def _vector(self, group: dict) -> list[float]:
@@ -585,6 +645,7 @@ class _SearchRunner:
             if len(subset) < 2:
                 out.extend(subset)
                 continue
+            t_stage = time.perf_counter()
             try:
                 cfg = await RagModelService.require_config(model_id, "重排模型")
                 scores = await RagModelService.rerank(
@@ -603,6 +664,10 @@ class _SearchRunner:
                 self.warnings.append(f"重排失败（模型 {model_id}），本组按原始融合分数排序："
                                      f"{str(e)[:120]}")
                 out.extend(subset)
+            finally:
+                # 重排是整条流水线里最容易慢的一段（候选全量发给模型），与「重排」父段分开看：
+                # 差值大说明慢在本地处理，差值小说明慢在模型端
+                self.watch.add("重排模型", t_stage)
         return out
 
     # ---------- 五、出口补全 ----------
@@ -613,12 +678,15 @@ class _SearchRunner:
         kb_names = {t["kb_id"]: t["kb_name"] for t in self.targets}
         doc_ids = {int(r["doc_id"]) for r in rows if int(r.get("doc_id") or 0)}
         docs: dict[int, Any] = {}
+        t_stage = time.perf_counter()
         if doc_ids:
             async with mysql_client.get_session() as session:
                 for rec in (await session.execute(
                         select(Document.doc_id, Document.doc_name, Document.media_duration,
                                Document.file_path).where(Document.doc_id.in_(doc_ids)))).all():
                     docs[int(rec.doc_id)] = rec
+        self.watch.add("补全查文档", t_stage)
+        t_stage = time.perf_counter()
         for row in rows:
             row["kb_name"] = kb_names.get(int(row.get("kb_id") or 0))
             rec = docs.get(int(row.get("doc_id") or 0))
@@ -639,6 +707,9 @@ class _SearchRunner:
             row["media_url"] = urls[0] if urls else None
             block_ids = (row.get("extra") or {}).get("block_ids")
             row["block_id"] = _join_block_ids(block_ids)
+        # 签名是逐条逐媒体串行 await（一个预签名几毫秒到几十毫秒），
+        # 多媒体切片多的时候这一段会比查库还长，是出口补全环节的主要开销
+        self.watch.add("媒体签名", t_stage)
         return rows
 
     async def _merge_graph(self, rows: list[dict]) -> list[dict]:
@@ -682,6 +753,7 @@ class _SearchRunner:
         else:
             self.warnings.append("开启图谱增强必须选对话模型，本次未做图谱召回")
             return rows
+        t_stage = time.perf_counter()
         try:
             got = await kg_search.recall(payload, question=self.query,
                                          chat_model_id=self.chat_model_id,
@@ -691,6 +763,9 @@ class _SearchRunner:
             log.warning(f"图谱增强检索失败: {e}")
             self.warnings.append(f"图谱增强检索失败：{str(e)[:150]}")
             return rows
+        finally:
+            # 抽词+向量匹配+邻域展开三段都在这一次调用里（细分见「图谱检索耗时分布」那条日志）
+            self.watch.add("图谱召回", t_stage)
         self.graph.update({"applied": True,
                            "entities": got.get("entities") or [],
                            "edges": got.get("edges") or [],
@@ -705,12 +780,16 @@ class _SearchRunner:
             return rows
 
         by_es = {str(s.get("es_id") or ""): s for s in sources if s.get("es_id")}
+        t_stage = time.perf_counter()
         try:
             hits = await es_client.get_chunks(list(by_es))
         except Exception as e:  # noqa: BLE001  原文取不到只是这一路不叠加，实体与三元组仍在
             log.warning(f"图谱原文切片读取失败: {e}")
             self.warnings.append(f"图谱原文切片读取失败：{str(e)[:120]}")
             return rows
+        finally:
+            # 开了「反查原文」才会多这一次 mget：慢的时候要先看清是不是它
+            self.watch.add("图谱原文", t_stage)
         allowed = {int(t["kb_id"]) for t in self.targets if t["graph_enabled"]}
         seen = {str(r.get("es_id") or "") for r in rows}
         # 实体名 → 摘要 / 实体名 → 相关三元组：让图谱命中行在正文里能说清
@@ -960,8 +1039,14 @@ class RagRetrievalService:
         失败不往外抛：校验与检索都在首帧之前，而首帧一发状态码就定在 200 了，
         此时抛 ValueError 只会得到一个断流，前端只能显示「连接断开」——所以一律
         翻译成一帧 error，把原因写在页面上。
+
+        每一段都单独计时（见末尾那条「问答耗时分布」）：慢在召回还是慢在模型，
+        处置手段完全不同（前者调阈值与检索范围，后者换模型或换供应商）。
         """
         async def _stream() -> AsyncIterator[str]:
+            watch = _StageWatch()
+            # 先摆好：失败可能发在检索之前（校验就没过）， except 里读它得先能读到
+            runner: Optional[_SearchRunner] = None
             try:
                 if not str(req.query or "").strip():
                     raise ValueError("知识库问答需要输入问题文本")
@@ -969,21 +1054,53 @@ class RagRetrievalService:
                     raise ValueError("请先选择对话模型再问知识库")
                 RagRetrievalService._check_graph(req)
                 runner = RagRetrievalService._runner(login_user, req)
+                t_stage = time.perf_counter()
                 rows = await runner.execute()
-                yield _sse_frame("meta", **RagRetrievalService._resp(runner, rows, req))
+                watch.add("检索", t_stage)
+                t_stage = time.perf_counter()
+                frame = _sse_frame("meta", **RagRetrievalService._resp(runner, rows, req))
+                watch.add("组装回执", t_stage)
+                yield frame
+                t_stage = time.perf_counter()
                 context = qa_context(rows, runner.graph)
+                watch.add("构建上下文", t_stage)
                 if not context:
                     # 没资料就不让模型开口：无依据的自由发挥在知识库页面上看起来像「答对了」，
                     # 但它与这个库没有任何关系，比拒答危险得多
                     raise ValueError("没有检索到可用资料，无法依据知识库回答"
                                      "（请换个说法、放宽阈值或确认开启的库已解析完成）")
+                t_stage = time.perf_counter()
                 cfg = await RagModelService.require_config(req.chat_model_id, "对话模型")
+                # 取配置要回 MySQL 拿 api-key（拼 prompt 是纯本地量级，不单独计时）
+                watch.add("取模型配置", t_stage)
                 prompt = settings.build_rag_qa_prompt(runner.query, context)
-                async for piece in RagModelService.chat_stream(cfg, prompt):
+                # 需求：深度思考按本次请求动态开关（页面在选完对话模型后给一个 toggle）；
+                # 只让模型内部想得更深，chat_stream 仍只吐正文，不把思维链混进右栏
+                t_stage = time.perf_counter()
+                first_ms = 0
+                pieces = 0
+                chars = 0
+                async for piece in RagModelService.chat_stream(cfg, prompt,
+                                                               thinking=bool(req.thinking)):
+                    if pieces == 0:
+                        # 首字延迟：用户感知的「卡住了」几乎全是这一段，模型排队与思考都在里面
+                        first_ms = int((time.perf_counter() - t_stage) * 1000)
+                    pieces += 1
+                    chars += len(piece or "")
                     yield _sse_frame("delta", content=piece)
+                watch.add("模型生成", t_stage)
+                total_ms = watch.total_ms()
                 yield _sse_frame("done", took_ms=runner.took_ms, citations=len(rows))
+                # 生成段含向客户端写帧的时间（包括对端反压）；片数/字数用来区分
+                # 「模型出得慢」与「出得多所以看着慢」，两者的优化方向不同（换模型 vs 缩上下文）；
+                # 「检索」那一段的子环节细分已在同 trace 的「检索耗时分布」里，这里不再列一遍
+                log.info("问答耗时分布: 总计={}ms 首字={}ms 片数={} 字数={} 上下文={}字 {}",
+                         total_ms, first_ms, pieces, chars, len(context), watch.dump())
             except Exception as e:  # noqa: BLE001  流里只能有一帧 error，然后收场
-                log.warning(f"知识库流式问答失败: {e}")
+                # 失败路径同样带分段分布：到底挂在哪一段只看这一行
+                # （检索挂了就不会有「检索耗时分布」那一行，所以这里把子环节一并带上）
+                log.warning(f"知识库流式问答失败: {e} 已耗时={watch.total_ms()}ms "
+                            f"{runner.watch.dump() if runner else ''} {watch.dump()}")
                 yield _sse_frame("error", message=str(e)[:300])
 
         return _stream()
