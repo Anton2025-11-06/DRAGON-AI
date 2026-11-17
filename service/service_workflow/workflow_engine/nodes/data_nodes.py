@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import operator
 from functools import reduce
-from typing import Any
+from typing import Any, Optional
 
 from service.service_workflow.utils.file_utils import FileUtils
 from service.service_workflow.workflow_engine import py_sandbox
@@ -342,62 +342,109 @@ class DocExtractorNodeExecutor(BaseNodeExecutor):
 
 
 class KnowledgeRetrievalNodeExecutor(BaseNodeExecutor):
-    """KNOWLEDGE_RETRIEVAL（对照 MaxKB search-knowledge-node，改为 HTTP 调用 service_rag）。
+    """KNOWLEDGE_RETRIEVAL：进程内直调 service_rag 的检索门面（与知识检索页同一颗召回）。
 
-    通过 runtime.kb_searcher 钩子注入检索能力（生产=service_rag /kb/search HTTP 客户端，
-    测试=内存检索器），节点本身只做参数组装与 rerank 合并。
+    为什么不走 runtime 钩子：与 TOOL/MCP_TOOL 同一条口径（见 external_nodes 模块头），
+    执行器直接调 service 层。原先挂在 runtime.kb_searcher 上的那套接线全仓无人注册，
+    节点一执行必抛「知识库服务未接入」；多一层没有实现者的间接只会把「没接上」
+    拖到运行时才暴露。函数内延迟 import 避开 engine←nodes←services 循环。
+
+    重排不再在节点里自己做：服务层按本次选的 rerank_model_id 已经重排并截断，
+    节点再排一次等于同一批候选过两道尺子，分数与顺序都对不上页面上的结果。
+
+    检索身份取**工作流归属人**（Workflow.created_by）而不是 runtime.user_id：
+    后者是「谁点的运行」，API Key/定时触发时是 0，用它的结果是一条权限正常的流程
+    跑出空召回。归属人才是编辑期用 ACTION_USE 挑出这批库的那个人。
     """
 
     node_type = "KNOWLEDGE_RETRIEVAL"
 
+    # 输出行的裁剪口径：默认与检索页同构（RetrieveHit.dump 的那套键），两个开关只服务
+    # 「下游只要正文」的场景——整段元数据拼进 prompt 时 token 翻倍却没人读。
+    # 判定一律「显式 false 才剪」：缺键的旧画布保持信息最全的那一种形态。
+    _SCORE_FIELDS = ("score", "vectorScore", "keywordScore")
+    _META_FIELDS = ("kbId", "kbName", "docId", "docName", "chunkId", "chunkIndex",
+                    "chunkType", "titlePath", "pageNum", "sheetName", "mediaUrl",
+                    "mediaUrls", "mediaDuration", "blockId", "recall", "graphEntity",
+                    "graphSummary", "graphTriples")
+
     async def execute(self, ctx: ExecutionContext) -> NodeResult:
+        from common.common_permission.login_payload import load_login_user
+        # 延迟 import：检索链路（ES/Neo4j/模型配置）只在装了 rag 后端的 worker 里可用
+        from service.service_rag.services.retrieval_service import RagRetrievalService
+        from service.service_workflow.services.workflow_execution_service import (
+            WorkflowExecutionService,
+        )
+
         cfg = self.config
-        kb_ids = cfg.get("knowledgeBaseIds") or []
+        kb_ids = [int(k) for k in (cfg.get("knowledgeBaseIds") or []) if k]
         if not kb_ids:
             raise ValueError("知识检索节点未选择知识库")
-        query = ctx.render(str(cfg.get("queryVariable") or ""))
+        query = str(ctx.render(str(cfg.get("queryVariable") or "")) or "").strip()
         if not query:
             raise ValueError("知识检索查询变量为空")
 
-        searcher = getattr(self.runtime, "kb_searcher", None)
-        if not callable(searcher):
-            raise ValueError("知识库服务未接入（kb_searcher 未注册）")
+        # rerankConfig 缺键=不覆盖库配置（旧图）；存在则完全按面板上的开关走：
+        # 关了就不重排，开了没选模型就回到库上登记的重排模型（与字段提示一致）
+        rc = cfg.get("rerankConfig")
+        rerank_model_id = 0
+        rerank: Optional[bool] = None
+        if isinstance(rc, dict):
+            rerank = bool(rc.get("enabled"))
+            rerank_model_id = int(rc.get("rerankModelId") or 0)
 
-        results = await searcher(
-            kb_ids=[int(k) for k in kb_ids],
-            query=query,
-            top_k=int(cfg.get("topK") or 5),
-            score_threshold=float(cfg.get("scoreThreshold") or 0.0),
-            retrieval_mode=(cfg.get("retrievalMode") or "VECTOR").upper(),
+        rows, warnings = await RagRetrievalService.search_detail(
+            await load_login_user(await self._owner_id(WorkflowExecutionService)),
+            kb_ids=kb_ids, query=query,
+            # topK/阈值留空一律传 0/None，回到「用知识库自己的配置」，
+            # 而不是在节点里硬编一个和页面不同的默认值
+            top_k=int(cfg.get("topK") or 0),
+            score_threshold=_opt_float(cfg.get("scoreThreshold"), "相似度阈值"),
+            # 空串经 parse_mode 归一成 None = 按库类型自动定；FULLTEXT 写法由别名表接住
+            retrieval_mode=str(cfg.get("retrievalMode") or ""),
+            vector_weight=_opt_float(cfg.get("vectorWeight"), "向量权重"),
+            chunk_type=cfg.get("chunkType") or None,
             metadata_filters=cfg.get("metadataFilters") or [],
-        )
+            rerank=rerank, rerank_model_id=rerank_model_id,
+            with_graph=bool(cfg.get("withGraph")),
+            chat_model_id=int(cfg.get("graphChatModelId") or 0),
+            graph_depth=cfg.get("graphDepth"), graph_scale=cfg.get("graphScale"),
+            graph_source_chunks=bool(cfg.get("graphSourceChunks")))
 
-        # Rerank（可选：走 WorkflowModelClient.rerank）
-        rc = cfg.get("rerankConfig") or {}
-        if rc.get("enabled") and rc.get("rerankModelId") and len(results) > 1:
-            try:
-                client = await WorkflowModelClient.create(
-                    int(rc["rerankModelId"]), provider=self.runtime.model_provider)
-                docs = [str(r.get("content", "")) for r in results]
-                reranked = await client.rerank(query, docs, top_n=int(rc.get("topN") or 5))
-                idx_map = {r.get("index"): r.get("relevance_score", 0) for r in reranked}
-                for i, r in enumerate(results):
-                    r["score"] = idx_map.get(i, r.get("score", 0))
-                results.sort(key=lambda r: r.get("score", 0), reverse=True)
-                results = results[:int(rc.get("topN") or 5)]
-            except Exception:  # noqa: BLE001
-                pass  # rerank 失败降级原始结果
-
+        trimmed = [self._trim(row, cfg) for row in rows]
         output_var = cfg.get("outputVariable") or "documents"
-        output = {
-            output_var: results,
+        # warnings 必须外露：节点拿到空结果时，这是唯一能区分「库里没内容」与
+        # 「这个库你没权限」「阈值得太高」的线索（只写日志等于用户永远看不到）
+        return NodeResult(output={
+            output_var: trimmed,
             "text": "\n\n".join(
-                f"[{i + 1}] {r.get('content', '')}" for i, r in enumerate(results)),
-            "count": len(results),
-        }
+                f"[{i + 1}] {r.get('content', '')}" for i, r in enumerate(trimmed)),
+            "count": len(trimmed),
+            "warnings": warnings,
+        })
+
+    async def _owner_id(self, execution_service) -> int:
+        """本次检索要用谁的身份：工作流归属人，拿不到时退回执行行的 user_id。"""
+        owner = 0
+        execution_id = getattr(self.runtime, "execution_id", None)
+        if execution_id:
+            brief = await execution_service.workflow_of_execution(str(execution_id))
+            owner = int(brief[1]) if brief else 0
+        uid = owner or int(getattr(self.runtime, "user_id", 0) or 0)
+        if not uid:
+            raise ValueError("知识检索节点拿不到检索身份：工作流没有归属人，本次执行"
+                             "也不是用户发起的（API Key/定时触发不带用户，"
+                             "而检索必须按某个人的知识库权限鉴权）")
+        return uid
+
+    @staticmethod
+    def _trim(row: dict, cfg: dict) -> dict:
+        drop: set[str] = set()
         if cfg.get("includeScore") is False:
-            output[output_var] = [{k: v for k, v in r.items() if k != "score"} for r in results]
-        return NodeResult(output=output)
+            drop.update(KnowledgeRetrievalNodeExecutor._SCORE_FIELDS)
+        if cfg.get("includeMetadata") is False:
+            drop.update(KnowledgeRetrievalNodeExecutor._META_FIELDS)
+        return {k: v for k, v in row.items() if k not in drop}
 
     @staticmethod
     def validate_node(node, graph) -> list:
@@ -405,10 +452,28 @@ class KnowledgeRetrievalNodeExecutor(BaseNodeExecutor):
         data = node.data or {}
         if not data.get("knowledgeBaseIds"):
             issues.append(issue("KB_NO_SELECTED", "ERROR", "知识检索节点未选择知识库", node))
-        if not data.get("queryVariable"):
+        if not str(data.get("queryVariable") or "").strip():
             issues.append(issue("KB_NO_QUERY", "ERROR", "知识检索节点未配置查询变量", node))
+        # 开了图谱增强就必须选对话模型：这一路要先让大模型从问题里抽出实体和关系，
+        # 没模型时执行只会得到一句 warning + 纯切片结果（与检索页同一口径，提前拦住）
+        if data.get("withGraph") and not int(data.get("graphChatModelId") or 0):
+            issues.append(issue(
+                "KB_GRAPH_NO_MODEL", "ERROR", "知识检索节点开启图谱增强但未选择对话模型", node,
+                suggestion="图谱那一路靠对话模型从查询里抽实体和关系，请在本节点选择一个对话模型"))
+        rc = data.get("rerankConfig")
+        if isinstance(rc, dict) and rc.get("enabled") and not int(rc.get("rerankModelId") or 0):
+            issues.append(issue(
+                "KB_RERANK_NO_MODEL", "WARNING", "知识检索节点启用了重排序但未选择重排序模型", node,
+                suggestion="不选模型时本节点沿用知识库上的重排配置；库上也没配就等于没重排"))
         return issues
 
 
-# 延迟导入避免循环
-from service.service_workflow.workflow_engine.model_client import WorkflowModelClient  # noqa: E402
+def _opt_float(value: Any, label: str) -> Optional[float]:
+    """可选数值参数：留空=None（用知识库配置），填了解不开就要说清楚是哪一项。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"知识检索节点的{label}不是合法数值: {value}") from None
+

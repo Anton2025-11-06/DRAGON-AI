@@ -1059,7 +1059,12 @@ export const useDebugStore = defineStore('debug', () => {
         break;
       }
       case 'KNOWLEDGE_RETRIEVAL': {
-        suggestions.push('检查知识库配置是否正确', '确认知识库是否可访问');
+        suggestions.push(
+          '先看节点输出里的 warnings：没权限的库、跳过的库、图谱不可用都会写在那里',
+          '检索身份是工作流归属人（创建人），确认他对选中的知识库有「使用」权限',
+          '召回 0 条时先放宽相似度阈值（留空 = 用知识库自己的配置）或把检索模式改成混合',
+          '开了图谱增强必须选对话模型，没库建过图谱时这一路只会拿到 warning',
+        );
         break;
       }
       case 'LLM': {

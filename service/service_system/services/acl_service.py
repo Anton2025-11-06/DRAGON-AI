@@ -334,7 +334,7 @@ class AclService:
                              pairs: Sequence[tuple]) -> dict[tuple, str]:
         """批量回显授权主体名称，同时充当存在性校验的唯一数据来源。
 
-        每类主体的「有效」口径与登录载荷里的保持一致（见 login_service._build_payload）：
+        每类主体的「有效」口径与登录载荷里的保持一致（见 common_permission.login_payload）：
         角色/部门/用户组要 status=1，用户只看 is_deleted=0（停用用户仍是有身份的自然人，
         授权行留着无害，等它重新启用即生效；停用组/停用角色不参与鉴权，故要求启用）。
         """

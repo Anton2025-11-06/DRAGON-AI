@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentscope.agent import Agent
+from agentscope.agent import Agent, ReActConfig
 from agentscope.permission import (
     AdditionalWorkingDirectory, PermissionMode,
 )
@@ -323,4 +323,5 @@ async def build_agent(state: AgentState, workspace: Any, model: Any,
         state=state,
         toolkit=await build_toolkit(workspace, mounted_tools),
         offloader=workspace,
+        react_config=ReActConfig(max_iters=200)
     )

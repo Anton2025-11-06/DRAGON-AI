@@ -1,6 +1,7 @@
 <script lang="ts">
 import {
   computed,
+  defineAsyncComponent,
   defineComponent,
   nextTick,
   onMounted,
@@ -159,63 +160,12 @@ function thinkingHint(text: string): string {
   return clip(lines.at(-1) ?? '', THINKING_HINT_MAX);
 }
 
-type PreviewKind =
-  | 'audio'
-  | 'code'
-  | 'csv'
-  | 'html'
-  | 'image'
-  | 'md'
-  | 'office'
-  | 'pdf'
-  | 'text'
-  | 'unknown'
-  | 'video';
-
-/** 扩展名 → 预览类别（image/pdf/audio/video 走 typed Blob；md/code/csv/html/text 走文本解码；office/unknown 占位） */
-const PREVIEW_EXT_KIND: Record<string, PreviewKind> = {
-  apng: 'image', bmp: 'image', gif: 'image', ico: 'image', jpeg: 'image',
-  jpg: 'image', png: 'image', svg: 'image', webp: 'image',
-  pdf: 'pdf',
-  flac: 'audio', m4a: 'audio', mp3: 'audio', ogg: 'audio', wav: 'audio',
-  m4v: 'video', mov: 'video', mp4: 'video', webm: 'video',
-  markdown: 'md', md: 'md',
-  c: 'code', cc: 'code', cpp: 'code', cs: 'code', css: 'code', go: 'code',
-  h: 'code', hpp: 'code', ini: 'code', java: 'code', js: 'code', json: 'code',
-  jsx: 'code', less: 'code', mjs: 'code', php: 'code', ps1: 'code', py: 'code',
-  rb: 'code', rs: 'code', scss: 'code', sh: 'code', sql: 'code', toml: 'code',
-  ts: 'code', tsx: 'code', yaml: 'code', yml: 'code',
-  csv: 'csv', tsv: 'csv',
-  htm: 'html', html: 'html',
-  conf: 'text', log: 'text', txt: 'text', xml: 'text',
-  doc: 'office', docx: 'office', ppt: 'office', pptx: 'office',
-  xls: 'office', xlsx: 'office',
-};
-
-/** 二进制媒体扩展名 → MIME（喂 <img>/<iframe>/<audio>/<video> 的 typed Blob） */
-const PREVIEW_MIME: Record<string, string> = {
-  apng: 'image/apng', bmp: 'image/bmp', gif: 'image/gif', ico: 'image/x-icon',
-  jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml',
-  webp: 'image/webp',
-  pdf: 'application/pdf',
-  flac: 'audio/flac', m4a: 'audio/mp4', mp3: 'audio/mpeg', ogg: 'audio/ogg',
-  wav: 'audio/wav',
-  m4v: 'video/x-m4v', mov: 'video/quicktime', mp4: 'video/mp4', webm: 'video/webm',
-};
-
-/** 取扩展名（小写、不含点，无扩展名返回空串） */
-function extOf(name: string): string {
-  const i = name.lastIndexOf('.');
-  return i === -1 || i === name.length - 1 ? '' : name.slice(i + 1).toLowerCase();
-}
-
-function previewKind(name: string): PreviewKind {
-  return PREVIEW_EXT_KIND[extOf(name)] || 'unknown';
-}
-
-/** 代码类文本包成带语言标注的 ``` 围栏，交给 MarkdownRenderer 高亮 */
-function codeMarkdown(text: string, ext: string): string {
-  return `\`\`\`${ext}\n${text}\n\`\`\``;
+/** 预览弹窗指向的文件：内容取回与渲染都在 SandboxPreviewModal 里，这里只登记「开哪个」 */
+interface PreviewTarget {
+  name: string;
+  open: boolean;
+  path: string;
+  size: number;
 }
 
 /** 对话条（前端渲染模型）：assistant 消息聚合思考流/工具轨迹/正文 */
@@ -286,6 +236,10 @@ export default defineComponent({
     PlusOutlined,
     ReloadOutlined,
     RobotOutlined,
+    // 预览库（docx/excel/pptx 解析器 + codemirror）有几 MB，只在真点开文件时才拉
+    SandboxPreviewModal: defineAsyncComponent(
+      () => import('./SandboxPreviewModal.vue'),
+    ),
     SendOutlined,
   },
   setup() {
@@ -364,21 +318,13 @@ export default defineComponent({
     const sandboxItems = ref<api.SandboxItem[]>([]);
     const workspace = ref('');
     const uploading = ref(false);
-    // 内嵌预览状态（功能1）：点工作区文件/输出物卡片后在右侧面板内渲染，不再弹窗
-    // PREVIEW_TEXT_MAX：文本类本地显示上限（后端下载口不截断，这里只防超大文本卡渲染）
-    const PREVIEW_TEXT_MAX = 2_000_000;
-    const preview = reactive({
-      active: false,
+    // 预览弹窗（功能1 改版）：渲染整体交给 SandboxPreviewModal，工作区栏只留文件列表；
+    // 这里四个字段决定「开哪个文件」，取字节/按扩展名选渲染方式都在弹窗里做。
+    const previewModal = reactive<PreviewTarget>({
+      open: false,
       name: '',
       path: '',
       size: 0,
-      ext: '',
-      kind: '' as PreviewKind | '',
-      blobUrl: '',
-      text: '',
-      truncated: false,
-      loading: false,
-      err: '',
     });
     // ==================== 文件上传（多文件、逐个顺序、各自进度）====================
     /** 单文件上限 200MB（与后端 UPLOAD_MAX 对齐） */
@@ -1030,7 +976,7 @@ export default defineComponent({
           if (!had && list.length > 0 && sessionId.value === sid) {
             sandboxCollapsed.value = false;
             const first = list[0];
-            if (first) void openPreview(first.path, first.name, 0);
+            if (first) openPreview(first.path, first.name, 0);
           }
           break;
         }
@@ -1148,7 +1094,7 @@ export default defineComponent({
 
     // ==================== 沙箱文件逻辑 ====================
     async function loadSandboxFiles(dir = currentPath.value) {
-      // 任何目录导航（返回/进入/面包屑/刷新）都先退出内嵌预览，回到文件列表
+      // 任何目录导航（返回/进入/面包屑/刷新）都先收起预览弹窗，回到文件列表
       closePreview();
       sandboxLoading.value = true;
       try {
@@ -1191,7 +1137,7 @@ export default defineComponent({
 
     function openFile(item: api.SandboxItem) {
       const path = `${currentPath.value || WORKSPACE_ROOT}/${item.name}`;
-      void openPreview(path, item.name, item.size);
+      openPreview(path, item.name, item.size);
     }
 
     function formatSize(size: number): string {
@@ -1227,71 +1173,35 @@ export default defineComponent({
       }
     }
 
-    /** 内嵌预览：按扩展名归类渲染（功能1，零后端改动，复用下载口原始字节） */
-    async function openPreview(path: string, name: string, size = 0) {
-      closePreview();
-      preview.active = true;
-      preview.loading = true;
-      preview.name = name;
-      preview.path = path;
-      preview.size = size;
-      preview.ext = extOf(name);
-      const kind = previewKind(name);
-      preview.kind = kind;
-      // office / 未知格式：不读内容（可能是大二进制），直接给占位 + 下载
-      if (kind === 'office' || kind === 'unknown') {
-        preview.loading = false;
-        return;
-      }
+    /** 删除工作区里的文件或目录（不可逆，模板里带 popconfirm 二次确认），删完重拉当前目录 */
+    async function deleteItem(item: api.SandboxItem) {
+      const path = `${currentPath.value || WORKSPACE_ROOT}/${item.name}`;
       try {
-        const blob = await api.SandboxFileBlob(
-          path,
-          accessStore.accessToken,
-          getTraceId(),
-        );
-        if (
-          kind === 'image' ||
-          kind === 'pdf' ||
-          kind === 'audio' ||
-          kind === 'video'
-        ) {
-          // 按扩展名重新包 typed Blob（下载口 Content-Type 可能是 octet-stream，不重包渲染不了）
-          const mime =
-            PREVIEW_MIME[preview.ext] ||
-            blob.type ||
-            'application/octet-stream';
-          const buf = await blob.arrayBuffer();
-          preview.blobUrl = URL.createObjectURL(new Blob([buf], { type: mime }));
-        } else {
-          // 文本类直接解码字节，绕开后端 read_text_file 的 200KB 截断；超上限再本地截断
-          let text = await blob.text();
-          if (text.length > PREVIEW_TEXT_MAX) {
-            text = text.slice(0, PREVIEW_TEXT_MAX);
-            preview.truncated = true;
-          }
-          preview.text = text;
-        }
+        await api.SandboxDelete(path);
+        message.success(`已删除 ${item.name}`);
+        // 正预览的就是被删的这个：弹窗里的内容已失效，直接关掉
+        if (previewModal.open && previewModal.path === path) closePreview();
+        await loadSandboxFiles(currentPath.value);
       } catch (error: any) {
-        preview.err = error?.message || '预览失败，请下载后查看';
-      } finally {
-        preview.loading = false;
+        // 后端把「不存在 / 删除未生效 / 根目录不让删」写在 message 里，直接透出不吞成「删除失败」
+        message.error(error?.message || '删除失败');
       }
     }
 
-    /** 关闭预览并释放 object URL（返回列表 / 切目录 / 换文件时调用） */
+    /**
+     * 打开预览弹窗：只登记目标文件（工作区卡片 / 输出物卡片 / 新一轮输出物自动预览都走这里），
+     * 取字节与按扩展名选渲染方式（含 docx/xlsx/pptx 的纯前端解析）都在弹窗组件里做。
+     */
+    function openPreview(path: string, name: string, size = 0) {
+      previewModal.path = path;
+      previewModal.name = name;
+      previewModal.size = size;
+      previewModal.open = true;
+    }
+
+    /** 收起预览弹窗（返回列表 / 切目录 / 删掉正在看的文件时调用） */
     function closePreview() {
-      if (preview.blobUrl) URL.revokeObjectURL(preview.blobUrl);
-      preview.active = false;
-      preview.name = '';
-      preview.path = '';
-      preview.size = 0;
-      preview.ext = '';
-      preview.kind = '';
-      preview.blobUrl = '';
-      preview.text = '';
-      preview.truncated = false;
-      preview.loading = false;
-      preview.err = '';
+      previewModal.open = false;
     }
 
     /** 按绝对路径下载（预览头 / 输出物卡片用；同 downloadItem 的 blob 下载，带 token） */
@@ -1488,13 +1398,13 @@ export default defineComponent({
       openFile,
       formatSize,
       downloadItem,
+      deleteItem,
       beforeUpload,
       uploading,
-      preview,
+      previewModal,
       openPreview,
       closePreview,
       downloadByPath,
-      codeMarkdown,
       subSegments,
       atWorkspaceRoot,
       WORKSPACE_ROOT,
@@ -1959,106 +1869,8 @@ export default defineComponent({
         </a-breadcrumb-item>
       </a-breadcrumb>
 
-      <!-- 内嵌预览：点文件后从列表切到内容预览（功能1） -->
-      <div v-if="preview.active" class="hermes-preview">
-        <div class="hermes-preview-head">
-          <FileTextFilled class="hermes-preview-head-icon" />
-          <span class="hermes-preview-name" :title="preview.path">{{
-            preview.name
-          }}</span>
-          <span v-if="preview.size" class="hermes-preview-size">{{
-            formatSize(preview.size)
-          }}</span>
-          <a-space class="hermes-preview-actions">
-            <a-button size="small" @click="closePreview">
-              <template #icon><ArrowLeftOutlined /></template>返回
-            </a-button>
-            <a-button
-              size="small"
-              type="link"
-              @click="downloadByPath(preview.path, preview.name)"
-            >
-              <template #icon><CloudDownloadOutlined /></template>下载
-            </a-button>
-          </a-space>
-        </div>
-        <div class="hermes-preview-body">
-          <div v-if="preview.loading" class="hermes-preview-center">
-            <a-spin />
-          </div>
-          <div
-            v-else-if="preview.err"
-            class="hermes-preview-center hermes-preview-err"
-          >
-            {{ preview.err }}
-          </div>
-          <img
-            v-else-if="preview.kind === 'image'"
-            :src="preview.blobUrl"
-            :alt="preview.name"
-            class="hermes-preview-img"
-          />
-          <iframe
-            v-else-if="preview.kind === 'pdf'"
-            :src="preview.blobUrl"
-            class="hermes-preview-frame"
-            title="pdf 预览"
-          ></iframe>
-          <audio
-            v-else-if="preview.kind === 'audio'"
-            :src="preview.blobUrl"
-            controls
-            class="hermes-preview-media"
-          ></audio>
-          <video
-            v-else-if="preview.kind === 'video'"
-            :src="preview.blobUrl"
-            controls
-            class="hermes-preview-video"
-          ></video>
-          <MarkdownRenderer
-            v-else-if="preview.kind === 'md'"
-            :content="preview.text"
-            class="hermes-preview-md"
-          />
-          <MarkdownRenderer
-            v-else-if="preview.kind === 'code'"
-            :content="codeMarkdown(preview.text, preview.ext)"
-            class="hermes-preview-md"
-          />
-          <iframe
-            v-else-if="preview.kind === 'html'"
-            :srcdoc="preview.text"
-            sandbox=""
-            class="hermes-preview-frame"
-            title="html 预览"
-          ></iframe>
-          <pre
-            v-else-if="preview.kind === 'text' || preview.kind === 'csv'"
-            class="hermes-preview-pre"
-            >{{ preview.text }}</pre
-          >
-          <div v-else-if="preview.kind === 'office'" class="hermes-preview-center">
-            <FileTextFilled class="hermes-preview-office-icon" />
-            <p>
-              {{ (preview.ext || '该').toUpperCase() }}
-              文档暂不支持在线预览，请下载查看
-            </p>
-          </div>
-          <div v-else class="hermes-preview-center">
-            <p>该文件类型暂不支持在线预览，请下载查看</p>
-          </div>
-          <div
-            v-if="!preview.loading && preview.truncated"
-            class="hermes-preview-truncated"
-          >
-            内容过长已截断，仅显示前 {{ preview.text.length }} 字符，下载查看完整内容
-          </div>
-        </div>
-      </div>
-
-      <!-- 文件列表 -->
-      <div v-else class="hermes-fs" :class="{ loading: sandboxLoading }">
+      <!-- 文件列表（预览已搬到独立弹窗 SandboxPreviewModal，栏内不再画内容） -->
+      <div class="hermes-fs" :class="{ loading: sandboxLoading }">
         <a-spin :spinning="sandboxLoading">
           <div v-if="sandboxItems.length > 0" class="hermes-fs-grid">
             <div
@@ -2098,6 +1910,32 @@ export default defineComponent({
                 >
                   查看
                 </a-button>
+                <a-tooltip
+                  :title="
+                    item.type === 'dir'
+                      ? '删除文件夹（连同里面的内容）'
+                      : '删除文件'
+                  "
+                >
+                  <!-- 卡片整块绑了 dblclick 进入/预览，这两个修饰符不挡就会误发导航 -->
+                  <span class="hermes-fs-del" @click.stop @dblclick.stop>
+                    <a-popconfirm
+                      cancel-text="取消"
+                      ok-text="删除"
+                      :ok-button-props="{ danger: true }"
+                      :title="
+                        item.type === 'dir'
+                          ? `删除「${item.name}」及其中全部文件？删了不可恢复。`
+                          : `删除「${item.name}」？删了不可恢复。`
+                      "
+                      @confirm="deleteItem(item)"
+                    >
+                      <a-button danger size="small" type="link">
+                        <template #icon><DeleteOutlined /></template>
+                      </a-button>
+                    </a-popconfirm>
+                  </span>
+                </a-tooltip>
               </div>
             </div>
           </div>
@@ -2215,6 +2053,14 @@ export default defineComponent({
         </div>
       </template>
     </a-modal>
+
+    <!-- 沙箱文件预览弹窗（输出物卡片与工作区文件共用一份，内容按扩展名选渲染方式） -->
+    <SandboxPreviewModal
+      v-model:open="previewModal.open"
+      :name="previewModal.name"
+      :path="previewModal.path"
+      :size="previewModal.size"
+    />
   </div>
 </template>
 
@@ -2291,113 +2137,9 @@ export default defineComponent({
   }
 }
 
-/* ==================== 沙箱内嵌预览（功能1） ==================== */
-.hermes-preview {
-  display: flex;
-  flex-direction: column;
-
-  .hermes-preview-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 4px;
-    border-bottom: 1px solid var(--border-color, #f0f0f0);
-
-    .hermes-preview-head-icon {
-      color: var(--primary-color, #1677ff);
-      flex-shrink: 0;
-    }
-
-    .hermes-preview-name {
-      font-size: 13px;
-      font-weight: 500;
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .hermes-preview-size {
-      font-size: 12px;
-      color: var(--text-color-3, #8a9099);
-      flex-shrink: 0;
-    }
-
-    .hermes-preview-actions {
-      flex-shrink: 0;
-    }
-  }
-
-  .hermes-preview-body {
-    overflow: auto;
-    padding: 10px 4px;
-
-    .hermes-preview-center {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      min-height: 200px;
-      color: var(--text-color-3, #8a9099);
-      text-align: center;
-      padding: 20px;
-    }
-
-    .hermes-preview-err {
-      color: #d4380d;
-    }
-
-    .hermes-preview-office-icon {
-      font-size: 40px;
-      color: var(--text-color-3, #c9ced6);
-    }
-
-    .hermes-preview-img {
-      max-width: 100%;
-      height: auto;
-      display: block;
-      margin: 0 auto;
-    }
-
-    .hermes-preview-frame {
-      width: 100%;
-      height: 60vh;
-      min-height: 400px;
-      border: none;
-      background: #fff;
-    }
-
-    .hermes-preview-media {
-      width: 100%;
-    }
-
-    .hermes-preview-video {
-      width: 100%;
-      max-height: 70vh;
-      background: #000;
-    }
-
-    .hermes-preview-pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-      font-size: 12px;
-      line-height: 1.6;
-    }
-
-    .hermes-preview-truncated {
-      margin-top: 10px;
-      padding: 6px 10px;
-      font-size: 12px;
-      color: #ad6800;
-      background: rgba(250, 173, 20, 0.1);
-      border-radius: 6px;
-    }
-  }
-}
+/* ==================== 沙箱预览 ====================
+   渲染样式已随预览内容搬进 SandboxPreviewModal.vue（弹窗自己带 scoped 样式），
+   这一栏只负责文件列表。 */
 
 // 沙箱收起：右栏已 v-show 隐藏，对话框从固定 55% 改为撑满剩余宽度
 .hermes-page.is-sandbox-collapsed {
@@ -2889,6 +2631,14 @@ export default defineComponent({
         transition: opacity 0.2s;
         display: flex;
         justify-content: center;
+        // 卡片最窄只 128px，多一个删除按钮后一行放不下，换行比挤成一团好
+        flex-wrap: wrap;
+
+        // 删除外层包了 tooltip + popconfirm 两层，样式在这一层上把它接回同一行
+        .hermes-fs-del {
+          display: inline-flex;
+          align-items: center;
+        }
       }
     }
 

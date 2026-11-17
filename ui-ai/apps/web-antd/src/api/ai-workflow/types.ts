@@ -1243,8 +1243,15 @@ export interface LLMNodeConfig {
 
 /**
  * 检索模式枚举
+ * '' = 不覆盖知识库自己的配置（后端 parse_mode 归一成 None，按库类型自动定）；
+ * FULLTEXT 是画布上的「全文检索」写法，后端别名表把它折成 KEYWORD
  */
-export type RetrievalMode = 'FULLTEXT' | 'HYBRID' | 'VECTOR';
+export type RetrievalMode = '' | 'FULLTEXT' | 'HYBRID' | 'VECTOR';
+
+/**
+ * 切片模态过滤（后端 rag_constant.CHUNK_TYPES_ALL，'' = 不限）
+ */
+export type ChunkTypeFilter = '' | 'audio_video' | 'image' | 'text';
 
 /**
  * 过滤运算符枚举
@@ -1264,11 +1271,15 @@ export type FilterOperator =
  * 重排序配置
  */
 export interface RerankConfig {
-  /** 是否启用重排序 */
+  /** 是否启用重排序（关掉=本次不重排；开启但未选模型则用知识库上登记的重排模型） */
   enabled: boolean;
   /** 重排序模型 ID */
   rerankModelId?: number;
-  /** 重排序后保留的数量 */
+  /**
+   * 重排序后保留的数量（legacy）
+   * 后端重排后仍按节点 topK（总条数）截断，服务层没有「重排再截一刀」的参数，
+   * 因此配置面板已去掉这一项；字段保留只是为了旧图反序列化不报未知键
+   */
   topN?: number;
 }
 
@@ -1286,24 +1297,39 @@ export interface MetadataFilter {
 
 /**
  * 知识检索节点配置 (Workflow Retrieval Node)
- * 从知识库检索相关内容，支持元数据过滤
+ * 参数集与「知识库 → 知识检索」页一致（后端 RagRetrievalService.search_detail 一颗召回），
+ * 留空的项一律回落到知识库自己的 retrieve_config
  */
 export interface KnowledgeRetrievalConfig {
   /** 知识库 ID 列表 */
   knowledgeBaseIds?: number[];
   /** 查询变量 (支持变量引用: {{nodeName.variableName}}) */
   queryVariable?: string;
-  /** 检索数量 (Top K) */
+  /** 检索数量（本次检索总共返回几条，跨库合并后截断；留空=用知识库配置） */
   topK?: number;
-  /** 相似度阈值 (0-1) */
+  /** 相似度阈值 (0-1，留空=用知识库配置) */
   scoreThreshold?: number;
   /** 检索模式 */
   retrievalMode?: RetrievalMode;
+  /** 混合检索时向量那一侧的占比 0-1（关键词侧=1-它），仅 HYBRID 生效 */
+  vectorWeight?: number;
+  /** 限定模态：只召回某一类切片，'' = 不限 */
+  chunkType?: ChunkTypeFilter;
   /** 重排序配置 */
   rerankConfig?: RerankConfig;
   /** 元数据过滤条件 */
   metadataFilters?: MetadataFilter[];
-  /** 输出变量名 */
+  /** 图谱增强：叠一路知识图谱召回（仅文档型知识库有效） */
+  withGraph?: boolean;
+  /** 图谱抽词用的对话模型（withGraph 开启时必填） */
+  graphChatModelId?: number;
+  /** 图谱邻域深度 1-4 */
+  graphDepth?: number;
+  /** 图谱实体/关系各一路的向量召回条数 1-100 */
+  graphScale?: number;
+  /** 图谱那一路是否顺命中实体反查原文切片（默认只出实体+关系） */
+  graphSourceChunks?: boolean;
+  /** 输出变量名（默认 documents，另附 text/count/warnings） */
   outputVariable?: string;
   /** 是否返回元数据 */
   includeMetadata?: boolean;

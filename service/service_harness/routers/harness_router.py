@@ -240,6 +240,22 @@ async def harness_sandbox_file(request: Request, path: str = sandbox_file_servic
         return ApiResponse.error(400, str(e))
 
 
+@sandbox_router.delete("/file", summary="删除沙箱文件或目录（目录连带内容）")
+async def harness_sandbox_file_delete(request: Request,
+                                      path: str = sandbox_file_service.WORKSPACE_ROOT,
+                                      session_id: str = ""):
+    """只作用在当前用户自己那只沙箱的工作区，工作区根目录本身拒删。
+
+    不可逆操作（文件浏览口没有回收站），所以前端只给带确认弹窗的行内按钮。
+    """
+    login_user = await get_login_user(request)
+    try:
+        data = await sandbox_file_service.delete_entry(login_user, path, session_id)
+        return ApiResponse.success(data=data, message="已删除")
+    except sandbox_file_service.HarnessSandboxError as e:
+        return ApiResponse.error(400, str(e))
+
+
 @sandbox_router.post("/upload", summary="上传文件到沙箱工作区")
 async def harness_sandbox_upload(request: Request, path: str = Form(sandbox_file_service.WORKSPACE_ROOT),
                                  session_id: str = Form(""),

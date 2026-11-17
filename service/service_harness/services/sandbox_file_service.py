@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""harness 沙箱文件代理：把每用户的 OpenSandbox 工作区代理成文件浏览器四口。
+"""harness 沙箱文件代理：把每用户的 OpenSandbox 工作区代理成文件浏览器五口。
 
 与旧 demo（service_workflow 的 sandbox_service，本地目录版）保持同一套响应
-形状（files / file / upload / download），前端切换只换 URL 不换结构。
+形状（files / file / upload / download），前端切换只换 URL 不换结构；删除口是
+harness 这边新加的（旧 demo 那份本地目录版没有，前端多一个行内按钮）。
 
 执行通道（agentscope 官方文档确认的口径，v2.0.9）：
 - ``workspace.get_backend()`` 拿到绑定沙箱的执行后端；
@@ -227,7 +228,7 @@ else:
         print('TXT:'+t+('\\n[文件较大，已截断]' if len(d)>{READ_TEXT_MAX} else ''))"""
 
 
-# ==================== 四口实现 ====================
+# ==================== 五口实现 ====================
 
 
 async def list_dir(login_user: dict, path: str = "", session_id=None) -> dict:
@@ -318,6 +319,42 @@ async def save_file(login_user: dict, dir_path: str, filename: str,
         # 回绝对路径，前端添加附件时直接把它作为 attachment.path 传给 /chat
         return {"name": posixpath.basename(target), "size": len(content),
                 "path": abs_path}
+
+
+async def delete_entry(login_user: dict, path: str, session_id=None) -> dict:
+    """删除工作区里的一个文件或文件夹（文件夹连带里面的内容一起没）。
+
+    作用域天然只在本人的那一只沙箱：workspace 由 _sandbox_entry 按 user_id 分配，
+    路径经 _safe_rel 归一后恒落在 /workspace 以里，这里再单独拒删工作区根目录
+    ——清空 workdir 等于把沙箱契约目录拆掉，后续对话与文件浏览都没了落点。
+
+    删、查都走 backend 的专用文件 API（与 _pack_dir 清理临时 tar、技能刷新删旧
+    副本同一颗 delete_path，不经 shell，目录连带子项一并删）。删前删后各一次
+    exists 复核：本条链路吃过「命令没真执行但也不报错」的亏（见 list_dir 的空
+    stdout 注释），不可逆操作不能靠「没抛异常」就当成功，否则前端报「已删除」
+    而文件还在原地。
+    """
+    async with _sandbox_entry(int(login_user.get("user_id") or 0), session_id) as entry:
+        rel = _safe_rel(path)
+        if not rel:
+            raise HarnessSandboxError("不能删除工作区根目录")
+        backend = _backend(entry)
+        abs_path = backend.join_path(entry["workdir"], rel)
+        try:
+            if not await backend.file_exists(abs_path):
+                raise HarnessSandboxError("文件或目录不存在")
+            await backend.delete_path(abs_path)
+            if await backend.file_exists(abs_path):
+                raise HarnessSandboxError("删除未生效（路径仍存在），请刷新目录后重试")
+        except HarnessSandboxError:
+            raise
+        except Exception as e:  # noqa: BLE001  delete_path 后端/传输异常
+            log.warning("harness sandbox delete failed: path={} {}", abs_path, e)
+            raise HarnessSandboxError(f"删除失败：{e}") from e
+        # 沙箱文件不绑会话，但删完至少该在当前目录列表里消失；留痕便于回溯误删
+        log.info("harness sandbox deleted: workspace={} path={}",
+                 entry["workspace_id"], rel)
+        return {"path": abs_path, "name": posixpath.basename(rel)}
 
 
 async def _stat_size(entry: dict, rel: str) -> int:

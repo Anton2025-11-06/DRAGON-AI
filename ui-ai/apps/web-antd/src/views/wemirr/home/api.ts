@@ -242,6 +242,17 @@ export function SandboxFile(path: string) {
 }
 
 /**
+ * 删除沙箱工作区里的文件或文件夹（文件夹连带里面的内容一起没，不可恢复）。
+ * 后端只作用在当前用户自己那只沙箱，工作区根目录会被拒。
+ */
+export function SandboxDelete(path: string) {
+  return defHttp.delete<{ name: string; path: string }>(
+    '/api/harness/sandbox/file',
+    { params: { path } },
+  );
+}
+
+/**
  * 上传单个文件到指定目录（path 通过 FormData 传递，单文件≤200MB）。
  * onProgress(percent 0-100) 回传浏览器→服务端的上传进度；返回落沙箱后的文件名/字节数/绝对路径。
  */
@@ -277,11 +288,12 @@ export function SandboxDownloadUrl(path: string) {
 /**
  * 读取沙箱文件的原始字节（Blob）。
  * 预览按扩展名转 typed Blob + object URL 渲染，文本类直接解码字节——绕开 read_text_file
- * 的 200KB 截断。token 从 accessStore.accessToken 取，与下载口同一鉴权口径。
+ * 的 200KB 截断。token 从 accessStore.accessToken 取（那个字段类型上是 null | string），
+ * 与下载口同一鉴权口径。
  */
 export async function SandboxFileBlob(
   path: string,
-  token: string,
+  token: null | string,
   traceId?: string,
 ): Promise<Blob> {
   const resp = await fetch(SandboxDownloadUrl(path), {

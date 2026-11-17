@@ -957,23 +957,27 @@ class RagRetrievalService:
             graph_source_chunks=req.graph_source_chunks)
 
     @staticmethod
-    async def search_rows(login_user: dict, *, kb_ids: Sequence[int], query: str = "",
-                          image_url: str = "", top_k: int = 0,
-                          score_threshold: Optional[float] = None,
-                          retrieval_mode: Optional[str] = None,
-                          metadata_filters: Optional[Sequence[dict]] = None,
-                          chunk_type: Optional[str] = None,
-                          rerank: Optional[bool] = None,
-                          with_graph: bool = False, chat_model_id: int = 0,
-                          graph_depth: Any = None, graph_scale: Any = None,
-                          graph_source_chunks: bool = False,
-                          graph_per_kb: bool = False) -> list[dict]:
-        """平铺召回结果（工作流知识检索节点的 kb_searcher 与深度探索 kb_search 用这一颗）。
+    async def search_detail(login_user: dict, *, kb_ids: Sequence[int], query: str = "",
+                            image_url: str = "", top_k: int = 0,
+                            score_threshold: Optional[float] = None,
+                            retrieval_mode: Optional[str] = None,
+                            metadata_filters: Optional[Sequence[dict]] = None,
+                            chunk_type: Optional[str] = None,
+                            rerank: Optional[bool] = None, rerank_model_id: int = 0,
+                            vector_weight: Optional[float] = None,
+                            with_graph: bool = False, chat_model_id: int = 0,
+                            graph_depth: Any = None, graph_scale: Any = None,
+                            graph_source_chunks: bool = False,
+                            graph_per_kb: bool = False) -> tuple[list[dict], list[str]]:
+        """平铺召回结果 + 过程说明（工作流知识检索节点与深度探索 kb_search 用这一颗）。
 
         与 ``search`` 的区别只在形态：节点要的是 ``[{content, score, ...}]``，
         并且它的 topK 语义是「总共返回几条」而不是「每个库返回几条」，
         所以这里带上 total_limit，其余鉴权、分组、融合逻辑与检索页完全一致
         ——两条路跑出不同的召回集，是知识库最难自证清白的问题。
+
+        ``warnings`` 与结果同等重要：节点侧拿到空结果时，这是唯一能区分
+        「库没内容 / 阈值太高 / 这个库压根没授权」的线索，只留在日志里等于没有。
 
         图谱增强默认关（工作流/开放 API 保持原样）；kb_search 要增强时显式传
         with_graph=True 且 graph_per_kb=True（按每个库自己的图谱模型+实体范围抽词）。
@@ -984,12 +988,20 @@ class RagRetrievalService:
             login_user, kb_ids=kb_ids, query=query, image_url=image_url,
             chunk_type=chunk_type, mode=retrieval_mode, top_k=top_k or 0,
             score_threshold=score_threshold, rerank=rerank,
+            rerank_model_id=rerank_model_id or 0, vector_weight=vector_weight,
             metadata_filters=metadata_filters, total_limit=top_k or 0,
             with_graph=with_graph, chat_model_id=chat_model_id or 0,
             graph_depth=graph_depth, graph_scale=graph_scale,
             graph_source_chunks=graph_source_chunks, graph_per_kb=graph_per_kb)
         rows = await runner.execute()
-        return [RagRetrievalService._hit(row).dump() for row in rows]
+        return ([RagRetrievalService._hit(row).dump() for row in rows],
+                list(runner.warnings))
+
+    @staticmethod
+    async def search_rows(login_user: dict, **kwargs: Any) -> list[dict]:
+        """只要结果行的那一颗（参数表与语义见 ``search_detail``，两处规则会分叉）。"""
+        rows, _ = await RagRetrievalService.search_detail(login_user, **kwargs)
+        return rows
 
     # ---------- 序列化 ----------
     @staticmethod

@@ -576,8 +576,9 @@ export function nodeOutputVariables(
     }
 
     case 'DOC_EXTRACTOR': {
+      // 默认输出名与后端 DocExtractorNodeExecutor（cfg.outputVariable or "content"）一致
       variables.push({
-        name: config.outputVariable || 'text',
+        name: config.outputVariable || 'content',
         type: 'string',
         description: '提取的文本内容',
       });
@@ -602,11 +603,29 @@ export function nodeOutputVariables(
     }
 
     case 'KNOWLEDGE_RETRIEVAL': {
-      variables.push({
-        name: config.outputVariable || 'results',
-        type: 'array',
-        description: '检索结果列表',
-      });
+      // 与后端 KnowledgeRetrievalNodeExecutor 逐个对齐（默认名 documents，不是 results）
+      variables.push(
+        {
+          name: config.outputVariable || 'documents',
+          type: 'array',
+          description: '检索命中的切片列表（与知识检索页同构）',
+        },
+        {
+          name: 'text',
+          type: 'string',
+          description: '拼好的资料段（直接丢给大模型用）',
+        },
+        {
+          name: 'count',
+          type: 'number',
+          description: '命中条数',
+        },
+        {
+          name: 'warnings',
+          type: 'array',
+          description: '本次检索的过程说明（跳过的库、没生效的过滤条件等）',
+        },
+      );
       break;
     }
 

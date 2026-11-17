@@ -789,21 +789,46 @@ export const useAiWorkflowStore = defineStore('ai-workflow', () => {
         }
       }
       if (node.type === 'KNOWLEDGE_RETRIEVAL') {
+        // 与后端 KnowledgeRetrievalNodeExecutor.validate_node 同一口径：
+        // 缺库/缺查询/开图谱没模型都是执行时必抛的错，发布前就拦住
         const knowledgeBaseIds = node.data?.knowledgeBaseIds;
         if (!Array.isArray(knowledgeBaseIds) || knowledgeBaseIds.length === 0) {
           addIssue(
             'ERROR',
             'KNOWLEDGE_BASE_REQUIRED',
-            `检索智能体 ${node.label || node.id} 必须选择知识库`,
+            `知识检索节点 ${node.label || node.id} 必须选择知识库`,
             node,
+            '执行时按工作流归属人的使用权限检索，下拉里只列归属人有权限的库',
           );
         }
         if (!node.data?.queryVariable) {
           addIssue(
             'ERROR',
             'KNOWLEDGE_QUERY_REQUIRED',
-            `检索智能体 ${node.label || node.id} 必须配置查询变量`,
+            `知识检索节点 ${node.label || node.id} 必须配置查询内容`,
             node,
+            '绑定上游的文本变量，或直接写死检索词',
+          );
+        }
+        if (node.data?.withGraph && !node.data?.graphChatModelId) {
+          addIssue(
+            'ERROR',
+            'KNOWLEDGE_GRAPH_MODEL_REQUIRED',
+            `知识检索节点 ${node.label || node.id} 开了图谱增强但未选择对话模型`,
+            node,
+            '图谱那一路要靠对话模型从查询里抽实体和关系；不需要图谱就把开关关掉',
+          );
+        }
+        if (
+          node.data?.rerankConfig?.enabled &&
+          !node.data?.rerankConfig?.rerankModelId
+        ) {
+          addIssue(
+            'WARNING',
+            'KNOWLEDGE_RERANK_MODEL_MISSING',
+            `知识检索节点 ${node.label || node.id} 启用了重排序但未选择重排模型`,
+            node,
+            '会回落到知识库上登记的重排模型，库里也没配就等于不重排',
           );
         }
       }
