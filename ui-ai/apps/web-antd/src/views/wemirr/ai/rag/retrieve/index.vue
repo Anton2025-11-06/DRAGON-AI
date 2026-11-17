@@ -122,7 +122,7 @@ const rerankOptions = ref<Array<{ label: string; value: number }>>([]);
 /** 需求 9：选了对话模型才有右栏流式回答；开图谱增强时它必填 */
 const chatModelId = ref<number | undefined>();
 const chatOptions = ref<Array<{ label: string; value: number }>>([]);
-// 深度思考：选了对话模型才谈得上，按本次问答动态开关（只让模型内部想得更深，不外泄思维链）
+// 深度思考：选了对话模型才谈得上，按本次问答动态开关（思维链走独立帧，在右栏折叠区展示）
 const thinking = ref(false);
 const withGraph = ref(false);
 const graphDepth = ref(2);
@@ -147,6 +147,16 @@ const answer = ref('');
 const answerError = ref('');
 const answerInfo = ref<null | { citations?: number; tookMs?: number }>(null);
 const answerBox = ref<HTMLElement | null>(null);
+/**
+ * 思维链（推理模型在正文前吐的那一段）：与 answer 分开累加、只在折叠区展示。
+ * 展示它的理由不是「好看」，是把等待变成可见：推理模型常十几秒不出正文，
+ * 右栏纯空白时用户只能猜是不是卡住了（这一段的时长也已分字段进后端日志）。
+ */
+const reasoning = ref('');
+const reasoningOpen = ref(false);
+const reasoningBox = ref<HTMLElement | null>(null);
+/** 用户手动开合过就不再被流式改写：自动展开只为首次可读，手动收起是最终意图 */
+let reasoningTouched = false;
 let abortCtl: AbortController | null = null;
 
 const selectedOptions = computed(() =>
@@ -196,6 +206,16 @@ const recallModeOptions = computed(() =>
 );
 /** 选了对话模型就走流式问答，并把展示区拆成左右两栏 */
 const hasAnswerPane = computed(() => !!chatModelId.value);
+/**
+ * 右栏空白时的占位句：已经收到思维链但还没收到正文时，答「正在作答」是矛盾的
+ *（用户眼前正滚着思考过程），说清「在等第一个字」才对得上等待体感。
+ */
+const answerPlaceholder = computed(() => {
+  if (!answering.value) return '还没有回答（每次提问独立，不记得上一句）';
+  return reasoning.value && !answer.value
+    ? '模型正在思考，答案随后逐字输出…'
+    : '正在依据检索到的资料作答…';
+});
 /**
  * 图谱增强这一路可不可用：勾了库时只看有没有文档型库，一个库都没勾 = 全部可用库
  * （里面必然可能有 doc 型），不能让留空这个合法用法反而把开关藏掉。
@@ -468,6 +488,14 @@ function clearAnswer() {
   answer.value = '';
   answerError.value = '';
   answerInfo.value = null;
+  reasoning.value = '';
+  reasoningOpen.value = false;
+  reasoningTouched = false;
+}
+
+function toggleReasoning() {
+  reasoningTouched = true;
+  reasoningOpen.value = !reasoningOpen.value;
 }
 
 async function doSearch() {
@@ -527,6 +555,9 @@ async function doSearch() {
       onDelta: (piece) => {
         answer.value += piece;
       },
+      onReasoning: (piece) => {
+        reasoning.value += piece;
+      },
       onDone: (info) => {
         answerInfo.value = info;
       },
@@ -564,6 +595,14 @@ function reset() {
 watch(answer, async () => {
   await nextTick();
   const el = answerBox.value;
+  if (el) el.scrollTop = el.scrollHeight;
+});
+
+// 思维链同样跟随滚动，并在第一段到达时自动展开（用户手动收起过则保持收起）
+watch(reasoning, async () => {
+  if (!reasoningTouched) reasoningOpen.value = true;
+  await nextTick();
+  const el = reasoningBox.value;
   if (el) el.scrollTop = el.scrollHeight;
 });
 
@@ -1278,7 +1317,10 @@ onBeforeUnmount(() => {
       <Card v-if="hasAnswerPane" :bordered="false" class="answer-card">
         <template #title>
           模型回答
-          <Tag v-if="answering" color="processing">生成中</Tag>
+          <!-- 两个态分开标：正文前的空等（含模型思考）标「思考中」，
+               开始出字了才标「生成中」，同时挂两个 tag 只会让用户不知道该看哪个 -->
+          <Tag v-if="answering && !answer" color="processing">思考中</Tag>
+          <Tag v-else-if="answering" color="processing">生成中</Tag>
           <Tag v-if="answerInfo">
             引用 {{ answerInfo.citations ?? 0 }} 条 ·
             {{ answerInfo.tookMs ?? 0 }}ms
@@ -1294,16 +1336,24 @@ onBeforeUnmount(() => {
           class="mb-2"
           :message="answerError"
         />
+        <!-- 思维链折叠区：正文之前的那段等待有东西可看（推理模型常十几秒不出正文）。
+             与 answer 各自一个变量，正文区永不被思考过程插进句子（引用〔N〕会断） -->
+        <div v-if="reasoning" class="reasoning-box">
+          <div class="reasoning-head" @click="toggleReasoning">
+            <UpOutlined v-if="reasoningOpen" />
+            <DownOutlined v-else />
+            <span>思考过程（{{ reasoning.length }} 字）</span>
+          </div>
+          <div v-show="reasoningOpen" ref="reasoningBox" class="reasoning-text">
+            {{ reasoning }}
+          </div>
+        </div>
         <!-- 模型输出一律走纯文本插值：回答里会原样引用用户文档的内容，上 v-html
              等于把文档里的脚本一路到页面执行（左栏那几处已经先转义了） -->
         <div ref="answerBox" class="answer-text">
           <span v-if="answer">{{ answer }}</span>
           <span v-else-if="!answerError" class="answer-empty">
-            {{
-              answering
-                ? '正在依据检索到的资料作答…'
-                : '还没有回答（每次提问独立，不记得上一句）'
-            }}
+            {{ answerPlaceholder }}
           </span>
         </div>
       </Card>
@@ -1505,6 +1555,38 @@ onBeforeUnmount(() => {
 .answer-empty {
   font-size: 12px;
   color: var(--text-color-secondary, #999);
+}
+
+/* 思维链折叠区：整块 flex: none（不能抢正文区的弹性高度，否则 flex 链塌陷），
+   自己限高内滚：思考过程可以很长，但不能把答案顶出可见区 */
+.reasoning-box {
+  flex: none;
+  margin-bottom: 8px;
+  background: var(--component-background-light, #fafafa);
+  border: 1px solid var(--border-color, #eee);
+  border-radius: 6px;
+}
+
+.reasoning-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #888);
+  cursor: pointer;
+  user-select: none;
+}
+
+.reasoning-text {
+  max-height: 200px;
+  padding: 0 10px 8px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-color-secondary, #666);
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
 }
 
 /* 需求 7：关键词/向量的占比条 —— 比一个光泳滑块更能说明「总和 100%」；

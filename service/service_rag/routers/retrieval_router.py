@@ -63,6 +63,7 @@ async def ask(request: Request, body: RetrieveReq):
     """检索与问答一次请求完（需求 9），返的是 SSE，不是 ApiResponse。
 
     帧形态：``data: {"type":"meta",…检索回执}`` → 多帧 ``{"type":"delta","content":…}``
+    （模型出思维链时穿插 ``{"type":"reasoning","content":…}``，前端在独立折叠区展示）
     → ``{"type":"done"}``，失败是一帧 ``{"type":"error","message":…}``。前端那个 SSE 封装
     只交原始文本块，所以帧里的 type 是页面唯一的分发依据，别指望 event: 行。
 

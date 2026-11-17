@@ -723,7 +723,7 @@ export interface RetrieveReq {
   chatModelId?: number;
   /**
    * 流式问答是否让对话模型开启深度思考（各家 enable_thinking/thinking 协议）。
-   * 选了对话模型后可动态开关；只影响模型内部推理，右栏仍只回正文、不展示思维链。
+   * 选了对话模型后可动态开关；思维链走独立的 reasoning 帧，与正文分开存、不混进答案区。
    */
   thinking?: boolean;
   /** 图谱邻域从命中实体向外扩几跳（空=默认 2） */
@@ -787,7 +787,7 @@ export const RetrieveRows = (data: RetrieveReq) =>
 /**
  * 流式问答帧回调（需求 9：选了对话模型就多一栏逐字回答）。
  *
- * 后端发的是一帧一个 JSON 的自定义帧（{type: meta|delta|done|error}），不用 SSE 的
+ * 后端发的是一帧一个 JSON 的自定义帧（{type: meta|delta|reasoning|done|error}），不用 SSE 的
  * event 名：前端的 postSSE 封装只把解码后的原始文本块交给 onMessage，不拆 event/data，
  * 拿 event 名驱动要么改公共封装、要么每页自己解一遍，都不如把类型写在 body 里。
  */
@@ -796,11 +796,18 @@ export interface AskStreamHandlers {
   onDone?: (info: { citations?: number; tookMs?: number }) => void;
   onError?: (message: string) => void;
   onMeta?: (resp: RetrieveResp) => void;
+  /**
+   * 思维链增量（推理模型在正文前吐的那一段）。
+   * 单独一个回调而不并进 onDelta：答案区的引用会被思考过程切断；
+   * 而完全不展示的话，模型「先想后说」的十几秒在页面上就是纯空白，看不出在动。
+   */
+  onReasoning?: (content: string) => void;
   signal?: AbortSignal;
 }
 
 /**
- * POST /api/rag/retrieve/ask：一次连接里先回检索结果（meta），再逐字回模型回答。
+ * POST /api/rag/retrieve/ask：一次连接里先回检索结果（meta），再逐字回模型回答
+ * （正文走 delta，思维链走 reasoning，done 之前出完）。
  * 失败也是一帧 error（不把非 200 丢给前端成「连接断开」），所以调用方只需处理回调。
  */
 export async function RetrieveAsk(
@@ -828,7 +835,7 @@ export async function RetrieveAsk(
         break;
       }
       case 'done': {
-        // done/error/delta 是服务里手拼的帧（键名沿用内部 snake），meta 才是 CamelModel 的驼峰
+        // done/error/delta/reasoning 是服务里手拼的帧（键名沿用内部 snake），meta 才是 CamelModel 的驼峰
         handlers.onDone?.({
           citations: one.citations,
           tookMs: one.tookMs ?? one.took_ms,
@@ -841,6 +848,10 @@ export async function RetrieveAsk(
       }
       case 'meta': {
         handlers.onMeta?.(one as RetrieveResp);
+        break;
+      }
+      case 'reasoning': {
+        handlers.onReasoning?.(String(one.content ?? ''));
         break;
       }
       default: {

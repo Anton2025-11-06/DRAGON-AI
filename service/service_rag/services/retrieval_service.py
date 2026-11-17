@@ -57,7 +57,7 @@ from service.service_rag.schemas.rag_schema import (
 from service.service_rag.services import rag_settings as settings
 from service.service_rag.services import kg_search
 from service.service_rag.services.kb_service import KnowledgeBaseService
-from service.service_rag.services.rag_model import RagModelService
+from service.service_rag.services.rag_model import RagModelService, STREAM_REASONING
 
 # 检索模式别名：工作流画布上写的是 FULLTEXT，常量口径是 KEYWORD（同一个意思的两种叫法）。
 # 不在这里做归一的话，节点选「全文检索」会得到一句"未知模式"，而画布上并没有第四个选项。
@@ -1032,7 +1032,8 @@ class RagRetrievalService:
     def ask_stream(login_user: dict, req: RetrieveReq) -> AsyncIterator[str]:
         """检索 + 大模型问答的流式输出（需求 9：两路数据丢给大模型，流式回）。
 
-        一条连接到底：先出一帧 meta（左栏的检索结果），再逐字出 delta（右栏的回答）。
+        一条连接到底：先出一帧 meta（左栏的检索结果），再逐字出 delta（右栏的回答）；
+        模型带思维链时另出一帧 reasoning（前端折叠区），与正文互不混淆。
         分两次请求（先检索再问答）会跑两套召回集，左右两栏对不上时谁也说不清哪边错。
         不做记忆：每次都是一句带资料的独立提问，不读也不写任何会话历史。
 
@@ -1075,16 +1076,27 @@ class RagRetrievalService:
                 watch.add("取模型配置", t_stage)
                 prompt = settings.build_rag_qa_prompt(runner.query, context)
                 # 需求：深度思考按本次请求动态开关（页面在选完对话模型后给一个 toggle）；
-                # 只让模型内部想得更深，chat_stream 仍只吐正文，不把思维链混进右栏
+                # 思维链走独立一帧给前端的折叠区，不混进正文（混了会把引用切断）也不丢
+                # （丢了就只能看着「首字十几秒」猜是想得久还是链路慢）
                 t_stage = time.perf_counter()
-                first_ms = 0
+                first_content_ms = 0
+                first_reasoning_ms = 0
                 pieces = 0
                 chars = 0
-                async for piece in RagModelService.chat_stream(cfg, prompt,
-                                                               thinking=bool(req.thinking)):
-                    if pieces == 0:
-                        # 首字延迟：用户感知的「卡住了」几乎全是这一段，模型排队与思考都在里面
-                        first_ms = int((time.perf_counter() - t_stage) * 1000)
+                think_chars = 0
+                async for kind, piece in RagModelService.chat_stream(
+                        cfg, prompt, thinking=bool(req.thinking)):
+                    if kind == STREAM_REASONING:
+                        if not first_reasoning_ms:
+                            # 第一个思维链片回来 = 模型已经接单开始吐字，链路到这儿都是通的
+                            first_reasoning_ms = int((time.perf_counter() - t_stage) * 1000)
+                        think_chars += len(piece or "")
+                        yield _sse_frame("reasoning", content=piece)
+                        continue
+                    # 不是思维链就是正文（chat_stream 只产出这两种 kind）
+                    if not first_content_ms:
+                        # 首正文片延迟：用户在右栏真正看到第一个答案字的时间（含模型思考）
+                        first_content_ms = int((time.perf_counter() - t_stage) * 1000)
                     pieces += 1
                     chars += len(piece or "")
                     yield _sse_frame("delta", content=piece)
@@ -1093,9 +1105,15 @@ class RagRetrievalService:
                 yield _sse_frame("done", took_ms=runner.took_ms, citations=len(rows))
                 # 生成段含向客户端写帧的时间（包括对端反压）；片数/字数用来区分
                 # 「模型出得慢」与「出得多所以看着慢」，两者的优化方向不同（换模型 vs 缩上下文）；
+                # 两个首片分开看：首思维链片小而首正文片大→模型在想（换非推理档或压思考预算）；
+                # 两个一起大→模型侧排队或链路慢，与思考无关；思维链压根没出过片则打「无」
+                # （与 _StageWatch 同一个道理：「没这项开销」与「这项很快」得长得不一样）；
                 # 「检索」那一段的子环节细分已在同 trace 的「检索耗时分布」里，这里不再列一遍
-                log.info("问答耗时分布: 总计={}ms 首字={}ms 片数={} 字数={} 上下文={}字 {}",
-                         total_ms, first_ms, pieces, chars, len(context), watch.dump())
+                log.info("问答耗时分布: 总计={}ms 首正文片={}ms 首思维链片={} 片数={} 字数={} "
+                         "思考字数={} 上下文={}字 {}",
+                         total_ms, first_content_ms,
+                         f"{first_reasoning_ms}ms" if first_reasoning_ms else "无",
+                         pieces, chars, think_chars, len(context), watch.dump())
             except Exception as e:  # noqa: BLE001  流里只能有一帧 error，然后收场
                 # 失败路径同样带分段分布：到底挂在哪一段只看这一行
                 # （检索挂了就不会有「检索耗时分布」那一行，所以这里把子环节一并带上）

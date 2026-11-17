@@ -47,6 +47,12 @@ _VISION_CATEGORIES = {MT_IMAGE_UNDERSTAND, MT_VIDEO_UNDERSTAND, MT_OCR}
 # 向量能力类型 → 调用时送文本的入参名（text_embedding 用 input，多模态用 texts）
 _EMBED_INPUT_KWARG = {MT_TEXT_EMBEDDING: "input", MT_MULTIMODAL_EMBEDDING: "texts"}
 
+# chat_stream 的两种产出（流的第一个元素）：正文与思维链必须分开上送。
+# 合成一条流的话，右栏里「依据资料〔N〕」这种引用会被思考过程切断；
+# 全丢掉思维链更糟——模型「先想后说」的那十几秒会伪装成「首字特别慢」，日志里查不出差别。
+STREAM_CONTENT = "content"
+STREAM_REASONING = "reasoning"
+
 
 def _label(category: str) -> str:
     return MODEL_TYPE_LABELS.get(category, category or "未知类型")
@@ -600,12 +606,14 @@ class RagModelService:
 
     @staticmethod
     async def chat_stream(config: Optional[ModelConfig], prompt: str, *,
-                         system: Optional[str] = None, thinking: bool = False,
-                         **kwargs) -> AsyncIterator[str]:
+                          system: Optional[str] = None, thinking: bool = False,
+                          **kwargs) -> AsyncIterator[tuple[str, str]]:
         """流式问答（需求 9c：两路检索结果丢给大模型后逐字回前端）。
 
-        只产出正文增量，思维链不外泄：页面右侧那一栏要的是结论，把 reasoning 混进
-        content 会让「依据资料〔N〕」这种引用被思考过程切断；思维链真要展示得另开一帧。
+        产出 ``(kind, 增量文本)``，kind 见 STREAM_CONTENT / STREAM_REASONING：
+        思维链不再被吞掉，也不混进正文——由调用方分帧下发（正文给答案区、
+        思维链给折叠区），并各自计一次首片时间，才能把「模型想得久」与
+        「链路慢/出字慢」在一行日志里分开。
         不对模型侧的结束帧负责（调用方自己补），这里挂了只抛一句可读的错。
         """
         from common.common_model import instantiate
@@ -620,9 +628,13 @@ class RagModelService:
         try:
             inst = instantiate(MT_TEXT_TO_TEXT, config)
             async for chunk in inst.astream(messages=messages, thinking=thinking, **kwargs):
-                text = getattr(chunk, "content", "") or ""
-                if text:
-                    yield text
+                # 一片里两种增量可能同时有（厂商把 reasoning 与 content 拼在同一 delta），
+                # 所以逐个判、各发一条，不能 else 掉其中一个
+                for kind, text in ((STREAM_CONTENT, getattr(chunk, "content", "") or ""),
+                                   (STREAM_REASONING,
+                                    getattr(chunk, "reasoning_content", "") or "")):
+                    if text:
+                        yield kind, text
                 if getattr(chunk, "finish_reason", None):
                     break
         except ValueError:
@@ -722,4 +734,4 @@ def _parse_json(text: str) -> Any:
     raise ValueError(f"模型返回的内容不是 JSON：{body[:200]}")
 
 
-__all__ = ["RagModelService"]
+__all__ = ["RagModelService", "STREAM_CONTENT", "STREAM_REASONING"]
