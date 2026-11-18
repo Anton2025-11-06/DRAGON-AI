@@ -14,6 +14,10 @@
  * - 文本类（md/code/html/csv/txt）不走预览库：平台的 MarkdownRenderer 内部已 sanitize，
  *   预览库的 md 是 markdown-it 直出。沙箱里的文件内容是模型写的，放开它就等于开一条 XSS。
  *
+ * 标题行自带关闭按钮（closable=false）：antd 那个右上角的 X 是绝对定位在
+ * .ant-modal-content 上的，位置在 header 的 padding-inline 之外还往里吃一大截，
+ * 标题行里靠右摆的按钮躲不开它——「下载和 X 重叠」就是这么来的。与工作流对话弹窗同口径。
+ *
  * 字节仍走下载口（api.SandboxFileBlob 带 token），与旧内嵌预览同一条链路，后端零改动。
  * 本组件由首页懒加载：预览库（codemirror/SheetJS/pptx-preview 等）只在真点开文件时才进包。
  */
@@ -23,7 +27,11 @@ import 'vue-files-preview/es/style.css';
 
 import { useAccessStore } from '@vben/stores';
 
-import { CloudDownloadOutlined, FileTextFilled } from '@ant-design/icons-vue';
+import {
+  CloseOutlined,
+  CloudDownloadOutlined,
+  FileTextFilled,
+} from '@ant-design/icons-vue';
 import { message, Modal } from 'ant-design-vue';
 
 import { getTraceId } from '#/api/request';
@@ -323,6 +331,11 @@ function onPluginError(error: any) {
   pluginErr.value = error?.message || String(error || '解析失败');
 }
 
+/** 关闭：标题行自己那颗按钮走这里（Esc / 点遮罩仍由 Modal 自己管） */
+function close() {
+  emit('update:open', false);
+}
+
 /** 下载当前文件：已取回的字节直接落地，超大那份没取回则回落下载口 */
 async function download() {
   try {
@@ -363,6 +376,7 @@ onBeforeUnmount(release);
 <template>
   <Modal
     :body-style="bodyStyle"
+    :closable="false"
     :open="open"
     :footer="null"
     destroy-on-close
@@ -375,10 +389,18 @@ onBeforeUnmount(release);
         <FileTextFilled class="sbx-title-icon" />
         <span class="sbx-title-name" :title="path">{{ name }}</span>
         <span v-if="sizeText" class="sbx-title-size">{{ sizeText }}</span>
-        <a-button ghost size="small" type="primary" @click="download">
-          <template #icon><CloudDownloadOutlined /></template>
-          下载
-        </a-button>
+        <!-- 按钮收进这一组靠右摆，与文件名/大小同一条 flex 行，位置由布局保证 -->
+        <div class="sbx-title-actions">
+          <a-button ghost size="small" type="primary" @click="download">
+            <template #icon><CloudDownloadOutlined /></template>
+            下载
+          </a-button>
+          <a-tooltip title="关闭（Esc 或点遮罩也能关）">
+            <a-button size="small" type="text" @click="close">
+              <template #icon><CloseOutlined /></template>
+            </a-button>
+          </a-tooltip>
+        </div>
       </div>
     </template>
 
@@ -488,6 +510,14 @@ onBeforeUnmount(release);
     flex-shrink: 0;
     font-size: 12px;
     color: var(--text-color-3, #8a9099);
+  }
+
+  // flex-shrink: 0 保证窄屏（或文件名很长）时按钮组不被压扁，省略号落在名字上
+  .sbx-title-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 6px;
+    align-items: center;
   }
 }
 
