@@ -178,6 +178,8 @@ interface ChatMsg {
   toolCalls?: api.ToolCallTrace[];
   /** 本轮仍在流式（渲染光标，终态帧清掉） */
   running?: boolean;
+  /** 停止已下达、worker 正在收尾：气泡已判停，但发送口仍锁着等终态帧 */
+  stopping?: boolean;
   /** 失败/中断提示（终态帧或历史行带出） */
   error?: string;
   /** AskUser 结构化待答问题（turn.interrupted 帧带出，渲染成可填写表单） */
@@ -278,6 +280,22 @@ export default defineComponent({
       string,
       { es: EventSource; sessionId: number }
     >();
+    /**
+     * turnId → 「停止收尾宽限期」定时器：点停止后这条流要留着等 worker 的终态帧
+     * （那一帧才解锁发送口），worker 进程暴毙就永远等不到，靠这个定时器兜底。
+     */
+    const stopGuards = new Map<string, ReturnType<typeof setTimeout>>();
+    /** 点停止后等 worker 收尾的最长时间（毫秒），到点按已停处理、放开发送口 */
+    const STOP_SETTLE_GUARD_MS = 30_000;
+    /** 撤掉某轮的停止收尾宽限期定时器（终态帧到了或流关了都不用再等） */
+    function clearStopGuard(turnId?: string) {
+      if (!turnId) return;
+      const timer = stopGuards.get(turnId);
+      if (timer) {
+        clearTimeout(timer);
+        stopGuards.delete(turnId);
+      }
+    }
     /** 取（必要时建）某会话的消息缓冲：所有读写都经这里，保证命中响应式代理 */
     function bufFor(sid: number): ChatMsg[] {
       if (!sessionStore[sid]) sessionStore[sid] = [];
@@ -299,6 +317,14 @@ export default defineComponent({
     );
     /** 当前会话是否有在跑的轮（决定 composer 是"发送"还是"中断"）：只看这一份缓冲 */
     const streaming = computed(() => messages.value.some((m) => m.running));
+    /**
+     * 停止已下达、worker 还在收尾：气泡已经不转了，但这一轮的 AgentState 还没
+     * 落定，此时发下一句就是并发写同一份会话记忆（后端同会话闸门也会拒），
+     * 所以发送口继续锁着，直到终态帧 / 断流 / 宽限期到点三者之一把它放开。
+     */
+    const stopping = computed(() => messages.value.some((m) => m.stopping));
+    /** 这一轮到底完了没：模板里一律按 busy 判，别再分着看 streaming / stopping */
+    const busy = computed(() => streaming.value || stopping.value);
 
     // 选择弹窗（四口候选：kb / mcp / tool / skill）
     const pickerVisible = ref(false);
@@ -378,7 +404,8 @@ export default defineComponent({
       // 已加载过、或还有活动流的会话直接复用缓冲（后台流一直在往里写），不重载：
       // 重载会 buf.length=0 清空正被实时写入的 target，而 RUNNING 轮 Redis 不回放
       // → 旧增量丢、新帧又进不了重建出的空气泡（永远“AI 正在思考…”）
-      if (!loadedSessions.has(s.id) && !hasLiveStream(s.id)) await loadMessages(s.id);
+      if (!loadedSessions.has(s.id) && !hasLiveStream(s.id))
+        await loadMessages(s.id);
       // 先拉齐候选再匹配名称（挂载回显要按 id 找 name）
       await ensurePickerOptions();
       // 模型与挂载不绑会话：按该会话最近一轮回显 composer；无历史则清空草稿
@@ -551,6 +578,9 @@ export default defineComponent({
             subscribeTurn(sid, row.turnId, msg);
           } else {
             if (row.status === 'FAILED') msg.error = row.error || '执行失败';
+            // INTERRUPTING（停止已下达、worker 还没收尾）按「已停」显示且不重新
+            // 订阅：这一行此刻还没有终态内容，重连只会让页面又转起来
+            if (row.status === 'INTERRUPTING') msg.error = '本轮已停止';
             if (row.status === 'INTERRUPTED') {
               msg.error = row.error || '本轮已中断';
               // AskUser 挂起：按缓存 turnId 命中 → 还原可点选项表单（与实时流同口径）
@@ -577,7 +607,8 @@ export default defineComponent({
         loadedSessions.add(sid);
         // 记住该会话最近一轮的模型/挂载，切回来时回显 composer（不重拉库）
         const last =
-          [...rows].reverse().find((r) => r.role === 'ASSISTANT') || rows.at(-1);
+          [...rows].reverse().find((r) => r.role === 'ASSISTANT') ||
+          rows.at(-1);
         if (last) {
           composerMeta.set(sid, { modelId: last.modelId, mounts: last.mounts });
         }
@@ -641,6 +672,11 @@ export default defineComponent({
         interruptTurn();
         return;
       }
+      // 停止已下达、worker 正在收尾：Enter 这条路也要挡（只禁按钮拦不住键盘）
+      if (stopping.value) {
+        message.warning('上一轮正在停止收尾，请稍候片刻');
+        return;
+      }
       if (sending.value) return;
       if (chatAttachments.value.some((a) => a.status === 'uploading')) {
         message.warning('还有文件在上传中，请稍候再发送');
@@ -657,6 +693,21 @@ export default defineComponent({
       inputValue.value = '';
       chatAttachments.value = []; // 发送即清草稿附件
       await postTurn(messageText, displayText, atts);
+    }
+
+    /**
+     * 输入框回车分流。
+     *
+     * 不能写成模板上的 @press-enter.prevent：ant-design-vue 的 TextArea 对
+     * keyCode===13 无条件 emit pressEnter（不看 shift 键），.prevent 于是把
+     * Shift+Enter 的原生换行一起吞了——换行键位整个失效。这里自己分流：
+     * Shift+Enter 与输入法选词回车都放行给 textarea 原生长行，只有普通 Enter
+     * 才拦下默认行为去发送。
+     */
+    function onComposerEnter(e: KeyboardEvent) {
+      if (e.shiftKey || e.isComposing) return;
+      e.preventDefault();
+      handleSend();
     }
 
     /** 发一轮：messageText 给后端，displayText 给用户气泡（AskUser 走 JSON 时用可读文本回显），attachments 随消息传 */
@@ -684,7 +735,8 @@ export default defineComponent({
       bufFor(sid).push({
         role: 'user',
         content: displayText,
-        attachments: attachments && attachments.length ? attachments : undefined,
+        attachments:
+          attachments && attachments.length ? attachments : undefined,
       });
       sending.value = true;
       scrollToBottom();
@@ -694,7 +746,8 @@ export default defineComponent({
           message: messageText,
           modelId: modelId.value,
           mounts: currentMounts(),
-          attachments: attachments && attachments.length ? attachments : undefined,
+          attachments:
+            attachments && attachments.length ? attachments : undefined,
         });
         void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
         subscribeTurn(sid, res.turnId);
@@ -932,6 +985,8 @@ export default defineComponent({
           target.running = false;
           target.error = '事件连接已断开，本轮结果稍后刷新查看';
         }
+        // 停止收尾期间断流：发送口的锁只能在这里放掉，否则用户得干等到宽限期到点
+        target.stopping = false;
         closeTurnStream(turnId);
       };
       scrollToBottom();
@@ -939,27 +994,36 @@ export default defineComponent({
 
     /** 协议帧 → 消息条增量渲染（帧字段口径见 api.ts 的 HarnessFrame） */
     function applyFrame(
-      msg: ChatMsg,
+      target: ChatMsg,
       frame: api.HarnessFrame,
       turnId: string,
       sid: number,
     ) {
+      const terminal =
+        frame.type === 'turn.completed' ||
+        frame.type === 'turn.failed' ||
+        frame.type === 'turn.interrupted';
+      // 已点停止：worker 收尾前可能还在发最后几帧增量，那些帧不再写进气泡——
+      // 否则页面判停了还在往下长，看着就像没停住
+      if (target.stopping && !terminal) return;
+      // 终态帧到了就是收尾完成，解锁发送口（宽限期定时器由 closeTurnStream 收掉）
+      if (terminal) target.stopping = false;
       switch (frame.type) {
         case 'text.delta': {
-          appendText(msg, frame.content || '');
+          appendText(target, frame.content || '');
           break;
         }
         case 'thinking.delta': {
-          appendThinking(msg, frame.content || '');
+          appendThinking(target, frame.content || '');
           break;
         }
         case 'tool.started': {
-          startTool(msg, frame.tool || '', frame.toolCallId);
+          startTool(target, frame.tool || '', frame.toolCallId);
           break;
         }
         case 'tool.completed': {
           finishTool(
-            msg,
+            target,
             frame.tool || '',
             frame.arguments || '',
             frame.toolCallId,
@@ -971,8 +1035,8 @@ export default defineComponent({
           // 本会话该轮首个 artifacts 到达且正在看这个会话：展开工作区、自动预览首个
           //（后续累积帧只更卡片、不抢占用户手动切到的预览）
           const list = frame.artifacts || [];
-          const had = (msg.artifacts || []).length > 0;
-          msg.artifacts = list;
+          const had = (target.artifacts || []).length > 0;
+          target.artifacts = list;
           if (!had && list.length > 0 && sessionId.value === sid) {
             sandboxCollapsed.value = false;
             const first = list[0];
@@ -983,35 +1047,35 @@ export default defineComponent({
         case 'turn.completed': {
           // 终态：收尾仍在进行的思考段；正文已由 text.delta 落到时间线，
           // 不再用整段 content 覆盖（会打乱与工具/思考交错的时序）
-          settleThinking(msg);
-          msg.running = false;
+          settleThinking(target);
+          target.running = false;
           closeTurnStream(turnId);
           break;
         }
         case 'turn.interrupted': {
-          settleThinking(msg);
-          msg.running = false;
+          settleThinking(target);
+          target.running = false;
           // HITL 挂起时优先显示智能体的问题（reason 是「等待答复」占位，
           // 回放路径下 question 已拼进 reason）
-          msg.error = frame.question || frame.reason || '本轮已中断';
+          target.error = frame.question || frame.reason || '本轮已中断';
           // AskUser 带结构化问题 → 初始化作答草稿，模板据此渲染选项表单
           if (frame.pendingQuestions && frame.pendingQuestions.length > 0) {
-            msg.pending = frame.pendingQuestions;
+            target.pending = frame.pendingQuestions;
             const draft: Record<string, { other: string; selected: string[] }> =
               {};
             for (const q of frame.pendingQuestions) {
               draft[q.question] = { selected: [], other: '' };
             }
-            msg.answers = draft;
-            msg.answered = false;
+            target.answers = draft;
+            target.answered = false;
           }
           closeTurnStream(turnId);
           break;
         }
         case 'turn.failed': {
-          settleThinking(msg);
-          msg.running = false;
-          msg.error = frame.error || '执行失败';
+          settleThinking(target);
+          target.running = false;
+          target.error = frame.error || '执行失败';
           closeTurnStream(turnId);
           break;
         }
@@ -1023,6 +1087,8 @@ export default defineComponent({
     /** 关闭某一轮的订阅（终态/异常/切走只关这一条，别会话的后台流不受影响） */
     function closeTurnStream(turnId?: string) {
       if (!turnId) return;
+      // 流一关就不会再收到那一轮的终态帧，宽限期定时器跟着收掉
+      clearStopGuard(turnId);
       const st = turnStreams.get(turnId);
       if (st) {
         st.es.close();
@@ -1033,19 +1099,54 @@ export default defineComponent({
     /** 关所有在跑的流（离开页面用：组件卸载后回调再写各会话缓冲已无意义） */
     function closeAllStreams() {
       for (const turnId of [...turnStreams.keys()]) closeTurnStream(turnId);
+      for (const turnId of [...stopGuards.keys()]) clearStopGuard(turnId);
     }
 
+    /**
+     * 点停止：命令下达即把气泡判停，但这条流不能抢着关。
+     *
+     * worker 收到停止命令后还要取消正在跑的那次调用、把已生成内容落库，然后
+     * 才发终态帧——那帧到达（或断流、宽限期到点）才放开发送口。提前关流会让
+     * 页面再也等不到终态，用户要么干转要么刷新看一轮空回答。
+     */
     async function interruptTurn() {
-      // 中断当前会话在跑的那一轮（别的会话后台流不受影响）
+      // 停止当前会话在跑的那一轮（别的会话后台流不受影响）
       const sid = sessionId.value;
       const hit = [...turnStreams].find(([, v]) => v.sessionId === sid);
       if (!hit) return;
+      const turnId = hit[0];
       try {
-        await api.HarnessInterrupt(hit[0]);
-        message.info('已请求中断，稍候生效');
+        await api.HarnessInterrupt(turnId);
       } catch {
-        message.error('中断请求失败');
+        // 命令没下达就去锁发送口，是拿一个没生效的停止把用户闲住
+        message.error('停止请求失败，请重试');
+        return;
       }
+      const target = messages.value.find(
+        (m) => m.turnId === turnId && m.running,
+      );
+      if (!target) {
+        // 找不到对应气泡（别的标签页发起的轮、或刷新前那一轮已不在缓冲）：
+        // 本地没有要等终态的状态，这条流直接关掉
+        closeTurnStream(turnId);
+        return;
+      }
+      target.running = false;
+      // 标成「正在收尾」：不转了，但发送口继续锁着，等终态帧放开
+      target.stopping = true;
+      settleThinking(target);
+      // 兜底：worker 进程暴毙时终态帧永远不来，宽限期到点按已停处理放开发送口
+      clearStopGuard(turnId);
+      stopGuards.set(
+        turnId,
+        setTimeout(() => {
+          stopGuards.delete(turnId);
+          target.stopping = false;
+          target.error = target.error || '停止收尾超时，请刷新查看本轮结果';
+          closeTurnStream(turnId);
+        }, STOP_SETTLE_GUARD_MS),
+      );
+      message.info('已停止，正在收尾本轮已生成的内容');
     }
 
     function scrollToBottom() {
@@ -1299,11 +1400,7 @@ export default defineComponent({
       for (const f of files) {
         const entry = pushUploadEntry(sandboxUploads, f);
         if (
-          await uploadOneFile(
-            entry,
-            currentPath.value || WORKSPACE_ROOT,
-            f,
-          )
+          await uploadOneFile(entry, currentPath.value || WORKSPACE_ROOT, f)
         ) {
           ok += 1;
         }
@@ -1357,11 +1454,14 @@ export default defineComponent({
       inputValue,
       sending,
       streaming,
+      stopping,
+      busy,
       mountedItems,
       toolLabel,
       toolArgsView,
       thinkingHint,
       handleSend,
+      onComposerEnter,
       toggleAskOption,
       submitAskUser,
       setAskOther,
@@ -1421,7 +1521,10 @@ export default defineComponent({
 </script>
 
 <template>
-  <div class="hermes-page" :class="{ 'is-sandbox-collapsed': sandboxCollapsed }">
+  <div
+    class="hermes-page"
+    :class="{ 'is-sandbox-collapsed': sandboxCollapsed }"
+  >
     <!-- 左侧：会话列表 -->
     <aside class="hermes-side">
       <a-button block ghost size="small" type="primary" @click="newSession">
@@ -1579,7 +1682,7 @@ export default defineComponent({
                 msg.pending &&
                 msg.pending.length > 0 &&
                 !msg.answered &&
-                !streaming &&
+                !busy &&
                 idx === messages.length - 1
               "
               class="hermes-askuser"
@@ -1758,7 +1861,9 @@ export default defineComponent({
           >
             <PaperClipOutlined class="hermes-attach-icon" />
             <div class="hermes-attach-main">
-              <span class="hermes-attach-name" :title="a.name">{{ a.name }}</span>
+              <span class="hermes-attach-name" :title="a.name">{{
+                a.name
+              }}</span>
               <a-progress
                 :percent="a.percent"
                 size="small"
@@ -1785,13 +1890,14 @@ export default defineComponent({
           <a-textarea
             v-model:value="inputValue"
             :rows="3"
-            placeholder="描述你的问题，AI 将在云端沙箱中执行…"
-            @press-enter.prevent="handleSend"
+            placeholder="描述你的问题（Shift+Enter 换行），AI 将在云端沙箱中执行…"
+            @press-enter="onComposerEnter"
           />
           <a-button
             type="primary"
             class="hermes-send"
             :loading="sending"
+            :disabled="stopping"
             @click="handleSend"
           >
             <template #icon><SendOutlined /></template>

@@ -162,14 +162,20 @@ async def subscribe_chat(request: Request, turn_id: str):
         })
 
 
-@chat_router.post("/{turn_id}/interrupt", summary="中断本轮（事件边界生效）")
+@chat_router.post("/{turn_id}/interrupt", summary="停止本轮（worker 侧真取消）")
 async def interrupt_chat(request: Request, turn_id: str):
-    """RUNNING → INTERRUPTED：worker 在事件循环间隙检查该状态即收尾退出。"""
+    """下达停止命令：RUNNING → INTERRUPTING，终态那一步留给 worker。
+
+    本端点只改一格状态就返回（不等 worker 收尾）：worker 侧的停止监视器看到
+    状态离开 RUNNING 就取消正在 await 的那一次调用（模型流式响应 / 沙箱工具
+    请求），把本轮已生成的内容落库后再发终态帧——这里抢着写终态会让那半截
+    回答被 finish_turn 跳过、永远落不了库。
+    """
     login_user = await get_login_user(request)
     ok = await HarnessSessionService.interrupt_turn(login_user, turn_id)
     if not ok:
         return ApiResponse.error(400, "轮次不存在、不属于你或已结束")
-    return ApiResponse.success(message="已请求中断")
+    return ApiResponse.success(message="已请求停止")
 
 
 # ==================== 模型可选清单 ====================

@@ -6,8 +6,9 @@
   他人会话：对话内容可能含隐私，跨用户可见没有业务理由）；
 - 一轮对话 = USER 行 + ASSISTANT 行同 turn_id：turn_id（uuid4）同时是 arq
   job_id 与事件频道后缀，幂等投递、发布订阅、SSE 回放共用这一个键；
-- ASSISTANT 行是轮次状态权威（RUNNING → COMPLETED/FAILED/INTERRUPTED），
-  worker 终态经 finish_turn 回写；USER 行只作内容回显，状态恒 COMPLETED；
+- ASSISTANT 行是轮次状态权威（RUNNING → INTERRUPTING → COMPLETED/FAILED/
+  INTERRUPTED），worker 终态经 finish_turn 回写；USER 行只作内容回显，状态恒 COMPLETED；
+  INTERRUPTING 是「用户已下令停止、worker 还没收尾」的中间态，**不算终态**；
 - 跨进程交接只有 MySQL 这两行：API 进程写下「本轮要什么」，arq worker 读它
   跑一轮再写回（与 workflow 执行行同一个模式）。
 
@@ -27,7 +28,7 @@ from common.common_mysql.mysql import mysql_client
 
 from service.service_harness.models.harness_entity import (
     SESSION_ACTIVE, HarnessMessage, HarnessSession,
-    TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED, TURN_RUNNING,
+    TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED, TURN_INTERRUPTING, TURN_RUNNING,
 )
 from service.service_harness.schemas.harness_schema import (
     MountsReq, SessionCreateReq,
@@ -36,6 +37,32 @@ from service.service_harness.schemas.harness_schema import (
 # 消息对外的角色常量（与 tb_model_chat_message 的 role 口径一致）
 ROLE_USER = "USER"
 ROLE_ASSISTANT = "ASSISTANT"
+
+# 还没收尾的轮次状态 → 允许的最长停留时间（秒）。create_turn 的同会话闸门只认
+# 这几档：超过宽限期还没等到 worker 收尾，就当僵尸行放行——否则一轮被杀掉的
+# 任务会把整个会话永久锁死（用户既发不出新的，也删不掉那轮的 RUNNING）。
+# INTERRUPTING 给得更短：那一轮已经取消过了，收尾只是写库，秒级就该完成。
+UNFINISHED_TURN_GRACE_S = {
+    TURN_RUNNING: 30 * 60,
+    TURN_INTERRUPTING: 2 * 60,
+}
+
+# 闸门拒绝时的文案（按状态区分：「执行中」和「正在停止」用户看到的该不一样）
+_TURN_BUSY_HINT = {
+    TURN_RUNNING: "上一轮还在执行中，请等它结束或先点停止",
+    TURN_INTERRUPTING: "上一轮正在停止收尾，请稍候片刻再发",
+}
+
+# 轮次终态（finish_turn 只写未进这一组的行；与 harness_pubsub.TERMINAL_DB_STATUSES 同口径）
+_TERMINAL_STATUSES = (TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED)
+
+
+def _turn_expired(status: str, created: Optional[datetime]) -> bool:
+    """未收尾轮次是否已过宽限期（判口径见 UNFINISHED_TURN_GRACE_S）。"""
+    if created is None:
+        # 拿不到创建时间就当作已过期：宁可放一轮进去，也不把会话锁死
+        return True
+    return (datetime.now() - created).total_seconds() > UNFINISHED_TURN_GRACE_S.get(status, 0)
 
 
 def _session_dto(row: HarnessSession) -> dict:
@@ -201,7 +228,7 @@ class HarnessSessionService:
         挂载的 ACL 校验在 worker 侧（ensure_action）做——这里是「本轮想用什么」
         的记录口，不是信任边界。附件引用（已上传沙箱的文件）落 USER 行，
         worker 经 turn_snapshot 取到后注入提示让模型自行读取。
-        :raises ValueError: 会话不存在 / 不属于本人 / 已归档
+        :raises ValueError: 会话不存在 / 不属于本人 / 已归档 / 上一轮还没收尾
         """
         user_id = int(login_user.get("user_id") or 0)
         turn_id = str(uuid4())
@@ -214,6 +241,22 @@ class HarnessSessionService:
                 raise ValueError("会话不存在")
             if row.status != SESSION_ACTIVE:
                 raise ValueError("会话已归档，请先恢复再发消息")
+            # 同会话串行闸门：上一轮还没收尾就不再开一轮。AgentState（记忆窗口
+            # 与 HITL 待答上下文）在 Redis 里是**按会话一份**，两轮同时在跑就是
+            # 并发写同一份 state：轻则事件顺序错乱，重则把上一轮未闭合的工具
+            # 调用冲掉。页面侧另有「未收到终态帧不发下一句」的软锁，这道硬闸门
+            # 管住刷新、多标签页这些页面本地状态已经丢了的路径。
+            unfinished = (await session.execute(
+                select(HarnessMessage.turn_id, HarnessMessage.status,
+                       HarnessMessage.create_time)
+                .where(HarnessMessage.session_id == session_id,
+                       HarnessMessage.role == ROLE_ASSISTANT,
+                       HarnessMessage.status.in_(tuple(UNFINISHED_TURN_GRACE_S)))
+                .order_by(HarnessMessage.id.desc())
+            )).first()
+            if unfinished is not None and not _turn_expired(unfinished[1], unfinished[2]):
+                raise ValueError(_TURN_BUSY_HINT.get(
+                    unfinished[1], "上一轮尚未结束，请稍后再试"))
             session.add_all([
                 HarnessMessage(session_id=session_id, turn_id=turn_id, role=ROLE_USER,
                                content=message, status=TURN_COMPLETED,
@@ -254,7 +297,7 @@ class HarnessSessionService:
 
     @staticmethod
     async def turn_status(turn_id: str) -> Optional[str]:
-        """轮次状态（worker 事件循环里的中断检查口，只查一列不取整行）。"""
+        """轮次状态（worker 的停止监视器查这一列，只取单列不取整行）。"""
         async with mysql_client.get_session() as session:
             return await session.scalar(
                 select(HarnessMessage.status)
@@ -271,7 +314,15 @@ class HarnessSessionService:
 
     @staticmethod
     async def interrupt_turn(login_user: dict, turn_id: str) -> bool:
-        """请求中断：RUNNING → INTERRUPTED（worker 在事件间隙检查退出）。
+        """下达停止命令：RUNNING → INTERRUPTING（**中间态，不是终态**）。
+
+        只改状态、不写 error：本轮的收尾文案与已生成内容都由 worker 落——端点
+        抢着写终态 INTERRUPTED 会让 finish_turn 跳过回写（它只写未终态的行），
+        本轮刷新出来就是一轮空回答。真正的中断由 worker 的停止监视器完成
+        （arq_tasks/tasks/harness.py 的 _run_with_stop_watch）。
+
+        已经是 INTERRUPTING 时仍返回 True 且不写库——多标签页各点一次停止是
+        正常操作，第二次不该看到「轮次已结束」那种错码。
 
         归属校验经所属会话（turn 行只有 session_id）：不是本人的轮次按
         「不存在」处理，不区分文案避免探测他人 turn_id。
@@ -287,11 +338,11 @@ class HarnessSessionService:
             sess = await session.get(HarnessSession, msg.session_id)
             if sess is None or sess.user_id != user_id:
                 return False
-            if msg.status != TURN_RUNNING:
+            if msg.status in _TERMINAL_STATUSES:
                 return False
-            msg.status = TURN_INTERRUPTED
-            msg.error = "用户请求中断"
-            await session.commit()
+            if msg.status == TURN_RUNNING:
+                msg.status = TURN_INTERRUPTING
+                await session.commit()
             return True
 
     @staticmethod
@@ -306,14 +357,15 @@ class HarnessSessionService:
 
         只写仍未终态的行：同一 turn 被重复消费（幂等投递残留/重试）时以先到
         的终态为准，后到的直接跳过，不会把 COMPLETED 改回 FAILED。
+        INTERRUPTING 不在终态集里，所以能被这里改写成 INTERRUPTED ——用户点停
+        之前已经生成的那半截回答就是靠这一次回写落库的。
         """
         async with mysql_client.get_session() as session:
             msg = (await session.execute(
                 select(HarnessMessage).where(HarnessMessage.turn_id == turn_id,
                                              HarnessMessage.role == ROLE_ASSISTANT)
             )).scalar_one_or_none()
-            if msg is None or msg.status in (TURN_COMPLETED, TURN_FAILED,
-                                             TURN_INTERRUPTED):
+            if msg is None or msg.status in _TERMINAL_STATUSES:
                 log.warning("harness finish_turn skipped: turn={} status={}",
                             turn_id, msg.status if msg else "missing")
                 return

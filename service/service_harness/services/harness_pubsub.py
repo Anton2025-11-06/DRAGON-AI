@@ -51,6 +51,10 @@ EVT_TURN_FAILED = "turn.failed"
 EVT_TURN_INTERRUPTED = "turn.interrupted"
 
 TERMINAL_EVENT_TYPES = {EVT_TURN_COMPLETED, EVT_TURN_FAILED, EVT_TURN_INTERRUPTED}
+# INTERRUPTING（用户已请求停止）故意不列在这里：那一行还在等 worker 收尾把已生成
+# 内容写进来，提前当终态回放会给出一轮空回答。发起停止的那个页面就是靠这条流等
+# 终态帧解锁下一轮发送的（其它标签页/刷新回来的订阅者同样），worker 真收尾时一定
+# 发得到；worker 赶不过来（进程被杀）则由页面自己的宽限期兜住，见前端 interruptTurn
 TERMINAL_DB_STATUSES = {TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED}
 
 

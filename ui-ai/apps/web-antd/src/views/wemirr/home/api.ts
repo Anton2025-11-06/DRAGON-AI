@@ -84,7 +84,8 @@ export interface HarnessMessage {
   content: string;
   thinking: null | string;
   toolCalls: ToolCallTrace[];
-  status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED' | 'RUNNING';
+  /** INTERRUPTING：停止已下达、worker 还在收尾，**不是终态**（等终态帧才解锁发送口） */
+  status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED' | 'INTERRUPTING' | 'RUNNING';
   error: null | string;
   modelName: null | string;
   /** 本轮模型 id（切换会话时按最后一轮回显 composer 选择） */

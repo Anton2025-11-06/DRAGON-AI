@@ -9,8 +9,9 @@ MySQL 那一行」模式）：
 3. 组装：model_factory（模型广场授权）→ workspace_factory（attach/建沙箱）→
    harness_agent（权限策略 + Toolkit + Agent）；
 4. 事件循环：reply_stream 的每个事件 publish 到 harness:evt:{turn_id}，同时
-   累积 text/thinking/tool_calls（终态落库用）；事件间隙按时间窗查 DB 状态，
-   INTERRUPTED 即收尾退出（interrupt 端点置的状态）；
+   累积 text/thinking/tool_calls（终态落库用）；消费段装在
+   _run_with_stop_watch 里——用户点停止（interrupt 端点把行置 INTERRUPTING）
+   即取消此刻正在 await 的那一次调用，不等下一个事件；
 5. 收尾：finish_turn 终态回写 + 终态事件 + upsert state（沙箱由进程级 manager
    单例的 TTL 缓存跨轮复用，轮末不关闭；worker 退出时 stop_manager 统一 close_all）
    （OpenSandboxWorkspace 没有 pause()：沙箱靠服务端 timeout_seconds 自然暂停，
@@ -19,8 +20,8 @@ MySQL 那一行」模式）：
 M3 HITL 恢复已落地：每轮输入前先查 state 的挂起待答（_hitl_resume_inputs
 把本轮用户消息转成 ExternalExecutionResultEvent / UserConfirmResultEvent
 续跑），一轮答一个挂起，多个挂起逐轮收敛；挂起收尾时把问题文本随
-turn.interrupted 帧下发（question 字段）。用户中断在事件间隙检出后用
-UserInterruptEvent 闭合未完成的工具调用再收尾（demo 同款语义）。
+turn.interrupted 帧下发（question 字段）。用户中断由停止监视器取消消费段检出，
+取消后用 UserInterruptEvent 闭合未完成的工具调用再收尾（demo 同款语义）。
 """
 import asyncio
 import logging
@@ -41,7 +42,7 @@ from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 
 from service.service_harness.models.harness_entity import (
-    TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED, TURN_RUNNING,
+    TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPTED, TURN_INTERRUPTING, TURN_RUNNING,
 )
 from service.service_harness.services.harness_pubsub import (
     EVT_TEXT_DELTA, EVT_THINKING_DELTA, EVT_TOOL_COMPLETED, EVT_TOOL_STARTED,
@@ -217,16 +218,72 @@ async def shutdown(ctx: dict) -> None:
     log.info("arq harness worker shutdown done")
 
 
-# ==================== 事件循环（累积 + 发布 + 中断检查） ====================
+# ==================== 事件循环（累积 + 发布 + 停止取消） ====================
 
-# 事件间隙的中断检查节流窗（秒）：每个 token 事件查一次 DB 会把 MySQL 打成热点，
-# 2 秒一查的粒度足够（用户点中断到生效的最大延迟 = 窗口 + 一次事件间隔）
-INTERRUPT_CHECK_WINDOW_S = 2.0
+# 停止监视器的轮询窗（秒）：从用户点停止（interrupt 端点把行写成 INTERRUPTING）
+# 到 worker 取消生效的最大延迟。代价是每轮一秒一次单列 SELECT，比旧那套
+# 「事件间隙 + 节流窗」便宜得多也可靠得多：一次长工具（沙箱里跑命令、装依赖）
+# 期间可以几分钟不发一个事件，事件间隙的口径在那种工具上根本不生效。
+INTERRUPT_POLL_S = 1.0
 
 
 async def _publish(turn_id: str, event_type: str, payload: dict) -> None:
     """publish 的薄封装（worker 内统一出口，便于以后挂埋点）。"""
     await publish_turn_event(turn_id, event_type, payload)
+
+
+async def _run_with_stop_watch(turn_id: str, consume, poll_s: float = INTERRUPT_POLL_S) -> bool:
+    """跑消费段 consume（协程函数），同时静默盯 DB：用户下令停止就真取消它。
+
+    返回是否按「用户中断」收尾：True=监视器下过令，False=自然跑完。
+
+    为什么不是「消费到下一个事件时再查一次状态」：reply_stream 只在有事件时才
+    回到循环体，一次工具调用（沙箱里跑命令、装依赖）期间可以几分钟不发一个
+    事件，那种口径下点停止只能等它自己结束。这里把消费段装进一个可取消的子
+    任务：target.cancel() 的 CancelledError 直接落进它**当时正在 await 的那一次
+    调用**（读模型流式响应 / 等沙箱工具回包），当场撒手，不等下一个事件。
+
+    一个必须说清的边界：内置工具是经沙箱内的 MCP 网关执行的，网关没有对外的
+    取消口——容器里那条命令会自己跑完，我们能取消的是「我们这一侧不再等它」，
+    本轮不接它的结果（state 在 finally 照常写回，未闭合的工具调用由下一轮续答）。
+    """
+    stop_status = None
+    target = asyncio.ensure_future(consume())
+
+    async def watch() -> None:
+        nonlocal stop_status
+        while not target.done():
+            try:
+                status = await HarnessSessionService.turn_status(turn_id)
+            except Exception as e:  # noqa: BLE001  查不动就继续盯，别把本轮带崩
+                log.warning("harness stop watch query failed turn={}: {}", turn_id, e)
+                status = None
+            # 判定口径：状态一离开 RUNNING 就是有人下了停止令（INTERRUPTING）。
+            # None（行不存在/瞬时读空）不算命中，防止误停正常轮
+            if status is not None and status != TURN_RUNNING:
+                stop_status = status
+                target.cancel()
+                return
+            await asyncio.sleep(poll_s)
+
+    watcher = asyncio.ensure_future(watch())
+    try:
+        await target
+    except asyncio.CancelledError:
+        if not stop_status:
+            raise
+        # 监视器下过令：这次取消就是用户要的停止，吞掉它按中断收尾——外层
+        # run_harness_turn 不能因为用户点了停止就把整轮判 FAILED
+        log.info("harness turn cancelled by user stop: turn={} status={}",
+                 turn_id, stop_status)
+    finally:
+        # 监视器无论如何都要收掉：自然跑完时它还睡在 poll 窗口上，留着就是
+        # 每轮泄漏一个任务
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+    # 消费段把取消吞掉后正常返回（agentscope 生成器吞 GeneratorExit 那种）也
+    # 算已停：令是下过了，不能因为它不配合就把这一轮当自然跑完落 COMPLETED
+    return bool(stop_status)
 
 
 def _parse_present_output_args(arguments: str) -> list[dict]:
@@ -534,8 +591,6 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
         agent = await build_agent(state, workspace, model,
                                   mounted_tools=mounted.tools,
                                   mount_summary=mounted.summary)
-        loop = asyncio.get_running_loop()
-        next_check = loop.time() + INTERRUPT_CHECK_WINDOW_S
         stream = None  # reply_stream 生成器引用：收尾显式 aclose，见 finally
         try:
             await _publish(turn_id, "turn.started", {})
@@ -550,66 +605,67 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                     snapshot["message"], snapshot.get("attachments"))
                 inputs = UserMsg(name="user", content=user_text)
             stream = agent.reply_stream(inputs)
-            async for evt in stream:
-                if isinstance(evt, TextBlockDeltaEvent):
-                    text_chunks.append(evt.delta)
-                    await _publish(turn_id, EVT_TEXT_DELTA, {"content": evt.delta})
-                elif isinstance(evt, ThinkingBlockDeltaEvent):
-                    thinking_chunks.append(evt.delta)
-                    await _publish(turn_id, EVT_THINKING_DELTA, {"content": evt.delta})
-                elif isinstance(evt, ToolCallStartEvent):
-                    calls[evt.tool_call_id] = (evt.tool_call_name, [])
-                    # present_output 是收尾登记工具，不作为用户可见的工具行进对话
-                    #（它的产物走下面的 turn.artifacts 帧渲染成文件卡片），故不发
-                    # tool.started；仍需登记进 calls 以便 End 取到工具名与累积入参
-                    if evt.tool_call_name != "present_output":
-                        await _publish(turn_id, EVT_TOOL_STARTED,
-                                       {"tool": evt.tool_call_name,
-                                        "toolCallId": evt.tool_call_id})
-                elif isinstance(evt, ToolCallDeltaEvent):
-                    calls.setdefault(evt.tool_call_id, ("", []))[1].append(evt.delta)
-                elif isinstance(evt, ToolCallEndEvent):
-                    name, arg_chunks = calls.pop(evt.tool_call_id, ("", []))
-                    arguments = "".join(arg_chunks)
-                    if name == "present_output":
-                        # 收尾登记：不进 tool_calls_trace、不发 tool.completed，改按
-                        # path 去重合并进 artifacts，发累积快照帧（前端整表替换）
-                        known = {a["path"] for a in artifacts}
-                        for item in _parse_present_output_args(arguments):
-                            if item["path"] not in known:
-                                artifacts.append(item)
-                                known.add(item["path"])
-                        if artifacts:
-                            await _publish(turn_id, EVT_TURN_ARTIFACTS,
-                                           {"artifacts": artifacts})
-                        continue
-                    # 工具入参里的 purpose（模型每轮被提示词要求填写）就是这次
-                    # 调用给用户看的一句话说明；发帧与落库同一个口径，回放才不
-                    # 会跟实时流对不上。取不到时前端按入参派生标签兜住。
-                    purpose = extract_purpose(name, arguments)
-                    trace = {"tool": name, "toolCallId": evt.tool_call_id,
-                             "arguments": arguments}
-                    if purpose:
-                        trace["purpose"] = purpose
-                    tool_calls_trace.append(trace)
-                    payload = {"tool": name, "toolCallId": evt.tool_call_id,
-                               "arguments": arguments}
-                    if purpose:
-                        payload["purpose"] = purpose
-                    await _publish(turn_id, EVT_TOOL_COMPLETED, payload)
-                # ReplyEndEvent 不发帧（终态帧唯一出口见模块头说明）；
-                # ToolResult* / *Start 事件 M1 也不发帧，落库素材不收
 
-                # 中断检查（时间窗节流）：DB 已被 interrupt 端点置 INTERRUPTED
-                # 即停止消费后续事件，本轮按用户中断收尾。
-                # 注：break 会 async-aclose reply_stream 生成器，state 里可能留下
-                # 未闭合的工具调用——break 后用 UserInterruptEvent 闭合（见下）
-                if loop.time() >= next_check:
-                    next_check = loop.time() + INTERRUPT_CHECK_WINDOW_S
-                    status = await HarnessSessionService.turn_status(turn_id)
-                    if status is not None and status != TURN_RUNNING:
-                        interrupted = True
-                        break
+            async def _consume_events() -> None:
+                """消费本轮事件：转帧发布 + 累积落库素材。
+
+                停止不在这里查——外层 _run_with_stop_watch 会直接取消本协程此刻
+                正在 await 的那一次调用，长工具期间一个事件都不发也停得下来。
+                """
+                async for evt in stream:
+                    if isinstance(evt, TextBlockDeltaEvent):
+                        text_chunks.append(evt.delta)
+                        await _publish(turn_id, EVT_TEXT_DELTA, {"content": evt.delta})
+                    elif isinstance(evt, ThinkingBlockDeltaEvent):
+                        thinking_chunks.append(evt.delta)
+                        await _publish(turn_id, EVT_THINKING_DELTA,
+                                       {"content": evt.delta})
+                    elif isinstance(evt, ToolCallStartEvent):
+                        calls[evt.tool_call_id] = (evt.tool_call_name, [])
+                        # present_output 是收尾登记工具，不作为用户可见的工具行进对话
+                        #（它的产物走下面的 turn.artifacts 帧渲染成文件卡片），故不发
+                        # tool.started；仍需登记进 calls 以便 End 取到工具名与累积入参
+                        if evt.tool_call_name != "present_output":
+                            await _publish(turn_id, EVT_TOOL_STARTED,
+                                           {"tool": evt.tool_call_name,
+                                            "toolCallId": evt.tool_call_id})
+                    elif isinstance(evt, ToolCallDeltaEvent):
+                        calls.setdefault(evt.tool_call_id, ("", []))[1].append(evt.delta)
+                    elif isinstance(evt, ToolCallEndEvent):
+                        name, arg_chunks = calls.pop(evt.tool_call_id, ("", []))
+                        arguments = "".join(arg_chunks)
+                        if name == "present_output":
+                            # 收尾登记：不进 tool_calls_trace、不发 tool.completed，改按
+                            # path 去重合并进 artifacts，发累积快照帧（前端整表替换）
+                            known = {a["path"] for a in artifacts}
+                            for item in _parse_present_output_args(arguments):
+                                if item["path"] not in known:
+                                    artifacts.append(item)
+                                    known.add(item["path"])
+                            if artifacts:
+                                await _publish(turn_id, EVT_TURN_ARTIFACTS,
+                                               {"artifacts": artifacts})
+                            continue
+                        # 工具入参里的 purpose（模型每轮被提示词要求填写）就是这次
+                        # 调用给用户看的一句话说明；发帧与落库同一个口径，回放才不
+                        # 会跟实时流对不上。取不到时前端按入参派生标签兜住。
+                        purpose = extract_purpose(name, arguments)
+                        trace = {"tool": name, "toolCallId": evt.tool_call_id,
+                                 "arguments": arguments}
+                        if purpose:
+                            trace["purpose"] = purpose
+                        tool_calls_trace.append(trace)
+                        payload = {"tool": name, "toolCallId": evt.tool_call_id,
+                                   "arguments": arguments}
+                        if purpose:
+                            payload["purpose"] = purpose
+                        await _publish(turn_id, EVT_TOOL_COMPLETED, payload)
+                    # ReplyEndEvent 不发帧（终态帧唯一出口见模块头说明）；
+                    # ToolResult* / *Start 事件 M1 也不发帧，落库素材不收
+
+            # 真取消：用户点了停止即打断正在跑的那次模型/工具调用，不等下一个
+            # 事件间隙。被取消时 state 里可能留着未闭合的工具调用——下面闭合它
+            interrupted = await _run_with_stop_watch(turn_id, _consume_events)
             if interrupted:
                 # 用户已明确要停：用 UserInterruptEvent 闭合 state 里未完成的
                 # 工具调用（demo 的 InterruptReply 分支同款），闭合过程不再发
@@ -694,7 +750,18 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
     """
     snapshot = await HarnessSessionService.turn_snapshot(turn_id)
     if snapshot is None or snapshot["status"] != TURN_RUNNING:
-        # 幂等投递残留 / 用户中断先于消费：行上不是 RUNNING 就不跑
+        if snapshot is not None and snapshot["status"] == TURN_INTERRUPTING:
+            # 停止赶在本任务被消费之前到达：行停在 INTERRUPTING，而发起停止的那个
+            # 页面正是靠在等这一轮的终态帧才解锁发送口（其他标签页的订阅者靠
+            # DB 兜底）。没人收尾它就会永远卡在 INTERRUPTING：这里一行内容都没
+            # 生成，就地收尾成 INTERRUPTED 并补发终态帧。
+            reason = "用户中断了本轮回复"
+            log.info("harness turn interrupted before consume: turn={}", turn_id)
+            await HarnessSessionService.finish_turn(turn_id, TURN_INTERRUPTED,
+                                                    error=reason)
+            await _publish(turn_id, EVT_TURN_INTERRUPTED, {"reason": reason})
+            return
+        # 幂等投递残留 / 已终态：行上不是 RUNNING 就不跑
         log.warning("harness turn skipped: turn={} status={}",
                     turn_id, snapshot["status"] if snapshot else "missing")
         return

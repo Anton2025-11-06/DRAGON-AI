@@ -728,7 +728,7 @@ CREATE TABLE IF NOT EXISTS `tb_harness_message` (
     `content`     MEDIUMTEXT   COMMENT '消息正文（ASSISTANT 为最终回复全文）',
     `thinking`    MEDIUMTEXT   COMMENT '思考流全文（仅 ASSISTANT）',
     `tool_calls`  JSON         COMMENT '工具调用轨迹 [{tool,arguments,result}]（result 裁剪口径同工作流 hide_tool_call_results）',
-    `status`      VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '轮次状态（ASSISTANT 行权威）RUNNING/COMPLETED/FAILED/INTERRUPTED（INTERRUPTED=HITL 挂起等用户答复）',
+    `status`      VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT '轮次状态（ASSISTANT 行权威）RUNNING/INTERRUPTING/COMPLETED/FAILED/INTERRUPTED（INTERRUPTING=停止已下达、worker 未收尾，非终态；INTERRUPTED=HITL 挂起等用户答复）',
     `error`       TEXT         COMMENT '失败原因（status=FAILED 时）',
     `model_name`  VARCHAR(128) DEFAULT NULL COMMENT '本轮实际使用的模型标识（ASSISTANT 行，worker 构造模型后回写）',
     `model_id`    BIGINT    NOT NULL DEFAULT 0 COMMENT '本轮模型 id（模型/工具每轮可切换，随消息行落库；worker 按它命中 Redis model_rate_limit_config）',

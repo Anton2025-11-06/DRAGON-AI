@@ -24,6 +24,11 @@ TURN_COMPLETED = "COMPLETED"
 TURN_FAILED = "FAILED"
 # HITL 挂起等用户答复（AskUser / 工具授权确认）：下一轮用户输入即恢复
 TURN_INTERRUPTED = "INTERRUPTED"
+# 用户已请求停止、worker 还没收尾（**不是终态**）：只有 interrupt 端点写它，真正的
+# 终态与本轮已生成内容由 worker 收尾改写成 INTERRUPTED。端点不能抢着直接写
+# INTERRUPTED——finish_turn 只写未终态的行，状态先变终态会让它跳过回写，本轮回答
+# 刷新出来就是空的（前端点完停止必然立刻断流，这个洞更容易被看见）
+TURN_INTERRUPTING = "INTERRUPTING"
 
 # 会话状态
 SESSION_ACTIVE = "ACTIVE"
@@ -62,7 +67,7 @@ class HarnessMessage(Base):
     # hide_tool_call_results）
     tool_calls: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="工具调用轨迹")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=TURN_RUNNING,
-                                        comment="轮次状态 RUNNING/COMPLETED/FAILED/INTERRUPTED")
+                                        comment="轮次状态 RUNNING/INTERRUPTING/COMPLETED/FAILED/INTERRUPTED")
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="失败原因")
     model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, comment="本轮模型标识")
     # 本轮模型与挂载快照（模型/工具每轮可切换，随消息行落库；worker 据此按 model_id 取配置、组 toolkit）
