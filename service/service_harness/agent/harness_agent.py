@@ -309,19 +309,40 @@ async def _build_system_prompt(workspace: Any, mount_summary: dict | None = None
 
 async def build_agent(state: AgentState, workspace: Any, model: Any,
                       mounted_tools: list | None = None,
-                      mount_summary: dict | None = None) -> Agent:
+                      mount_summary: dict | None = None,
+                      *, system_prompt: str | None = None,
+                      agent_name: str = AGENT_NAME,
+                      max_iters: int = 200) -> Agent:
     """用恢复出来的 state 组装智能体（工具集与模型每轮按最新配置重建）。
 
     mounted_tools / mount_summary 来自 mount_loader.load_mounted（本轮挂载的
     平台能力；无挂载时缺省空，行为与 M1 一致）。
+
+    智能体编排参数化（缺省即深度探索原口径，保证回归不变）：
+    - system_prompt 传入即覆盖深度探索那份基础段（编排的单/团队/目标/SOP
+      各成员自带提示词）；仍自动拼接挂载能力说明段与沙箱自述；
+    - agent_name 传入即覆盖 Agent.name（编排里按成员区分各 Agent）；
+    - max_iters 透传 ReActConfig（编排成员可给更小的自主轮数）。
     """
     apply_permission_policy(state, str(getattr(workspace, "workdir", "")))
+    if system_prompt is not None:
+        prompt = system_prompt + _mount_section(mount_summary)
+        instructions = getattr(workspace, "get_instructions", None)
+        if callable(instructions):
+            try:
+                extra = await instructions()
+                if extra:
+                    prompt = f"{prompt}\n\n{extra}"
+            except Exception:  # noqa: BLE001
+                pass
+    else:
+        prompt = await _build_system_prompt(workspace, mount_summary)
     return Agent(
-        name=AGENT_NAME,
-        system_prompt=await _build_system_prompt(workspace, mount_summary),
+        name=agent_name,
+        system_prompt=prompt,
         model=model,
         state=state,
         toolkit=await build_toolkit(workspace, mounted_tools),
         offloader=workspace,
-        react_config=ReActConfig(max_iters=200)
+        react_config=ReActConfig(max_iters=max_iters)
     )

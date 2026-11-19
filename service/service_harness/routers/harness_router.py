@@ -118,10 +118,23 @@ async def send_chat(request: Request, body: ChatReq):
     KB 检索的鉴权上下文。
     """
     login_user = await get_login_user(request)
+    # 编排验证台：本轮要跑某个已保存的编排配置（orchConfigId>0）时，先卡一次
+    # 「能跑起来才能验证」= ensure_any(use, edit)（与深度探索不同的唯一一道门）。
+    orch_mode = body.orchMode or "single"
+    orch_config_id = int(body.orchConfigId or 0)
+    if orch_config_id:
+        from service.service_harness.services.orch_runtime import (
+            ensure_runnable as orch_ensure_runnable,
+        )
+        try:
+            await orch_ensure_runnable(login_user, orch_mode, orch_config_id)
+        except Exception as e:  # noqa: BLE001 无权/不存在统一 403，不泄露存在性
+            return ApiResponse.error(403, str(e))
     try:
         turn = await HarnessSessionService.create_turn(
             login_user, body.sessionId, body.message, body.modelId, body.mounts,
-            [a.model_dump() for a in body.attachments] if body.attachments else None)
+            [a.model_dump() for a in body.attachments] if body.attachments else None,
+            orch_mode=orch_mode, orch_config_id=orch_config_id)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
 

@@ -4,6 +4,18 @@ from service.service_harness.routers.harness_router import (
     chat_router, models_router, options_router, router as session_router,
     sandbox_router,
 )
+from service.service_harness.routers.orch_agent_router import (
+    router as orch_agent_router,
+)
+from service.service_harness.routers.orch_team_router import (
+    router as orch_team_router,
+)
+from service.service_harness.routers.orch_goal_router import (
+    router as orch_goal_router,
+)
+from service.service_harness.routers.orch_sop_router import (
+    router as orch_sop_router,
+)
 from service.service_harness.services import harness_settings
 
 # service_harness：深度探索智能体（AgentScope ReAct + OpenSandbox 云沙箱）
@@ -18,7 +30,8 @@ app = create_app(
     service_name=SERVICE_HARNESS,
     default_port=SERVICE_HARNESS_PORT,
     routers=[session_router, chat_router, models_router, options_router,
-             sandbox_router],
+             sandbox_router, orch_agent_router, orch_team_router,
+             orch_goal_router, orch_sop_router],
     enable_arq_harness_redis=True,
     enable_workspace_manager=True,
     on_ready=harness_settings.bootstrap,

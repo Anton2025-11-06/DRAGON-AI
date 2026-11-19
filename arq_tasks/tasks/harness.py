@@ -537,12 +537,19 @@ def _compose_user_message(message: str, attachments: list) -> str:
 
 
 async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
-                        model, workspace, mounted) -> dict:
+                        model, workspace, mounted, *,
+                        agent_id: str = None, system_prompt: str = None,
+                        agent_name: str = None, max_iters: int = 200) -> dict:
     """恢复 state → 组装 Agent → 跑一轮 reply_stream，返回累积结果。
 
     返回 dict：{status, content, thinking, tool_calls, error}——终态判定在
     _status_of；state 持久化在 finally（无论成败都要把记忆窗口写回 Redis，
     否则失败一轮就把之前的对话记忆丢了）。
+
+    编排参数（缺省即深度探索原口径，行为不变）：
+    - agent_id：RedisStorage 的 agent 级键。缺省 harness_agent；编排单智能体传
+      f"orch_single_{config_id}"（不同配置在同一会话里 state 键隔离、不串味）；
+    - system_prompt / agent_name / max_iters：透传参数化 build_agent。
     """
     # 事件转换与累积都在 worker 完成（harness_pubsub 保持纯通道，不 import
     # agentscope——API 进程不装 agentscope 也能起服务）
@@ -554,10 +561,15 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     from agentscope.state import AgentState
     from agentscope.app.storage import RedisStorage, SessionConfig
 
-    from service.service_harness.agent.harness_agent import AGENT_ID, build_agent
+    from service.service_harness.agent.harness_agent import (
+        AGENT_ID, AGENT_NAME, build_agent,
+    )
     from service.service_harness.agent.tools.purpose import extract_purpose
     from service.service_harness.agent.workspace_factory import workspace_id_of
     from service.service_harness.services.harness_settings import storage_options
+
+    agent_id = agent_id or AGENT_ID
+    agent_name = agent_name or AGENT_NAME
 
     user_id = int(snapshot["userId"])
     session_id = int(snapshot["sessionId"])
@@ -585,12 +597,15 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     interrupted = False
 
     async with RedisStorage(**storage_opts) as storage:
-        record = await storage.get_session(user_id=user_key, agent_id=AGENT_ID,
+        record = await storage.get_session(user_id=user_key, agent_id=agent_id,
                                            session_id=session_key)
         state = record.state if record else AgentState()
         agent = await build_agent(state, workspace, model,
                                   mounted_tools=mounted.tools,
-                                  mount_summary=mounted.summary)
+                                  mount_summary=mounted.summary,
+                                  system_prompt=system_prompt,
+                                  agent_name=agent_name,
+                                  max_iters=max_iters)
         stream = None  # reply_stream 生成器引用：收尾显式 aclose，见 finally
         try:
             await _publish(turn_id, "turn.started", {})
@@ -697,7 +712,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
             # state 永远写回：记忆窗口 / HITL 待答上下文 / 任务清单都在里面，
             # 失败一轮不能把之前的对话记忆丢掉（与 demo 主循环同款 finally）
             await storage.upsert_session(
-                user_id=user_key, agent_id=AGENT_ID,
+                user_id=user_key, agent_id=agent_id,
                 config=SessionConfig(workspace_id=ws_id),
                 session_id=session_key, state=agent.state)
 
@@ -771,14 +786,46 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
         from service.service_harness.agent.tools.mount_loader import load_mounted
         from service.service_harness.agent.workspace_factory import attach_workspace
 
-        model, _model_name = await build_model(int(snapshot["modelId"] or 0))
-        # 挂载组装（三桥 + 技能种入）在 workspace 之前：技能解压目录要作为
-        # skill_paths 传给 workspace（种入沙箱在 initialize 期完成）
-        mounted = await load_mounted(login_user, snapshot.get("mounts") or {})
-        workspace = await attach_workspace(login_user, snapshot["sessionId"],
-                                           skill_paths=mounted.skill_paths)
-        result = await _stream_reply(turn_id, login_user, snapshot, model,
-                                     workspace, mounted)
+        orch_mode = snapshot.get("orchMode") or "single"
+        config_id = int(snapshot.get("orchConfigId") or 0)
+        # 编排分派：深度探索（config_id=0）与 single 编排走单 Agent 路径（_stream_reply）；
+        # team/goal/sop 是多 Agent 流水线，交 run_pipeline_turn（orch_pipelines 构建器）。
+        if config_id and orch_mode in ("team", "goal", "sop"):
+            from service.service_harness.services.orch_runtime import runtime_config
+            from arq_tasks.tasks.harness_pipeline import run_pipeline_turn
+            cfg = await runtime_config(orch_mode, config_id)
+            if cfg is None:
+                raise ValueError("编排配置不存在或已删除")
+            result = await run_pipeline_turn(turn_id, login_user, snapshot,
+                                             orch_mode, cfg)
+            _model_name = None
+        else:
+            run_kwargs = {}
+            mounts = snapshot.get("mounts") or {}
+            model_id = int(snapshot["modelId"] or 0)
+            if config_id and orch_mode == "single":
+                from service.service_harness.services.orch_agent_service import (
+                    OrchAgentService,
+                )
+                cfg = await OrchAgentService.runtime_config(config_id)
+                if cfg is None:
+                    raise ValueError("编排智能体配置不存在或已删除")
+                mounts = cfg.get("mounts") or {}
+                model_id = int(mounts.get("modelId") or 0)
+                run_kwargs = {
+                    "agent_id": f"orch_single_{config_id}",
+                    "system_prompt": cfg.get("system_prompt"),
+                    "agent_name": cfg.get("agent_name"),
+                }
+
+            model, _model_name = await build_model(model_id)
+            # 挂载组装（三桥 + 技能种入）在 workspace 之前：技能解压目录要作为
+            # skill_paths 传给 workspace（种入沙箱在 initialize 期完成）
+            mounted = await load_mounted(login_user, mounts)
+            workspace = await attach_workspace(login_user, snapshot["sessionId"],
+                                               skill_paths=mounted.skill_paths)
+            result = await _stream_reply(turn_id, login_user, snapshot, model,
+                                         workspace, mounted, **run_kwargs)
         await HarnessSessionService.finish_turn(
             turn_id, result["status"], content=result["content"],
             thinking=result["thinking"], tool_calls=result["tool_calls"],

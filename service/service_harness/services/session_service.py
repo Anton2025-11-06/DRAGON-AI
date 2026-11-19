@@ -220,7 +220,9 @@ class HarnessSessionService:
     async def create_turn(login_user: dict, session_id: int, message: str,
                           model_id: int,
                           mounts: Optional[MountsReq],
-                          attachments: Optional[list[dict]] = None) -> dict:
+                          attachments: Optional[list[dict]] = None,
+                          orch_mode: str = "single",
+                          orch_config_id: int = 0) -> dict:
         """开一轮对话：USER 行 + ASSISTANT 行（RUNNING），返回投递要用的全部事实。
 
         本轮的模型与挂载都落在消息行上（同一会话里逐轮可切换），worker 从
@@ -260,10 +262,12 @@ class HarnessSessionService:
             session.add_all([
                 HarnessMessage(session_id=session_id, turn_id=turn_id, role=ROLE_USER,
                                content=message, status=TURN_COMPLETED,
-                               model_id=mid, mounts=effective, attachments=files),
+                               model_id=mid, mounts=effective, attachments=files,
+                               orch_mode=orch_mode, orch_config_id=orch_config_id),
                 HarnessMessage(session_id=session_id, turn_id=turn_id, role=ROLE_ASSISTANT,
                                status=TURN_RUNNING,
-                               model_id=mid, mounts=effective),
+                               model_id=mid, mounts=effective,
+                               orch_mode=orch_mode, orch_config_id=orch_config_id),
             ])
             await session.commit()
             return {"turnId": turn_id, "sessionId": session_id,
@@ -293,6 +297,8 @@ class HarnessSessionService:
                 "mounts": msg.mounts or {}, "status": msg.status,
                 "message": user_row[0] if user_row else None,
                 "attachments": (user_row[1] if user_row else None) or [],
+                "orchMode": msg.orch_mode or "single",
+                "orchConfigId": int(msg.orch_config_id or 0),
             }
 
     @staticmethod

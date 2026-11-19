@@ -277,6 +277,83 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
              "actions": [ACTION_DELETE, ACTION_SHARE]},
         ],
     },
+    # ---- 智能体编排四模式（单/团队/目标/SOP）：同一套行级动作口径 ----
+    # 分组按用户要求「使用+查看一类、编辑+删除一类、授权一类」；scope 只放 view/use
+    # （同部门自动可看可用），edit/delete/share 属敏感动作绝不进 scope（不可由同部门推断）。
+    # 验证按钮不单列动作码：「有编辑即有验证」——前端按 actions 含 edit 显隐，后端执行
+    # 入口走 ensure_any(use, edit)（见 orchestr service），故这里不产生「授了却没按钮/有按钮却没码」漂移。
+    "orch_agent": {
+        "name": "单智能体",
+        "model": "service.service_harness.models.orch_agent.OrchAgent",
+        "id_col": "id", "owner_col": "created_by",
+        "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
+        "scope": [ACTION_VIEW, ACTION_USE],
+        "groups": [
+            {"key": "read", "name": "查看与使用",
+             "hint": "看得到这个智能体、能让智能体节点/编排挂上它（同部门自动获得这两项）",
+             "actions": [ACTION_VIEW, ACTION_USE]},
+            {"key": "write", "name": "编辑与删除",
+             "hint": "改配置即有验证权限（编辑与删除同码；验证按钮据此显隐），删除不可逆",
+             "actions": [ACTION_EDIT, ACTION_DELETE]},
+            {"key": "grant", "name": "授权",
+             "hint": "「授权」只有归属人或管理员能转授出去",
+             "actions": [ACTION_SHARE]},
+        ],
+    },
+    "orch_team": {
+        "name": "智能体团队",
+        "model": "service.service_harness.models.orch_agent.OrchTeam",
+        "id_col": "id", "owner_col": "created_by",
+        "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
+        "scope": [ACTION_VIEW, ACTION_USE],
+        "groups": [
+            {"key": "read", "name": "查看与使用",
+             "hint": "看得到这个团队、能让会话/接口调起它（同部门自动获得这两项）",
+             "actions": [ACTION_VIEW, ACTION_USE]},
+            {"key": "write", "name": "编辑与删除",
+             "hint": "改团队配置即有验证权限（编辑与删除同码），删除不可逆",
+             "actions": [ACTION_EDIT, ACTION_DELETE]},
+            {"key": "grant", "name": "授权",
+             "hint": "「授权」只有归属人或管理员能转授出去",
+             "actions": [ACTION_SHARE]},
+        ],
+    },
+    "orch_goal": {
+        "name": "智能体目标",
+        "model": "service.service_harness.models.orch_agent.OrchGoal",
+        "id_col": "id", "owner_col": "created_by",
+        "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
+        "scope": [ACTION_VIEW, ACTION_USE],
+        "groups": [
+            {"key": "read", "name": "查看与使用",
+             "hint": "看得到这个目标编排、能让会话/接口调起它（同部门自动获得这两项）",
+             "actions": [ACTION_VIEW, ACTION_USE]},
+            {"key": "write", "name": "编辑与删除",
+             "hint": "改配置即有验证权限（编辑与删除同码），删除不可逆",
+             "actions": [ACTION_EDIT, ACTION_DELETE]},
+            {"key": "grant", "name": "授权",
+             "hint": "「授权」只有归属人或管理员能转授出去",
+             "actions": [ACTION_SHARE]},
+        ],
+    },
+    "orch_sop": {
+        "name": "智能体SOP",
+        "model": "service.service_harness.models.orch_agent.OrchSop",
+        "id_col": "id", "owner_col": "created_by",
+        "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
+        "scope": [ACTION_VIEW, ACTION_USE],
+        "groups": [
+            {"key": "read", "name": "查看与使用",
+             "hint": "看得到这个 SOP、能让会话/接口调起它（同部门自动获得这两项）",
+             "actions": [ACTION_VIEW, ACTION_USE]},
+            {"key": "write", "name": "编辑与删除",
+             "hint": "改流程配置即有验证权限（编辑与删除同码），删除不可逆",
+             "actions": [ACTION_EDIT, ACTION_DELETE]},
+            {"key": "grant", "name": "授权",
+             "hint": "「授权」只有归属人或管理员能转授出去",
+             "actions": [ACTION_SHARE]},
+        ],
+    },
 }
 
 # 资源编码 → 归属表名（授权弹窗、审计与排查用；ACL 表只有 resource_code，不落表名）

@@ -79,4 +79,12 @@ class HarnessMessage(Base):
     # 本轮最终输出物引用 [{name,path,description}]（落 ASSISTANT 行）：present_output
     # 工具登记、worker 捕获后随终态落库；前端据此渲染文件卡片并自动预览。
     artifacts: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="最终输出物引用")
+    # 智能体编排分派：本轮跑哪种流水线（single/team/goal/sop），缺省 single。
+    # 深度探索原轮次这两列留缺省值，worker 按 mode 缺省走原 harness_agent 路径（行为不变）。
+    orch_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="single",
+                                           comment="编排模式 single/team/goal/sop（深度探索缺省 single）")
+    # 编排配置 id（tb_orch_* 主键）；深度探索为 0。与 orch_mode 一起派生 Redis
+    # AgentState 键 agent_id=f"orch_{mode}_{config_id}"，避免不同配置同会话串味。
+    orch_config_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                                comment="编排配置 id（深度探索为 0）")
     create_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

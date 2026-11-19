@@ -735,11 +735,86 @@ CREATE TABLE IF NOT EXISTS `tb_harness_message` (
     `mounts`      JSON         COMMENT '本轮挂载快照 {kbIds:[],mcpIds:[],toolIds:[],skillIds:[]}（执行侧另有 ACL 二次校验）',
     `attachments` JSON         COMMENT '本轮附件引用 [{name,path}]（落 USER 行；文件已存沙箱工作区，worker 注入路径提示让模型自行读取解析）',
     `artifacts`   JSON         COMMENT '本轮最终输出物引用 [{name,path,description}]（落 ASSISTANT 行；present_output 工具登记、worker 捕获，前端据此渲染文件卡片并自动预览）',
+    `orch_mode`   VARCHAR(16)  NOT NULL DEFAULT 'single' COMMENT '编排模式 single/team/goal/sop（深度探索缺省 single，worker 按它分派流水线）',
+    `orch_config_id` BIGINT    NOT NULL DEFAULT 0 COMMENT '编排配置 id（tb_orch_* 主键；深度探索为 0，与 orch_mode 一起派生 Redis AgentState 键）',
     `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_hm_turn` (`turn_id`, `role`),
     KEY `idx_hm_session` (`session_id`, `id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='深度探索-消息（按轮 turn 组织）';
+
+-- -------------------------------------------------------------------------------------
+-- 7.10 智能体编排（四模式各一张表，对齐 service_harness/models/orch_agent.py）
+--   统一审计四列：created_by / create_time / updated_by / update_time；is_deleted 软删。
+--   行级可见/按钮由 ACL（resource_code=orch_agent/orch_team/orch_goal/orch_sop）驱动，
+--   owner_col=created_by、id_col=id（见 resource_guard.RESOURCE_SPECS）。
+-- -------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `tb_orch_agent` (
+    `id`            BIGINT       NOT NULL AUTO_INCREMENT,
+    `name`          VARCHAR(128) NOT NULL COMMENT '智能体名称',
+    `purpose`       VARCHAR(500) COMMENT '用途',
+    `system_prompt` MEDIUMTEXT   COMMENT '系统提示词（运行时经参数化 build_agent 覆盖默认段）',
+    `mounts`        JSON         COMMENT '挂载快照 {skillIds:[],toolIds:[],mcpIds:[],kbIds:[],modelId:int}',
+    `status`        INT          NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `created_by`    BIGINT       NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_by`    BIGINT       COMMENT '修改人用户ID',
+    `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted`    INT          NOT NULL DEFAULT 0 COMMENT '0-正常 1-已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_oa_owner` (`created_by`, `is_deleted`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体编排-单智能体';
+
+CREATE TABLE IF NOT EXISTS `tb_orch_team` (
+    `id`              BIGINT       NOT NULL AUTO_INCREMENT,
+    `name`            VARCHAR(128) NOT NULL COMMENT '团队名称',
+    `purpose`         VARCHAR(500) COMMENT '用途',
+    `leader_agent_id` BIGINT       COMMENT '主智能体（队长）指向 tb_orch_agent 克隆体 id',
+    `members`         JSON         COMMENT '成员列表 [{agent_id,index,description}]（index 用于派生子 state 会话键）',
+    `config_json`     JSON         COMMENT '团队完整配置快照（成员克隆体配置 + 主标识），不回写单智能体表',
+    `status`          INT          NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `created_by`      BIGINT       NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_by`      BIGINT       COMMENT '修改人用户ID',
+    `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted`      INT          NOT NULL DEFAULT 0 COMMENT '0-正常 1-已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_ot_owner` (`created_by`, `is_deleted`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体编排-团队模式';
+
+CREATE TABLE IF NOT EXISTS `tb_orch_goal` (
+    `id`                BIGINT       NOT NULL AUTO_INCREMENT,
+    `name`              VARCHAR(128) NOT NULL COMMENT '目标名称',
+    `purpose`           VARCHAR(500) COMMENT '用途',
+    `executor_agent_id` BIGINT       COMMENT '执行者单智能体 id',
+    `verifier_agent_id` BIGINT       COMMENT '验证者单智能体 id（最多两个智能体）',
+    `config_json`       JSON         COMMENT '目标完整配置快照（执行者/验证者配置 + 标识），不回写单智能体表',
+    `status`            INT          NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `created_by`        BIGINT       NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `create_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_by`        BIGINT       COMMENT '修改人用户ID',
+    `update_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted`        INT          NOT NULL DEFAULT 0 COMMENT '0-正常 1-已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_og_owner` (`created_by`, `is_deleted`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体编排-目标模式';
+
+CREATE TABLE IF NOT EXISTS `tb_orch_sop` (
+    `id`          BIGINT       NOT NULL AUTO_INCREMENT,
+    `name`        VARCHAR(128) NOT NULL COMMENT 'SOP 名称',
+    `purpose`     VARCHAR(500) COMMENT '用途描述',
+    `steps`       JSON         COMMENT '流程节点数组 [{name,description,executor_agent_id,verifier_agent_id,max_attempts,executor_config,verifier_config}]',
+    `flow_order`  JSON         COMMENT '流程顺序（与 steps 数组序一致的显式快照）',
+    `config_json` JSON         COMMENT 'SOP 完整配置快照（各节点执行者/检查者配置 + 标识），不回写单智能体表',
+    `status`      INT          NOT NULL DEFAULT 1 COMMENT '0-停用 1-启用',
+    `created_by`  BIGINT       NOT NULL DEFAULT 0 COMMENT '创建人用户ID',
+    `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_by`  BIGINT       COMMENT '修改人用户ID',
+    `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `is_deleted`  INT          NOT NULL DEFAULT 0 COMMENT '0-正常 1-已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_os_owner` (`created_by`, `is_deleted`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体编排-SOP模式';
 
 -- =====================================================================================
 -- PART 8  种子：角色 / 管理员 / 根部门
@@ -949,6 +1024,49 @@ INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `so
 (@m_kb_graph, '图谱检索', 3, 'ai:kb:graph',     1),
 (@m_kb_eval, '知识评测', 3, 'ai:kb:eval',     1);
 
+-- 9.10 智能体编排：目录 + 四模式页面（单智能体/团队/目标/SOP）+ 每页按钮权限点。
+--     RBAC 只管页面准入（list）+ 新建入口（add）+ 授权入口（grant）三类全局按钮；
+--     行级查看/使用/编辑/删除/验证按钮全由 ACL 行内 actions 驱动（不落权限点）。
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
+(@d_agent, '智能体编排', 1, 'orch', 'BasicLayout', 'lucide:network', 5);
+SET @d_orch = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_agent AND `menu_name` = '智能体编排');
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
+(@d_orch, '单智能体', 2, 'single', 'views/wemirr/ai/agent/orch/single/index.vue', 'lucide:user-round', 1);
+SET @m_orch_single = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_orch AND `menu_name` = '单智能体');
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_orch_single, '单智能体列表', 3, 'agent:orch:single:list', 1),
+(@m_orch_single, '单智能体新增', 3, 'agent:orch:single:add',  2),
+(@m_orch_single, '单智能体授权', 3, 'agent:orch:single:grant', 3);
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
+(@d_orch, '团队模式', 2, 'team', 'views/wemirr/ai/agent/orch/team/index.vue', 'lucide:users', 2);
+SET @m_orch_team = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_orch AND `menu_name` = '团队模式');
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_orch_team, '团队模式列表', 3, 'agent:orch:team:list', 1),
+(@m_orch_team, '团队模式新增', 3, 'agent:orch:team:add',  2),
+(@m_orch_team, '团队模式授权', 3, 'agent:orch:team:grant', 3);
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
+(@d_orch, '目标模式', 2, 'goal', 'views/wemirr/ai/agent/orch/goal/index.vue', 'lucide:target', 3);
+SET @m_orch_goal = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_orch AND `menu_name` = '目标模式');
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_orch_goal, '目标模式列表', 3, 'agent:orch:goal:list', 1),
+(@m_orch_goal, '目标模式新增', 3, 'agent:orch:goal:add',  2),
+(@m_orch_goal, '目标模式授权', 3, 'agent:orch:goal:grant', 3);
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `path`, `component`, `icon`, `sort`) VALUES
+(@d_orch, 'SOP模式', 2, 'sop', 'views/wemirr/ai/agent/orch/sop/index.vue', 'lucide:list-checks', 4);
+SET @m_orch_sop = (SELECT `menu_id` FROM `tb_menu` WHERE `parent_id` = @d_orch AND `menu_name` = 'SOP模式');
+
+INSERT IGNORE INTO `tb_menu` (`parent_id`, `menu_name`, `menu_type`, `perm`, `sort`) VALUES
+(@m_orch_sop, 'SOP模式列表', 3, 'agent:orch:sop:list', 1),
+(@m_orch_sop, 'SOP模式新增', 3, 'agent:orch:sop:add',  2),
+(@m_orch_sop, 'SOP模式授权', 3, 'agent:orch:sop:grant', 3);
+
 -- =====================================================================================
 -- PART 10  种子：角色授权
 -- =====================================================================================
@@ -970,10 +1088,10 @@ WHERE r.`role_code` = 'USER'
 -- =====================================================================================
 -- PART 11  执行后自查（结果不符合就是中途有语句没跑完，检查客户端有没有吞掉报错）
 -- =====================================================================================
--- 表 30 张；菜单 119 行 = 目录 7 + 页面 27 + 权限点 85；ADMIN 授权应覆盖这 119 行
-SELECT '表数量（应为 30）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
-SELECT '菜单行数（应为 119）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
-SELECT '菜单分层（应为 1:7 / 2:27 / 3:85）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
+-- 表 34 张（含智能体编排 4 张）；菜单 124 行 = 目录 8 + 页面 28 + 权限点 88；ADMIN 授权应覆盖这 124 行
+SELECT '表数量（应为 34）' AS `自查项`, COUNT(*) AS `实际` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();
+SELECT '菜单行数（应为 124）' AS `自查项`, COUNT(*) AS `实际` FROM `tb_menu`;
+SELECT '菜单分层（应为 1:8 / 2:28 / 3:88）' AS `自查项`, `menu_type` AS `层级`, COUNT(*) AS `实际`
 FROM `tb_menu` GROUP BY `menu_type` ORDER BY `menu_type`;
-SELECT 'ADMIN 授权行数（应为 119）' AS `自查项`, COUNT(*) AS `实际`
+SELECT 'ADMIN 授权行数（应为 124）' AS `自查项`, COUNT(*) AS `实际`
 FROM `tb_role_menu` rm JOIN `tb_role` r ON r.`role_id` = rm.`role_id` WHERE r.`role_code` = 'ADMIN';

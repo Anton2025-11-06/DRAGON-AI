@@ -44,6 +44,11 @@ GRANT_PERMISSIONS: dict[str, str] = {
     "tool": "workflow:tool:grant",
     "skill": "workflow:skill:grant",
     "mcp": "workflow:mcp:grant",
+    # 智能体编排四模式：授权入口权限点（页面准入靠 RBAC，逐条能否转授靠 ACL share）
+    "orch_agent": "agent:orch:single:grant",
+    "orch_team": "agent:orch:team:grant",
+    "orch_goal": "agent:orch:goal:grant",
+    "orch_sop": "agent:orch:sop:grant",
 }
 
 # 单实例授权行上限：护栏而非业务参数（防脚本或误操作一次提交上万行），
