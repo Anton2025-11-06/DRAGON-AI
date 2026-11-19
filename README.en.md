@@ -8,6 +8,8 @@
 
 ---
 
+![DRAGON-AI Architecture](docs/项目总体架构.drawio.png)
+
 ## 1. Core capabilities
 
 | Module | Problem it solves | Representative features |
