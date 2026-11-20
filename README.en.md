@@ -2,7 +2,7 @@
 
 > **Model gateway, Knowledge RAG, Knowledge Graph, Workflow orchestration, a Deep-Exploration agent (Harness) and enterprise RBAC in one workspace** — your data, models and permissions stay under your control.
 
-> Online demo: `120.77.58.245:12345` (viewer / viewer) · [中文](README.md) / English
+> Online demo: `47.112.99.147:12345` (viewer / viewer) · [中文](README.md) / English
 
 > This README is kept in sync with the code: **everything marked "Done" actually runs; treat "Planned" as unavailable**.
 
