@@ -82,9 +82,11 @@ const canApply = computed(
   <a-card class="model-card" size="small" hoverable :bordered="true">
     <!-- 头部：图标 + 名称 + 状态标签 -->
     <div class="model-card__header">
-      <span class="model-card__icon">{{
-        categoryEmoji[model.category] || '🤖'
-      }}</span>
+      <span class="model-card__mark">
+        <span class="model-card__icon">{{
+          categoryEmoji[model.category] || '🤖'
+        }}</span>
+      </span>
       <a-tooltip :title="model.name">
         <span class="model-card__name">{{ model.name }}</span>
       </a-tooltip>
@@ -175,23 +177,46 @@ const canApply = computed(
   height: 100%;
   display: flex;
   flex-direction: column;
+  border-radius: 16px;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.model-card:hover {
+  border-color: #c7c9f8;
+  box-shadow: 0 12px 28px rgb(79 70 229 / 10%);
+  transform: translateY(-2px);
 }
 
 .model-card__header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
-.model-card__icon {
-  font-size: 20px;
+.model-card__mark {
+  display: flex;
   flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgb(79 70 229 / 12%), rgb(124 58 237 / 12%));
+}
+
+.model-card__icon {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .model-card__name {
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -208,8 +233,11 @@ const canApply = computed(
 }
 
 .model-card__body {
-  margin-top: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
   flex: 1;
+  border-radius: 12px;
+  background: var(--hover-bg-color, #f7f8fb);
 }
 
 .model-card__row {

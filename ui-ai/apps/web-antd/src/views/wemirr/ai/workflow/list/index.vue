@@ -360,19 +360,6 @@ function handleTemplateSaved() {
 </template>
 
 <style lang="less" scoped>
-@keyframes pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgb(24 144 255 / 20%);
-    transform: scale(1);
-  }
-
-  50% {
-    box-shadow: 0 0 0 15px rgb(24 144 255 / 0%);
-    transform: scale(1.02);
-  }
-}
-
 .workflow-list-page {
   :deep(.fs-crud-container) {
     display: flex;
@@ -430,25 +417,21 @@ function handleTemplateSaved() {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 120px;
-    height: 120px;
-    margin-bottom: 24px;
-    font-size: 56px;
-    color: #1890ff;
-    background: linear-gradient(
-      135deg,
-      rgb(24 144 255 / 10%) 0%,
-      rgb(114 46 209 / 10%) 100%
-    );
-    border-radius: 50%;
-    animation: pulse 2s ease-in-out infinite;
+    width: 72px;
+    height: 72px;
+    margin-bottom: 18px;
+    font-size: 30px;
+    color: #4f46e5;
+    background: linear-gradient(145deg, rgb(79 70 229 / 12%), rgb(124 58 237 / 14%));
+    border-radius: 22px;
   }
 
   .empty-title {
     margin: 0 0 8px;
     font-size: 20px;
-    font-weight: 600;
-    color: #333;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--text-color-1, #1f2329);
   }
 
   .empty-desc {

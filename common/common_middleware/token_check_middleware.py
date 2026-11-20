@@ -13,19 +13,28 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
     """
     Token 鉴权中间件：
     1. 白名单路径直接放行（登录/注册/接口文档）
+    1.1 白名单只按「完整路径 / 前缀」匹配，不做宽松的后缀匹配（详见下方注释）
     2. 优先校验 JWT 格式 token：解析签名/有效期，并以 jti 关联 Redis 中的
        登录态（login_{jti}），支持退出登录后强制失效
     3. 兼容历史 b32hex 格式 token（直接以 token 原文关联 Redis login_{token}）
     4. 校验通过后将 token 与登录用户载荷写入 request.state，供业务/权限层复用
     """
-    WHITE_LIST_SUFFIX = [
-        # ---- 登录服务侧下游路径（网关转发后为 /login /register /refresh）----
-        "/login",
-        "/register",
+    # 匿名入口按完整路径精确匹配，不能用 endswith 的后缀匹配：业务路径的最后一段完全
+    # 可能撞上同名入口（已踩坑：DELETE /api/system/rate-limit/configs/login 以 /login 结尾
+    # 被当成登录接口跳过鉴权，网关不注入 X-User-Token，下游取不到登录态返回 403「未登录」，
+    # 前端被踢回登录页，且该删除请求实际并未执行）
+    WHITE_LIST_EXACT = [
+        # ---- 登录/注册：网关侧完整路径（下游登录服务对应 /login /register）----
+        "/api/login/login",
+        "/api/login/register",
+        # ---- 接口文档（网关自身，非 /api/**）----
         "/docs",
         "/redoc",
         "/openapi.json",
-        # ---- 工作流执行事件订阅（SSE/EventSource 场景难携带登录头；executionId 为 UUID 熵足够）----
+    ]
+    # 后缀匹配只留给「中间段是动态 id」的 SSE 订阅口：EventSource 难携带登录头，
+    # executionId/turnId 为 UUID 熵足够
+    WHITE_LIST_SUFFIX = [
         "/subscribe",
     ]
     # 前缀白名单：服务间内部接口（网关 /internal/...）与外部模型调用（/api/model，api-key 鉴权）不校验用户登录态
@@ -44,7 +53,10 @@ class TokenCheckMiddleware(BaseHTTPMiddleware):
         # 统一鉴权（gateway_router 校验 Redis 配置 + QPS 限流，无效 key 返回 401/403）
         if path.startswith("/api/workflow/") and request.headers.get("X-Workflow-Token"):
             return await call_next(request)
-        # 匹配任意白名单后缀直接放行
+        # 匿名入口按完整路径精确匹配后放行
+        if path in self.WHITE_LIST_EXACT:
+            return await call_next(request)
+        # 匹配任意白名单后缀（仅动态 id 的 SSE 订阅口）直接放行
         if any(path.endswith(suffix) for suffix in self.WHITE_LIST_SUFFIX):
             return await call_next(request)
         # 匹配任意白名单前缀（内部接口）直接放行

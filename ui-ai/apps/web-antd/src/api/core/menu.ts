@@ -32,9 +32,16 @@ function resolveFullPath(parentPath: string, path?: string): string {
 /**
  * 将后端菜单树转换为 vben 路由表
  * - 过滤按钮节点（menu_type=3，权限点不参与路由）
- * - 目录（menu_type=1）使用 BasicLayout 布局
+ * - 目录（menu_type=1）只在顶级挂 BasicLayout 占位（顶级会被 generateAccessible 剥掉，
+ *   真正生效的是 Root 那条布局路由）；中间层目录不挂组件
  * - 菜单（menu_type=2）component 形如 views/wemirr/xxx/index.vue
  * - 子菜单 path 为相对值时自动拼接父级目录 path
+ *
+ * 中间层目录必须留空 component：vben 只在顶级路由上删 component（见
+ * packages/effects/access/src/accessible.ts 里「包含子路由则移除 component，以免出现多层
+ * BasicLayout」那段），中间层不会。若给二级目录也挂 BasicLayout，就会在内容区里再渲染一整套
+ * 布局（内层侧栏 + 页头 + 标签栏），页面被顶到右下角、与左侧菜单之间空出一条大缝隙。
+ * 留空后 vue-router 跳过无组件的 matched 记录，子页面直接渲染到外层内容区。
  */
 export function transformMenusToRoutes(
   menus: BackendMenu[],
@@ -46,20 +53,24 @@ export function transformMenusToRoutes(
     if (menu.menu_type === 3) continue;
     // 完整路径：优先取菜单 path（相对值拼父级），否则回退 /菜单名
     const fullPath = resolveFullPath(parentPath, menu.path) || `/${menu.menu_name}`;
-    const route: RouteRecordStringComponent = {
+    // 组件口径：页面菜单取 views/... 路径；顶级目录挂 BasicLayout 占位（注册进 Root 前会被
+    // generateAccessible 删掉）；中间层目录不给组件，与顶级目录删掉 component 后的形态一致
+    const component =
+      menu.menu_type === 2 && menu.component
+        ? menu.component
+        : parentPath
+          ? ''
+          : 'BasicLayout';
+    const route = {
       name: `Menu${menu.menu_id}`,
       path: fullPath,
-      component: 'BasicLayout',
+      ...(component ? { component } : {}),
       meta: {
         title: menu.menu_name,
         order: menu.sort,
         ...(menu.icon ? { icon: menu.icon } : {}),
       },
-    };
-    if (menu.menu_type === 2 && menu.component) {
-      // 页面组件：形如 views/wemirr/xxx/index.vue
-      route.component = menu.component;
-    }
+    } as RouteRecordStringComponent;
     if (menu.children?.length) {
       route.children = transformMenusToRoutes(menu.children, fullPath);
     }

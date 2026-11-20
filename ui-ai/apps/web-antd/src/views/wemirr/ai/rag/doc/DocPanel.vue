@@ -858,6 +858,9 @@ const rowSelection = computed<any>(() => ({
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
 
   /* 工具栏（标题 + 上传/构建那排按钮）不动，分页后的文档在这块里上下滚；
      min-height: 0 同左栏：没这一条 flex 项不收缩，整张表会把卡片顶高到看不全 */

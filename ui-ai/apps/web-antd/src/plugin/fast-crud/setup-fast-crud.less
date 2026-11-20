@@ -61,7 +61,8 @@
 
 .page-layout-card {
   .fs-page-header {
-    background-color: #fff;
+    background-color: var(--component-background, #fff);
+    border-radius: 16px;
   }
 }
 
@@ -72,9 +73,11 @@
 }
 
 .fs-layout-card > .box > .inner > .header {
-  margin: 7px 7px 0;
+  margin: 12px 12px 0;
+  border-radius: 16px 16px 0 0;
 }
 
 .fs-layout-card > .box > .inner > .body {
-  margin: 7px 7px 0;
+  margin: 0 12px 12px;
+  border-radius: 0 0 16px 16px;
 }

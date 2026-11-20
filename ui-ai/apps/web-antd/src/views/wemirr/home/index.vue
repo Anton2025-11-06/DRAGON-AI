@@ -1618,10 +1618,11 @@ export default defineComponent({
   >
     <!-- 左侧：会话列表 -->
     <aside class="hermes-side">
-      <a-button block ghost size="small" type="primary" @click="newSession">
+      <a-button block type="primary" class="hermes-new" @click="newSession">
         <template #icon><PlusOutlined /></template>
         新建探索
       </a-button>
+      <div class="hermes-side-label">最近会话</div>
       <div class="hermes-side-list">
         <div v-if="sessionLoading" class="hermes-side-empty">加载中…</div>
         <template v-else>
@@ -1655,15 +1656,15 @@ export default defineComponent({
       </div>
     </aside>
 
-    <!-- 中部：深度探索 Harnes智能体 对话框 -->
+    <!-- 中部：深度探索 Harness 智能体对话框 -->
     <section class="hermes-chat">
       <header class="hermes-chat-header">
         <div class="hermes-logo">
           <RobotOutlined />
         </div>
         <div class="hermes-title">
-          <h2>深度探索 Harnes智能体</h2>
-          <p>连接云端沙箱运行时，描述你的问题，让 AI 帮你执行</p>
+          <h2>深度探索</h2>
+          <p>Harness 智能体 · 描述问题，让 AI 在云端沙箱里执行</p>
         </div>
         <a-tooltip v-if="sandboxCollapsed" title="展开沙箱工作区">
           <a-button size="small" @click="toggleSandbox">
@@ -1884,11 +1885,14 @@ export default defineComponent({
           <div v-if="msg.role === 'user'" class="hermes-avatar user">我</div>
         </div>
         <div v-if="messages.length === 0" class="hermes-empty">
-          <RobotOutlined class="hermes-empty-icon" />
-          <p>你好，我是 Harnes智能体。可以让我分析数据、处理文件、组织任务…</p>
-          <p class="hermes-empty-tip">
+          <div class="hermes-empty-mark">
+            <RobotOutlined />
+          </div>
+          <h3>今天想探索什么</h3>
+          <p>我是 Harness 智能体。可以分析数据、处理文件、组织任务。</p>
+          <div class="hermes-empty-tip">
             试着说：帮我统计 sample_data.csv 里的访问量趋势
-          </p>
+          </div>
         </div>
       </div>
 
@@ -2316,9 +2320,9 @@ export default defineComponent({
 <style lang="less" scoped>
 .hermes-page {
   display: flex;
-  gap: 12px;
-  height: calc(100vh - 140px);
-  padding: 12px;
+  gap: 14px;
+  height: calc(100vh - 132px);
+  padding: 16px;
 }
 
 /* ==================== 输出物文件卡片（功能2） ==================== */
@@ -2403,29 +2407,33 @@ export default defineComponent({
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-radius: 12px;
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
   background: var(--layout-header-bg-color, #fff);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
   overflow: hidden;
 
   .hermes-chat-header {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 14px 16px;
+    padding: 16px 18px 14px;
     border-bottom: 1px solid var(--border-color, #f0f0f0);
-    background: linear-gradient(120deg, #f0f5ff 0%, #fff 60%);
+    background:
+      radial-gradient(420px 120px at 0% 0%, rgb(99 102 241 / 14%), transparent 70%),
+      var(--layout-header-bg-color, #fff);
 
     .hermes-logo {
-      width: 40px;
-      height: 40px;
+      width: 42px;
+      height: 42px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 10px;
+      border-radius: 14px;
       color: #fff;
       font-size: 20px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      background: linear-gradient(145deg, #4f46e5, #7c3aed);
+      box-shadow: 0 8px 18px rgb(79 70 229 / 28%);
     }
 
     .hermes-title {
@@ -2433,11 +2441,13 @@ export default defineComponent({
       min-width: 0;
       h2 {
         margin: 0;
-        font-size: 16px;
+        font-size: 17px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
         color: var(--text-color-1, #1f2329);
       }
       p {
-        margin: 2px 0 0;
+        margin: 3px 0 0;
         font-size: 12px;
         color: var(--text-color-3, #8a9099);
       }
@@ -2449,12 +2459,12 @@ export default defineComponent({
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    margin: 10px 16px 0;
-    padding: 8px 12px;
-    min-height: 34px;
-    border: 1px dashed var(--border-color-2, #e5e7eb);
-    border-radius: 10px;
-    background: var(--hover-bg-color, #f8fafc);
+    margin: 12px 18px 0;
+    padding: 0;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
 
     .hermes-mounted-label {
       font-size: 12px;
@@ -2483,9 +2493,10 @@ export default defineComponent({
         flex-direction: row-reverse;
 
         .hermes-bubble {
-          background: var(--primary-color, #1677ff);
+          background: linear-gradient(180deg, #4f46e5, #4338ca);
           color: #fff;
-          border-radius: 10px 2px 10px 10px;
+          border-radius: 16px 16px 6px 16px;
+          box-shadow: 0 8px 18px rgb(67 56 202 / 18%);
         }
 
         // 用户一侧靠右：文本 + 附件标签竖排，整块限宽
@@ -2511,8 +2522,9 @@ export default defineComponent({
 
       &.is-ai {
         .hermes-bubble {
-          background: var(--hover-color, #f5f7fa);
-          border-radius: 2px 10px 10px 10px;
+          background: var(--hover-bg-color, #f7f8fb);
+          border: 1px solid var(--border-color, #eef0f4);
+          border-radius: 6px 16px 16px 16px;
         }
       }
 
@@ -2528,7 +2540,7 @@ export default defineComponent({
 
         &.ai {
           color: #fff;
-          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          background: linear-gradient(145deg, #4f46e5, #7c3aed);
         }
         &.user {
           color: #fff;
@@ -2539,8 +2551,8 @@ export default defineComponent({
 
       .hermes-bubble {
         max-width: 78%;
-        padding: 8px 12px;
-        font-size: 13px;
+        padding: 10px 14px;
+        font-size: 14px;
         line-height: 1.7;
         word-break: break-word;
 
@@ -2570,98 +2582,113 @@ export default defineComponent({
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      padding: 24px;
+      text-align: center;
       color: var(--text-color-3, #8a9099);
 
-      .hermes-empty-icon {
-        font-size: 44px;
-        color: #a5b4fc;
+      .hermes-empty-mark {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 64px;
+        height: 64px;
+        border-radius: 20px;
+        color: #fff;
+        font-size: 28px;
+        background: linear-gradient(145deg, #4f46e5, #7c3aed);
+        box-shadow: 0 16px 32px rgb(79 70 229 / 24%);
       }
+
+      h3 {
+        margin: 16px 0 0;
+        font-size: 20px;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+        color: var(--text-color-1, #1f2329);
+      }
+
       p {
+        max-width: 360px;
         margin: 8px 0 0;
         font-size: 13px;
+        line-height: 1.6;
       }
+
       .hermes-empty-tip {
+        margin-top: 16px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: var(--hover-bg-color, #f4f6fb);
         font-size: 12px;
-        opacity: 0.75;
+        color: var(--text-color-2, #4e5969);
       }
     }
   }
 
   .hermes-input {
-    padding: 10px 16px 14px;
-    border-top: 1px solid var(--border-color, #f0f0f0);
+    margin: 4px 16px 16px;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--border-color, #e7e9f0);
+    border-radius: 16px;
+    background: var(--hover-bg-color, #f7f8fb);
 
     .hermes-input-tools {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 8px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
 
       .hermes-add-btn {
         display: inline-flex;
         align-items: center;
         gap: 4px;
         height: 28px;
-        padding: 0 12px;
+        padding: 0 10px;
         font-size: 12px;
         line-height: 1;
-        border-radius: 8px;
-        border: 1px solid transparent;
+        color: var(--text-color-2, #3c4254);
+        background: var(--layout-header-bg-color, #fff);
+        border: 1px solid var(--border-color, #e6e8ef);
+        border-radius: 999px;
         cursor: pointer;
         transition:
-          transform 0.15s ease,
-          box-shadow 0.15s ease,
-          filter 0.15s ease;
+          border-color 0.15s ease,
+          color 0.15s ease,
+          box-shadow 0.15s ease;
 
         .anticon {
           font-size: 12px;
         }
 
         &:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
-          filter: brightness(1.03);
-        }
-
-        &:active {
-          transform: translateY(0);
+          border-color: #c7c9f8;
+          color: #4338ca;
+          box-shadow: 0 4px 12px rgb(79 70 229 / 8%);
         }
 
         &.is-agent {
-          color: #6366f1;
-          background: rgba(99, 102, 241, 0.1);
-          border-color: rgba(99, 102, 241, 0.32);
+          color: #4f46e5;
         }
 
         &.is-skill {
-          color: #1677ff;
-          background: rgba(22, 119, 255, 0.1);
-          border-color: rgba(22, 119, 255, 0.32);
+          color: #2563eb;
         }
 
         &.is-mcp {
-          color: #fa8c16;
-          background: rgba(250, 140, 22, 0.1);
-          border-color: rgba(250, 140, 22, 0.32);
+          color: #c2410c;
         }
 
         &.is-tool {
-          color: #52c41a;
-          background: rgba(82, 196, 26, 0.1);
-          border-color: rgba(82, 196, 26, 0.32);
+          color: #15803d;
         }
 
         &.is-kb {
-          color: #722ed1;
-          background: rgba(114, 46, 209, 0.1);
-          border-color: rgba(114, 46, 209, 0.32);
+          color: #6d28d9;
         }
 
         &.is-attach {
-          color: #13c2c2;
-          background: rgba(19, 194, 194, 0.1);
-          border-color: rgba(19, 194, 194, 0.32);
+          color: #0f766e;
         }
       }
 
@@ -2742,14 +2769,22 @@ export default defineComponent({
       gap: 10px;
       align-items: flex-end;
 
-      textarea {
+      :deep(textarea.ant-input) {
         resize: none;
-        font-size: 13px;
+        padding: 6px 2px;
+        font-size: 14px;
+        background: transparent;
+        border: none;
+        box-shadow: none;
       }
 
       .hermes-send {
-        height: auto;
-        padding: 8px 16px;
+        height: 36px;
+        padding: 0 16px;
+        border: none;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #4f46e5, #4338ca);
+        box-shadow: 0 8px 16px rgb(67 56 202 / 22%);
       }
     }
   }
@@ -2761,18 +2796,19 @@ export default defineComponent({
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-radius: 12px;
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
   background: var(--layout-header-bg-color, #fff);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
   overflow: hidden;
 
   .hermes-sandbox-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 14px;
+    padding: 14px 16px;
     border-bottom: 1px solid var(--border-color, #f0f0f0);
-    background: linear-gradient(120deg, #f6f8fc 0%, #fff 60%);
+    background: var(--layout-header-bg-color, #fff);
 
     .hermes-sandbox-title {
       font-size: 14px;
@@ -3004,15 +3040,32 @@ export default defineComponent({
 
 // ==================== 会话侧栏 ====================
 .hermes-side {
-  flex: 0 0 160px;
+  flex: 0 0 220px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 8px;
-  border-radius: 12px;
+  gap: 10px;
+  padding: 14px 12px;
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
   background: var(--layout-header-bg-color, #fff);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
   overflow: hidden;
+
+  .hermes-new {
+    height: 36px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #4f46e5, #4338ca);
+    box-shadow: 0 8px 16px rgb(67 56 202 / 22%);
+  }
+
+  .hermes-side-label {
+    padding: 2px 8px 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-color-3, #8a9099);
+  }
 
   .hermes-side-list {
     flex: 1;
@@ -3037,17 +3090,18 @@ export default defineComponent({
       }
     }
     &.active {
-      background: rgba(22, 119, 255, 0.08);
+      background: rgb(79 70 229 / 8%);
 
       .hermes-side-title {
-        color: var(--primary-color, #1677ff);
+        color: #4338ca;
+        font-weight: 600;
       }
     }
 
     .hermes-side-title {
       flex: 1;
       min-width: 0;
-      font-size: 12px;
+      font-size: 13px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;

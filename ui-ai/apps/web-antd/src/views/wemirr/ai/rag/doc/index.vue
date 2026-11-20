@@ -50,7 +50,7 @@ function onSelectKb(kb: KnowledgeBaseResp | null) {
   height: calc(
     100vh - var(--vben-header-height, 90px) - var(--vben-footer-height, 32px)
   );
-  padding: 8px;
+  padding: 16px;
   overflow: hidden;
 }
 

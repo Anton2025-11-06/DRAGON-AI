@@ -375,6 +375,9 @@ onMounted(load);
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
 
   :deep(.ant-card-body) {
     display: flex;
@@ -418,12 +421,14 @@ onMounted(load);
   cursor: pointer;
   background: var(--component-background, #fff);
   border: 1px solid var(--border-color, #e8e8e8);
-  border-radius: 6px;
-  transition: all 0.3s;
+  border-radius: 12px;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
 
   &:hover {
-    border-color: hsl(var(--primary));
-    box-shadow: 0 2px 8px rgb(0 0 0 / 10%);
+    border-color: #c7c9f8;
+    box-shadow: 0 8px 18px rgb(79 70 229 / 8%);
   }
 
   &.selected {

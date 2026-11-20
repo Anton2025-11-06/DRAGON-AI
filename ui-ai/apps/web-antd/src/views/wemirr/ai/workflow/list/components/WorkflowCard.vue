@@ -212,14 +212,19 @@ function formatTime(time: string) {
   display: flex;
   flex-direction: column;
   padding: 16px;
-  background: #fff;
-  border: 1px solid #f0f0f0;
-  border-radius: 8px;
-  transition: all 0.3s;
+  background: var(--layout-header-bg-color, #fff);
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 4%);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
 
   &:hover {
-    border-color: #1890ff;
-    box-shadow: 0 4px 12px rgb(0 0 0 / 8%);
+    border-color: #c7c9f8;
+    box-shadow: 0 14px 32px rgb(79 70 229 / 10%);
+    transform: translateY(-2px);
   }
 
   .card-header {
@@ -236,13 +241,9 @@ function formatTime(time: string) {
       width: 40px;
       height: 40px;
       font-size: 20px;
-      color: #1890ff;
-      background: linear-gradient(
-        135deg,
-        rgb(24 144 255 / 10%) 0%,
-        rgb(114 46 209 / 10%) 100%
-      );
-      border-radius: 8px;
+      color: #4f46e5;
+      background: linear-gradient(145deg, rgb(79 70 229 / 12%), rgb(124 58 237 / 14%));
+      border-radius: 12px;
     }
 
     .card-title-wrapper {
@@ -258,7 +259,8 @@ function formatTime(time: string) {
         overflow: hidden;
         font-size: 16px;
         font-weight: 600;
-        color: #333;
+        color: var(--text-color-1, #1f2329);
+        letter-spacing: -0.01em;
         text-overflow: ellipsis;
         white-space: nowrap;
       }

@@ -155,11 +155,14 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> Sandbox
     #
     # 去重复挂：按本地技能目录内容签名（见 _dir_signature）记账在 workspace 对象上
     # ——进程级 manager 单例让 workspace 对象跨轮存活，这份签名缓存随之存活。签名
-    # 未变则整段跳过：既省掉每轮 delete+add_skill 的沙箱 round-trip（旧写法每轮无
-    # 条件重拷），又杜绝「删了旧副本、新副本又没拷进去」导致的本轮技能丢失。签名
-    # 只在成功种入后才记账，失败下轮自动重试；内容变过（zip 被替换）签名随之变，
-    # 仍走删+加刷新——冷启动/被逐出后缓存为空，退回每轮重种（与旧行为一致，安全）。
-    # 单个技能种入失败只跳过并记 warning，不炸整轮对话（同 mount_loader 口径）。
+    # 未变**且技能目录仍在沙箱中**才跳过：既省掉每轮 delete+add_skill 的沙箱 round-trip
+    # （旧写法每轮无条件重拷），又杜绝「删了旧副本、新副本又没拷进去」导致的本轮技能
+    # 丢失。签名只在成功种入后才记账，失败下轮自动重试；内容变过（zip 被替换）签名随之
+    # 变，仍走删+加刷新——冷启动/被逐出后缓存为空，退回每轮重种（与旧行为一致，安全）。
+    # 关键：光比签名会漏判「技能已添加但目录被用户从工作区删了」——签名记账只反映本地
+    # 内容与上次成功种入的事实，不知道沙箱里目录已被删。故跳过前必须回查沙箱里目标目录
+    # 是否还在；已被删则视为未种入，走删+加重新注入。回查是一次 file_exists round-trip，
+    # 远比无条件 delete+add_skill 省。单个技能种入失败只跳过并记 warning，不炸整轮对话。
     backend = workspace.get_backend()
     skills_root = workspace._skills_dir  # 框架属性：{workdir}/skills
     partition = backend.join_path(skills_root, AGENT_ID)
@@ -171,12 +174,15 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> Sandbox
         try:
             dir_name = os.path.basename(os.path.abspath(skill_path))
             signature = _dir_signature(skill_path)
-            if seeded.get(dir_name) == signature:
-                # 内容未变且本 workspace 上一轮已成功种入 → 不删不拷，直接跳过
+            target = backend.join_path(partition, dir_name)
+            exists = await backend.file_exists(target)
+            if seeded.get(dir_name) == signature and exists:
+                # 内容未变、上一轮已成功种入且沙箱里目录仍在 → 不删不拷，直接跳过
                 continue
-            stale = backend.join_path(partition, dir_name)
-            if await backend.file_exists(stale):
-                await backend.delete_path(stale)
+            # 签名变（zip 被替换）、本轮首次、或沙箱里目录已被删（用户手动删除）——
+            # 都需重新注入；add_skill 遇同名目录会 raise，故仅在被删残留之外无需先删。
+            if exists:
+                await backend.delete_path(target)
             await workspace.add_skill(skill_path, agent_id=AGENT_ID)
             seeded[dir_name] = signature  # 仅成功种入后记账，失败下轮自动重试
         except Exception as e:  # noqa: BLE001  单技能失败不影响本轮其它能力

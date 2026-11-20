@@ -209,6 +209,12 @@ onMounted(async () => {
     <div class="model-plaza-layout">
       <!-- 右侧：模型卡片网格 -->
       <section class="model-panel">
+        <header class="model-plaza-hero">
+          <div>
+            <h2>模型广场</h2>
+            <p>浏览可调用的模型，申请使用，或管理已经接入的模型。</p>
+          </div>
+        </header>
         <div class="model-panel__toolbar">
           <a-input-search
             v-model:value="query.name"
@@ -371,7 +377,7 @@ onMounted(async () => {
 
 <style scoped>
 .model-plaza-page {
-  padding: 12px;
+  padding: 16px;
 }
 
 .model-plaza-layout {
@@ -380,21 +386,40 @@ onMounted(async () => {
   align-items: flex-start;
 }
 
+.model-plaza-hero {
+  margin-bottom: 14px;
+}
+
+.model-plaza-hero h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text-color-1, #1f2329);
+}
+
+.model-plaza-hero p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-color-3, #8a9099);
+}
+
 /* ==================== 模型面板 ==================== */
 .model-panel {
   flex: 1;
   min-width: 0;
-  background: #fff;
-  border-radius: 6px;
-  border: 1px solid rgba(5, 5, 5, 0.06);
-  padding: 12px;
+  padding: 18px;
+  background: var(--layout-header-bg-color, #fff);
+  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
 }
 
 .model-panel__toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .model-panel__pagination {
