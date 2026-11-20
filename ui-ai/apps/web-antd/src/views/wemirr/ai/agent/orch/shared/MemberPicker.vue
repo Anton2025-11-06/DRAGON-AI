@@ -142,9 +142,8 @@ async function onCloneChange(id: number | undefined) {
               :options="props.agentOpts"
               allow-clear
               option-filter-prop="label"
-              placeholder="从单智能体克隆，或留空自定义"
+              placeholder="留空则自定义角色"
               show-search
-              style="width: 100%"
               :value="local.sourceAgentId"
               @update:value="onCloneChange"
             />
@@ -155,7 +154,7 @@ async function onCloneChange(id: number | undefined) {
             <a-input
               v-model:value="local.name"
               :disabled="props.readonly"
-              placeholder="团队内需唯一（队长据此分派）"
+              placeholder="输入角色名称"
             />
           </a-form-item>
         </a-col>
@@ -163,102 +162,139 @@ async function onCloneChange(id: number | undefined) {
           <a-form-item label="职责描述">
             <a-textarea
               v-model:value="local.description"
-              :autosize="{ minRows: 2, maxRows: 4 }"
+              :auto-size="{ minRows: 2, maxRows: 3 }"
               :disabled="props.readonly"
-              placeholder="擅长什么、何时派给它、返回什么（供队长分派参考）"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="24">
-          <a-form-item label="系统提示词">
-            <PromptEditor
-              v-model="local.systemPrompt"
-              :disabled="props.readonly"
-              :height="160"
-              placeholder="留空则沿用平台默认基础段"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="8">
-          <a-form-item label="模型">
-            <a-select
-              v-model:value="local.modelId"
-              :disabled="props.readonly"
-              :options="modelOpts"
-              allow-clear
-              option-filter-prop="label"
-              placeholder="运行模型"
-              show-search
-              style="width: 100%"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="8">
-          <a-form-item label="技能">
-            <a-select
-              v-model:value="local.skillIds"
-              :disabled="props.readonly"
-              :max-tag-count="1"
-              :options="skillOpts"
-              allow-clear
-              mode="multiple"
-              option-filter-prop="label"
-              style="width: 100%"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="8">
-          <a-form-item label="工具">
-            <a-select
-              v-model:value="local.toolIds"
-              :disabled="props.readonly"
-              :max-tag-count="1"
-              :options="toolOpts"
-              allow-clear
-              mode="multiple"
-              option-filter-prop="label"
-              style="width: 100%"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="12">
-          <a-form-item label="MCP">
-            <a-select
-              v-model:value="local.mcpIds"
-              :disabled="props.readonly"
-              :max-tag-count="1"
-              :options="mcpOpts"
-              allow-clear
-              mode="multiple"
-              option-filter-prop="label"
-              style="width: 100%"
-            />
-          </a-form-item>
-        </a-col>
-        <a-col :span="12">
-          <a-form-item label="知识库">
-            <a-select
-              v-model:value="local.kbIds"
-              :disabled="props.readonly"
-              :max-tag-count="1"
-              :options="kbOpts"
-              allow-clear
-              mode="multiple"
-              option-filter-prop="label"
-              style="width: 100%"
+              placeholder="擅长什么、何时派给它、返回什么"
             />
           </a-form-item>
         </a-col>
       </a-row>
+
+      <div class="member-config">
+        <div class="member-config-heading">
+          <span>角色指令</span>
+          <small>留空则沿用平台默认基础段</small>
+        </div>
+        <a-form-item label="系统提示词">
+          <PromptEditor
+            v-model="local.systemPrompt"
+            :disabled="props.readonly"
+            :height="128"
+            placeholder="说明该角色的任务、边界和输出要求"
+          />
+        </a-form-item>
+
+        <div class="member-config-heading is-mounts">
+          <span>运行配置</span>
+          <small>按需选择模型与可调用资源</small>
+        </div>
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <a-form-item label="模型">
+              <a-select
+                v-model:value="local.modelId"
+                :disabled="props.readonly"
+                :options="modelOpts"
+                allow-clear
+                option-filter-prop="label"
+                placeholder="选择运行模型"
+                show-search
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="技能">
+              <a-select
+                v-model:value="local.skillIds"
+                :disabled="props.readonly"
+                :max-tag-count="1"
+                :options="skillOpts"
+                allow-clear
+                mode="multiple"
+                option-filter-prop="label"
+                placeholder="选择技能"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="工具">
+              <a-select
+                v-model:value="local.toolIds"
+                :disabled="props.readonly"
+                :max-tag-count="1"
+                :options="toolOpts"
+                allow-clear
+                mode="multiple"
+                option-filter-prop="label"
+                placeholder="选择工具"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="MCP">
+              <a-select
+                v-model:value="local.mcpIds"
+                :disabled="props.readonly"
+                :max-tag-count="1"
+                :options="mcpOpts"
+                allow-clear
+                mode="multiple"
+                option-filter-prop="label"
+                placeholder="选择 MCP 连接"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="知识库">
+              <a-select
+                v-model:value="local.kbIds"
+                :disabled="props.readonly"
+                :max-tag-count="1"
+                :options="kbOpts"
+                allow-clear
+                mode="multiple"
+                option-filter-prop="label"
+                placeholder="选择知识库"
+              />
+            </a-form-item>
+          </a-col>
+        </a-row>
+      </div>
     </a-form>
   </div>
 </template>
 
 <style scoped lang="less">
 .member-picker {
-  padding: 12px;
-  margin-bottom: 12px;
-  border: 1px solid #f0f0f0;
-  border-radius: 8px;
+  min-width: 0;
+}
+
+.member-config {
+  padding-top: 2px;
+  clear: both;
+}
+
+.member-config-heading {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding-top: 12px;
+  margin: 2px 0 10px;
+  border-top: 1px solid var(--border-color, #edf0f4);
+
+  span {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color-1, #1f2329);
+  }
+
+  small {
+    font-size: 12px;
+    color: var(--text-color-3, #8c8c8c);
+  }
+
+  &.is-mounts {
+    margin-top: 2px;
+  }
 }
 </style>

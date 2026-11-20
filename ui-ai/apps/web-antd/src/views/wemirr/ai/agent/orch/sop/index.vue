@@ -69,7 +69,7 @@ export default defineComponent({
 </script>
 
 <template>
-  <fs-page class="page-layout-card">
+  <fs-page class="page-layout-card orch-list-page">
     <fs-crud v-if="crudBinding" ref="crudRef" v-bind="crudBinding" />
 
     <SopFormDrawer

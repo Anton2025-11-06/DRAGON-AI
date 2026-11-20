@@ -13,24 +13,32 @@ import {
 import { useAccessStore } from '@vben/stores';
 
 import {
+  ApiOutlined,
   ArrowLeftOutlined,
   BulbOutlined,
   CheckCircleOutlined,
+  CheckOutlined,
   CloseOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  DatabaseOutlined,
   DeleteOutlined,
   DoubleLeftOutlined,
   DoubleRightOutlined,
+  EditOutlined,
   FileTextFilled,
   FolderFilled,
+  HolderOutlined,
   LoadingOutlined,
   MoreOutlined,
   PaperClipOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RightOutlined,
   RobotOutlined,
   SendOutlined,
+  StopOutlined,
+  ToolOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
@@ -205,6 +213,22 @@ interface MountedItem {
   source: 'kb' | 'mcp' | 'skill' | 'tool';
 }
 
+/** 每轮发送配置快照：排队期间再改 composer，也不影响已经入队的问题。 */
+interface TurnSnapshot {
+  attachments: api.HarnessAttachment[];
+  modelId?: number;
+  mounts: api.HarnessMounts;
+  orchAgent: api.HarnessOrchAgent | null;
+  sessionId?: number;
+}
+
+/** 前端待发送问题：仅存在当前页面内存中，刷新后不持久化。 */
+interface QueuedQuestion extends TurnSnapshot {
+  displayText: string;
+  id: string;
+  messageText: string;
+}
+
 /** 上传任务条目：沙箱工作区面板与对话框附件共用（逐个顺序上传、各自进度） */
 interface UploadEntry {
   uid: string;
@@ -220,29 +244,37 @@ interface UploadEntry {
 export default defineComponent({
   name: 'Harnes智能体ExplorerPage',
   components: {
+    ApiOutlined,
     ArrowLeftOutlined,
     BulbOutlined,
     CheckCircleOutlined,
+    CheckOutlined,
     CloseOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
+    DatabaseOutlined,
     DeleteOutlined,
     DoubleLeftOutlined,
     DoubleRightOutlined,
+    EditOutlined,
     FileTextFilled,
     FolderFilled,
+    HolderOutlined,
     LoadingOutlined,
     MarkdownRenderer,
     MoreOutlined,
     PaperClipOutlined,
     PlusOutlined,
     ReloadOutlined,
+    RightOutlined,
     RobotOutlined,
     // 预览库（docx/excel/pptx 解析器 + codemirror）有几 MB，只在真点开文件时才拉
     SandboxPreviewModal: defineAsyncComponent(
       () => import('./SandboxPreviewModal.vue'),
     ),
     SendOutlined,
+    StopOutlined,
+    ToolOutlined,
   },
   setup() {
     const accessStore = useAccessStore();
@@ -270,10 +302,14 @@ export default defineComponent({
     const sessionStore = reactive<Record<number, ChatMsg[]>>({});
     /** 已拉过历史的会话：再切回去用缓冲、不重载（重载会把实时片段清掉，见 loadMessages） */
     const loadedSessions = new Set<number>();
-    /** 会话最近一轮的模型/挂载快照：切换时回显 composer，不重新拉库 */
+    /** 会话级 composer 草稿：切换时恢复模型、挂载与智能体，避免把上一个会话的配置误发到下一个。 */
     const composerMeta = new Map<
       number,
-      { modelId?: number; mounts?: Partial<api.HarnessMounts> }
+      {
+        modelId?: number;
+        mounts?: Partial<api.HarnessMounts>;
+        orchAgent?: api.HarnessOrchAgent | null;
+      }
     >();
     /** turnId → 该轮订阅：一个在跑的轮各占一条流，与"当前在看哪个会话"无关 */
     const turnStreams = new Map<
@@ -311,6 +347,17 @@ export default defineComponent({
     const inputValue = ref('');
     const sending = ref(false);
     const mountedItems = ref<MountedItem[]>([]);
+    /** 每个会话各自排队，切会话不会把待发问题带到另一段对话。 */
+    const questionQueues = reactive<Record<number, QueuedQuestion[]>>({});
+    const queuedQuestions = computed<QueuedQuestion[]>(
+      () => questionQueues[sessionId.value] ?? [],
+    );
+    const editingQueueId = ref('');
+    const editingQueueText = ref('');
+    const draggedQueueId = ref('');
+    const queuePumpPending = new Set<number>();
+    let queueSeq = 0;
+    let disposed = false;
     /** 展示的消息 = 当前会话那一份缓冲（切 sessionId 即换一份，不动别会话） */
     const messages = computed<ChatMsg[]>(
       () => sessionStore[sessionId.value] ?? [],
@@ -365,6 +412,261 @@ export default defineComponent({
     const agentModeLabel = (mode: api.HarnessOrchMode) =>
       AGENT_MODE_LABELS.find((g) => g.mode === mode)?.label || mode;
 
+    // ==================== / 与 @ 资源命令面板 ====================
+    type CommandSource = 'agent' | MountedItem['source'];
+    interface CommandResource {
+      agent?: api.HarnessOrchAgent;
+      description?: null | string;
+      key: string;
+      mount?: MountedItem;
+      name: string;
+      source: CommandSource;
+    }
+    interface CommandCategory {
+      icon: string;
+      items: CommandResource[];
+      label: string;
+      source: CommandSource;
+    }
+
+    const composerRef = ref<{ focus: () => void } | null>(null);
+    const commandOpen = ref(false);
+    const commandLoading = ref(false);
+    const commandColumn = ref<'category' | 'items'>('category');
+    const commandCategoryIndex = ref(0);
+    const commandItemIndex = ref(0);
+    const commandAgentKey = ref('');
+    const commandSelectedMounts = ref<MountedItem[]>([]);
+    /** 触发字符在正文中的位置：确认选择后移除，Esc 则保留为普通文本。 */
+    const commandTriggerPosition = ref<null | number>(null);
+
+    function resourceIcon(source: CommandSource): string {
+      return {
+        agent: 'RobotOutlined',
+        kb: 'DatabaseOutlined',
+        mcp: 'ApiOutlined',
+        skill: 'BulbOutlined',
+        tool: 'ToolOutlined',
+      }[source];
+    }
+
+    const commandCategories = computed<CommandCategory[]>(() => {
+      const mountCategory = (
+        source: MountedItem['source'],
+        label: string,
+        items: api.HarnessOptionItem[],
+      ): CommandCategory => ({
+        source,
+        label,
+        icon: resourceIcon(source),
+        items: items.map((item) => ({
+          key: String(item.id),
+          name: item.name,
+          description: item.description,
+          source,
+          mount: { key: String(item.id), name: item.name, source },
+        })),
+      });
+      return [
+        {
+          source: 'agent',
+          label: '智能体',
+          icon: resourceIcon('agent'),
+          items: agentOptions.value.map((agent) => ({
+            key: agentKeyOf(agent),
+            name: `${agentModeLabel(agent.mode)} · ${agent.name}`,
+            description: agent.purpose,
+            source: 'agent',
+            agent,
+          })),
+        },
+        mountCategory('skill', '技能', skillOptions.value),
+        mountCategory('mcp', 'MCP', mcpOptions.value),
+        mountCategory('tool', '工具', toolOptions.value),
+        mountCategory('kb', '知识库', kbOptions.value),
+      ];
+    });
+
+    function focusComposer() {
+      nextTick(() => composerRef.value?.focus());
+    }
+
+    async function openCommandPalette() {
+      commandSelectedMounts.value = mountedItems.value.map((item) => ({
+        ...item,
+      }));
+      commandAgentKey.value = orchAgent.value ? agentKeyOf(orchAgent.value) : '';
+      commandCategoryIndex.value = 0;
+      commandItemIndex.value = 0;
+      commandColumn.value = 'category';
+      commandOpen.value = true;
+      commandLoading.value = true;
+      focusComposer();
+      try {
+        const [, agentRes] = await Promise.all([
+          ensurePickerOptions(),
+          api.HarnessOrchAgents(),
+        ]);
+        agentOptions.value = agentRes.items || [];
+      } catch {
+        agentOptions.value = [];
+      } finally {
+        commandLoading.value = false;
+      }
+    }
+
+    function closeCommandPalette() {
+      commandOpen.value = false;
+      commandTriggerPosition.value = null;
+      focusComposer();
+    }
+
+    function removeCommandTrigger() {
+      const position = commandTriggerPosition.value;
+      commandTriggerPosition.value = null;
+      if (position === null) return;
+      const trigger = inputValue.value[position];
+      if (trigger !== '/' && trigger !== '@') return;
+      inputValue.value =
+        inputValue.value.slice(0, position) + inputValue.value.slice(position + 1);
+    }
+
+    function confirmCommandPalette() {
+      const previousKey = orchAgent.value ? agentKeyOf(orchAgent.value) : '';
+      const nextAgent =
+        agentOptions.value.find(
+          (agent) => agentKeyOf(agent) === commandAgentKey.value,
+        ) || null;
+      mountedItems.value = commandSelectedMounts.value.map((item) => ({
+        ...item,
+      }));
+      orchAgent.value = nextAgent;
+      if (nextAgent && agentKeyOf(nextAgent) !== previousKey) modelId.value = 0;
+      commandOpen.value = false;
+      removeCommandTrigger();
+      focusComposer();
+    }
+
+    function focusCommandCategory(index: number) {
+      commandCategoryIndex.value = index;
+      commandItemIndex.value = 0;
+      commandColumn.value = 'category';
+    }
+
+    function isCommandItemSelected(item: CommandResource): boolean {
+      if (item.source === 'agent') return commandAgentKey.value === item.key;
+      return commandSelectedMounts.value.some(
+        (mounted) =>
+          mounted.source === item.mount?.source && mounted.key === item.key,
+      );
+    }
+
+    function toggleCommandItem(categoryIndex: number, itemIndex: number) {
+      commandCategoryIndex.value = categoryIndex;
+      commandItemIndex.value = itemIndex;
+      commandColumn.value = 'items';
+      const item = commandCategories.value[categoryIndex]?.items[itemIndex];
+      if (!item) return;
+      if (item.agent) {
+        commandAgentKey.value =
+          commandAgentKey.value === item.key ? '' : item.key;
+        return;
+      }
+      if (!item.mount) return;
+      const index = commandSelectedMounts.value.findIndex(
+        (mounted) =>
+          mounted.source === item.mount?.source && mounted.key === item.key,
+      );
+      if (index === -1) commandSelectedMounts.value.push({ ...item.mount });
+      else commandSelectedMounts.value.splice(index, 1);
+    }
+
+    function selectedCommandCount(source: CommandSource): number {
+      if (source === 'agent') return commandAgentKey.value ? 1 : 0;
+      return commandSelectedMounts.value.filter(
+        (item) => item.source === source,
+      ).length;
+    }
+
+    function onComposerKeydown(e: KeyboardEvent) {
+      if (e.isComposing) return;
+      if (commandOpen.value) {
+        const category = commandCategories.value[commandCategoryIndex.value];
+        const itemCount = category?.items.length || 0;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const delta = e.key === 'ArrowDown' ? 1 : -1;
+          if (commandColumn.value === 'category') {
+            commandCategoryIndex.value = Math.max(
+              0,
+              Math.min(
+                commandCategories.value.length - 1,
+                commandCategoryIndex.value + delta,
+              ),
+            );
+            commandItemIndex.value = 0;
+          } else if (itemCount > 0) {
+            commandItemIndex.value = Math.max(
+              0,
+              Math.min(itemCount - 1, commandItemIndex.value + delta),
+            );
+          }
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          if (itemCount > 0) {
+            commandColumn.value = 'items';
+            commandItemIndex.value = Math.min(
+              commandItemIndex.value,
+              itemCount - 1,
+            );
+          }
+          return;
+        }
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          commandColumn.value = 'category';
+          return;
+        }
+        if (e.key === ' ') {
+          e.preventDefault();
+          if (commandColumn.value === 'category') {
+            if (itemCount > 0) commandColumn.value = 'items';
+          } else {
+            toggleCommandItem(
+              commandCategoryIndex.value,
+              commandItemIndex.value,
+            );
+          }
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          confirmCommandPalette();
+          return;
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeCommandPalette();
+          return;
+        }
+      }
+      if (
+        (e.key === '/' || e.key === '@') &&
+        !e.altKey &&
+        !e.ctrlKey &&
+        !e.metaKey
+      ) {
+        commandTriggerPosition.value = (
+          e.target as HTMLTextAreaElement
+        ).selectionStart;
+        openCommandPalette();
+        return;
+      }
+      onComposerEnter(e);
+    }
+
     // ==================== 沙箱 ====================
     const sandboxLoading = ref(false);
     // 工作区绝对根：与后端 WORKSPACE_ROOT 对齐；前端所有路径都以此开头，避免“无 path”传参。
@@ -407,8 +709,11 @@ export default defineComponent({
       loadModels();
       loadSandboxFiles();
     });
-    // 离开页面即关所有 SSE（组件卸载后回调再写各会话缓冲已无意义）
-    onUnmounted(() => closeAllStreams());
+    // 离开页面即关所有 SSE，并阻止已安排的队列任务在组件销毁后继续发送。
+    onUnmounted(() => {
+      disposed = true;
+      closeAllStreams();
+    });
 
     // ==================== 会话管理 ====================
 
@@ -429,6 +734,14 @@ export default defineComponent({
     }
 
     async function switchSession(s: api.HarnessSession) {
+      const previousId = sessionId.value;
+      if (previousId !== s.id) {
+        composerMeta.set(previousId, {
+          modelId: modelId.value || undefined,
+          mounts: currentMounts(),
+          orchAgent: orchAgent.value,
+        });
+      }
       sessionId.value = s.id;
       // 已加载过、或还有活动流的会话直接复用缓冲（后台流一直在往里写），不重载：
       // 重载会 buf.length=0 清空正被实时写入的 target，而 RUNNING 轮 Redis 不回放
@@ -437,15 +750,14 @@ export default defineComponent({
         await loadMessages(s.id);
       // 先拉齐候选再匹配名称（挂载回显要按 id 找 name）
       await ensurePickerOptions();
-      // 模型与挂载不绑会话：按该会话最近一轮回显 composer；无历史则清空草稿
+      // 恢复目标会话草稿；历史消息只能恢复模型和挂载，智能体草稿仅在当前页面会话内保留。
       const meta = composerMeta.get(s.id);
-      if (meta) {
-        if (meta.modelId) modelId.value = meta.modelId;
-        mountedItems.value = mountsToItems(meta.mounts || {});
-      } else {
-        mountedItems.value = [];
-      }
+      modelId.value = meta?.modelId || 0;
+      mountedItems.value = mountsToItems(meta?.mounts || {});
+      orchAgent.value = meta?.orchAgent || null;
       scrollToBottom();
+      // 后台会话只保留队列；切回来时若已空闲，从队首继续。
+      scheduleQuestionQueue(s.id);
     }
 
     /** 四口挂载候选拉齐（挂载回显要按 id 匹配名称；use 口径=自建∪授权） */
@@ -649,11 +961,19 @@ export default defineComponent({
     }
 
     function newSession() {
-      // 只重置"新建"草稿会话(0)的视图，不动其它会话的缓冲与其后台流
+      // 保留当前会话草稿，再重置“新建”草稿会话，避免返回旧会话时配置丢失。
+      if (sessionId.value !== 0) {
+        composerMeta.set(sessionId.value, {
+          modelId: modelId.value || undefined,
+          mounts: currentMounts(),
+          orchAgent: orchAgent.value,
+        });
+      }
       sessionId.value = 0;
       sessionStore[0] = [];
       loadedSessions.delete(0);
       composerMeta.delete(0);
+      modelId.value = 0;
       mountedItems.value = [];
       orchAgent.value = null;
       inputValue.value = '';
@@ -668,6 +988,8 @@ export default defineComponent({
           if (st.sessionId === id) closeTurnStream(turnId);
         }
         delete sessionStore[id];
+        delete questionQueues[id];
+        queuePumpPending.delete(id);
         loadedSessions.delete(id);
         composerMeta.delete(id);
         // 删的是当前会话才回到新建草稿；删侧栏里的历史项不打断当前对话
@@ -701,20 +1023,15 @@ export default defineComponent({
       }
     }
 
-    // ==================== 对话（ARQ 投递 + SSE 订阅） ====================
+    // ==================== 对话（ARQ 投递 + SSE 订阅 + 前端提问队列） ====================
+
+    function queueFor(sid: number): QueuedQuestion[] {
+      if (!questionQueues[sid]) questionQueues[sid] = [];
+      return questionQueues[sid];
+    }
 
     async function handleSend() {
       const text = inputValue.value.trim();
-      if (streaming.value) {
-        interruptTurn();
-        return;
-      }
-      // 停止已下达、worker 正在收尾：Enter 这条路也要挡（只禁按钮拦不住键盘）
-      if (stopping.value) {
-        message.warning('上一轮正在停止收尾，请稍候片刻');
-        return;
-      }
-      if (sending.value) return;
       if (chatAttachments.value.some((a) => a.status === 'uploading')) {
         message.warning('还有文件在上传中，请稍候再发送');
         return;
@@ -728,9 +1045,122 @@ export default defineComponent({
       }
       const messageText = text || '请分析我上传的附件';
       const displayText = text || `已上传 ${atts.length} 个附件`;
+      // 生成、停止收尾和请求投递期间都允许继续输入；发送键只入队，不再兼任停止键。
+      if (busy.value || sending.value) {
+        const queue = queueFor(sessionId.value);
+        queueSeq += 1;
+        queue.push({
+          id: `question-${Date.now()}-${queueSeq}`,
+          messageText,
+          displayText,
+          attachments: atts.map((item) => ({ ...item })),
+          modelId: modelId.value || undefined,
+          mounts: currentMounts(),
+          orchAgent: orchAgent.value ? { ...orchAgent.value } : null,
+        });
+        inputValue.value = '';
+        chatAttachments.value = [];
+        return;
+      }
       inputValue.value = '';
       chatAttachments.value = []; // 发送即清草稿附件
       await postTurn(messageText, displayText, atts);
+    }
+
+    function removeQueuedQuestion(id: string) {
+      const queue = queueFor(sessionId.value);
+      const index = queue.findIndex((item) => item.id === id);
+      if (index !== -1) queue.splice(index, 1);
+      if (editingQueueId.value === id) cancelQueueEdit();
+    }
+
+    function clearQueuedQuestions() {
+      questionQueues[sessionId.value] = [];
+      cancelQueueEdit();
+      draggedQueueId.value = '';
+    }
+
+    function startQueueEdit(item: QueuedQuestion) {
+      editingQueueId.value = item.id;
+      editingQueueText.value = item.messageText;
+      nextTick(() => {
+        const editor = document.querySelector<HTMLTextAreaElement>(
+          'textarea.hermes-queue-edit',
+        );
+        editor?.focus();
+        editor?.setSelectionRange(editor.value.length, editor.value.length);
+      });
+    }
+
+    function cancelQueueEdit() {
+      editingQueueId.value = '';
+      editingQueueText.value = '';
+    }
+
+    function saveQueueEdit(item: QueuedQuestion) {
+      const text = editingQueueText.value.trim();
+      if (!text) {
+        message.warning('排队问题不能为空');
+        return;
+      }
+      item.messageText = text;
+      item.displayText = text;
+      cancelQueueEdit();
+    }
+
+    function onQueueDragStart(event: DragEvent, id: string) {
+      draggedQueueId.value = id;
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', id);
+      }
+    }
+
+    function onQueueDrop(targetId: string) {
+      const sourceId = draggedQueueId.value;
+      draggedQueueId.value = '';
+      if (!sourceId || sourceId === targetId) return;
+      const queue = queueFor(sessionId.value);
+      const sourceIndex = queue.findIndex((item) => item.id === sourceId);
+      const targetIndex = queue.findIndex((item) => item.id === targetId);
+      if (sourceIndex === -1 || targetIndex === -1) return;
+      const [moved] = queue.splice(sourceIndex, 1);
+      if (moved) queue.splice(targetIndex, 0, moved);
+    }
+
+    /** 终态、断流或停止收尾后触发一次；同一会话只安排一个消费任务，避免并发发送。 */
+    function scheduleQuestionQueue(sid: number) {
+      if (
+        disposed ||
+        sid !== sessionId.value ||
+        !questionQueues[sid]?.length ||
+        queuePumpPending.has(sid)
+      ) {
+        return;
+      }
+      queuePumpPending.add(sid);
+      setTimeout(() => {
+        queuePumpPending.delete(sid);
+        void pumpQuestionQueue(sid);
+      }, 80);
+    }
+
+    async function pumpQuestionQueue(sid: number) {
+      if (
+        disposed ||
+        sid !== sessionId.value ||
+        sending.value ||
+        bufFor(sid).some((item) => item.running || item.stopping)
+      ) {
+        return;
+      }
+      const queue = questionQueues[sid];
+      const next = queue?.shift();
+      if (!next) return;
+      await postTurn(next.messageText, next.displayText, next.attachments, {
+        ...next,
+        sessionId: sid,
+      });
     }
 
     /**
@@ -743,7 +1173,7 @@ export default defineComponent({
      * 才拦下默认行为去发送。
      */
     function onComposerEnter(e: KeyboardEvent) {
-      if (e.shiftKey || e.isComposing) return;
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
       handleSend();
     }
@@ -753,21 +1183,23 @@ export default defineComponent({
       messageText: string,
       displayText: string,
       attachments?: api.HarnessAttachment[],
-    ) {
+      snapshot?: TurnSnapshot,
+    ): Promise<boolean> {
+      let sid = snapshot?.sessionId || sessionId.value;
       // 首条消息自动建会话：只落标题，模型与挂载随每次发消息传
-      if (!sessionId.value) {
+      if (!sid) {
         try {
           const s = await api.HarnessSessionCreate({
             title: displayText.slice(0, 24) || '新探索',
           });
           sessionId.value = s.id;
+          sid = s.id;
         } catch (error: any) {
           message.error(error?.message || '会话创建失败');
-          return;
+          return false;
         }
       }
 
-      const sid = sessionId.value;
       // 本轮由本屏发起、实时写入本会话缓冲：标为已加载，切走再回来不触发 DB 重载
       loadedSessions.add(sid);
       bufFor(sid).push({
@@ -777,30 +1209,38 @@ export default defineComponent({
           attachments && attachments.length ? attachments : undefined,
       });
       sending.value = true;
-      scrollToBottom();
+      if (sid === sessionId.value) scrollToBottom();
       try {
         const res = await api.HarnessChat({
           sessionId: sid,
           message: messageText,
-          modelId: modelId.value || undefined,
-          mounts: currentMounts(),
-          // 选了智能体：本轮交该编排配置执行，页面勾选的四类能力由后端并给执行角色
-          orchMode: orchAgent.value?.mode,
-          orchConfigId: orchAgent.value?.id,
+          modelId: snapshot ? snapshot.modelId : modelId.value || undefined,
+          mounts: snapshot?.mounts || currentMounts(),
+          // 排队消息使用入队时的编排快照，不被之后的 composer 修改覆盖。
+          orchMode: snapshot
+            ? snapshot.orchAgent?.mode
+            : orchAgent.value?.mode,
+          orchConfigId: snapshot
+            ? snapshot.orchAgent?.id
+            : orchAgent.value?.id,
           attachments:
             attachments && attachments.length ? attachments : undefined,
         });
         void loadSessions(); // 刷新侧栏排序（updateTime 刚变过），不重选当前会话
         subscribeTurn(sid, res.turnId);
+        return true;
       } catch (error: any) {
         bufFor(sid).push({
           role: 'assistant',
           content:
             error?.message || '请求失败，深度探索服务暂不可用，请稍后重试。',
         });
-        scrollToBottom();
+        if (sid === sessionId.value) scrollToBottom();
+        return false;
       } finally {
         sending.value = false;
+        // 请求失败没有终态帧，也要尝试下一条；仍在生成时 pump 会自行退出。
+        scheduleQuestionQueue(sid);
       }
     }
 
@@ -1030,6 +1470,7 @@ export default defineComponent({
         // 停止收尾期间断流：发送口的锁只能在这里放掉，否则用户得干等到宽限期到点
         target.stopping = false;
         closeTurnStream(turnId);
+        scheduleQuestionQueue(sid);
       };
       scrollToBottom();
     }
@@ -1124,6 +1565,13 @@ export default defineComponent({
         default:
           break; // turn.started 不渲染（气泡已建）
       }
+      // AskUser 正在等用户作答时暂停队列，其余终态按当前顺序自动发下一条。
+      if (
+        terminal &&
+        !(frame.type === 'turn.interrupted' && frame.pendingQuestions?.length)
+      ) {
+        scheduleQuestionQueue(sid);
+      }
     }
 
     /** 关闭某一轮的订阅（终态/异常/切走只关这一条，别会话的后台流不受影响） */
@@ -1171,6 +1619,7 @@ export default defineComponent({
         // 找不到对应气泡（别的标签页发起的轮、或刷新前那一轮已不在缓冲）：
         // 本地没有要等终态的状态，这条流直接关掉
         closeTurnStream(turnId);
+        scheduleQuestionQueue(sid);
         return;
       }
       target.running = false;
@@ -1186,6 +1635,7 @@ export default defineComponent({
           target.stopping = false;
           target.error = target.error || '停止收尾超时，请刷新查看本轮结果';
           closeTurnStream(turnId);
+          scheduleQuestionQueue(sid);
         }, STOP_SETTLE_GUARD_MS),
       );
       message.info('已停止，正在收尾本轮已生成的内容');
@@ -1198,8 +1648,11 @@ export default defineComponent({
       });
     }
 
-    function removeMounted(k: string) {
-      mountedItems.value = mountedItems.value.filter((i) => i.key !== k);
+    function removeMounted(target: MountedItem) {
+      // 不同资源类型的 id 可能相同，必须按“类型 + id”删除，避免误删另一类挂载。
+      mountedItems.value = mountedItems.value.filter(
+        (i) => !(i.source === target.source && i.key === target.key),
+      );
     }
 
     // ==================== 四类能力挂载 picker ====================
@@ -1540,7 +1993,34 @@ export default defineComponent({
       toolArgsView,
       thinkingHint,
       handleSend,
-      onComposerEnter,
+      interruptTurn,
+      queuedQuestions,
+      editingQueueId,
+      editingQueueText,
+      draggedQueueId,
+      removeQueuedQuestion,
+      clearQueuedQuestions,
+      startQueueEdit,
+      cancelQueueEdit,
+      saveQueueEdit,
+      onQueueDragStart,
+      onQueueDrop,
+      composerRef,
+      onComposerKeydown,
+      commandOpen,
+      commandLoading,
+      commandColumn,
+      commandCategoryIndex,
+      commandItemIndex,
+      commandCategories,
+      resourceIcon,
+      openCommandPalette,
+      closeCommandPalette,
+      confirmCommandPalette,
+      focusCommandCategory,
+      isCommandItemSelected,
+      toggleCommandItem,
+      selectedCommandCount,
       toggleAskOption,
       submitAskUser,
       setAskOther,
@@ -1674,31 +2154,6 @@ export default defineComponent({
         </a-tooltip>
       </header>
 
-      <!-- 已挂载能力（始终可见的清单条；模型/工具每轮可切换，这份 composer 状态随每次发消息传给后端） -->
-      <div class="hermes-mounted">
-        <span class="hermes-mounted-label">已挂载能力</span>
-        <template v-if="mountedItems.length > 0">
-          <a-tag
-            v-for="item in mountedItems"
-            :key="item.key"
-            closable
-            :color="
-              item.source === 'skill'
-                ? 'blue'
-                : item.source === 'tool'
-                  ? 'green'
-                  : 'orange'
-            "
-            @close="removeMounted(item.key)"
-          >
-            {{ item.name }}
-          </a-tag>
-        </template>
-        <span v-else class="hermes-mounted-empty">
-          尚未挂载，点下方按钮添加 技能 / MCP / 工具 / 知识库
-        </span>
-      </div>
-
       <!-- 消息列表 -->
       <div class="hermes-hd-list">
         <div
@@ -1793,18 +2248,17 @@ export default defineComponent({
                     :key="opt.label"
                     class="hermes-askuser-opt"
                     :class="{
-                      checked: msg.answers
-                        ? msg.answers[q.question].selected.includes(opt.label)
-                        : false,
+                      checked:
+                        msg.answers?.[q.question]?.selected.includes(opt.label) ||
+                        false,
                     }"
                   >
                     <input
                       :type="q.multiSelect ? 'checkbox' : 'radio'"
                       :name="`ask-${idx}-${q.question}`"
                       :checked="
-                        msg.answers
-                          ? msg.answers[q.question].selected.includes(opt.label)
-                          : false
+                        msg.answers?.[q.question]?.selected.includes(opt.label) ||
+                        false
                       "
                       @change="toggleAskOption(msg, q, opt.label)"
                     />
@@ -1820,7 +2274,7 @@ export default defineComponent({
                   </label>
                 </div>
                 <a-textarea
-                  :value="msg.answers ? msg.answers[q.question].other : ''"
+                  :value="msg.answers?.[q.question]?.other || ''"
                   :auto-size="{ minRows: 1, maxRows: 3 }"
                   placeholder="其他（可选，自由补充）"
                   class="hermes-askuser-other"
@@ -1896,130 +2350,332 @@ export default defineComponent({
         </div>
       </div>
 
-      <!-- 输入区 -->
-      <footer class="hermes-input">
-        <div class="hermes-input-tools">
-          <button
-            class="hermes-add-btn is-agent"
-            type="button"
-            @click="openAgentPicker"
-          >
-            <PlusOutlined /> 智能体
+      <!-- 前端提问队列：回复终态后按此处顺序自动消费，仅保留在当前页面内存中。 -->
+      <section
+        v-if="queuedQuestions.length > 0"
+        class="hermes-queue"
+        aria-label="排队问题列表"
+      >
+        <header class="hermes-queue-header">
+          <div>
+            <HolderOutlined />
+            <strong>排队</strong>
+            <span>{{ queuedQuestions.length }} 条消息排队中</span>
+          </div>
+          <button type="button" class="hermes-queue-clear" @click="clearQueuedQuestions">
+            清空
           </button>
-          <!-- 已选智能体：X 掉即回到纯深度探索（不走任何编排运行时） -->
-          <a-tag
-            v-if="orchAgent"
-            class="hermes-agent-tag"
-            closable
-            color="purple"
-            @close="clearAgent"
+        </header>
+        <div class="hermes-queue-list">
+          <article
+            v-for="(item, index) in queuedQuestions"
+            :key="item.id"
+            class="hermes-queue-item"
+            :class="{ 'is-dragging': draggedQueueId === item.id }"
+            @dragover.prevent
+            @drop.prevent="onQueueDrop(item.id)"
           >
-            {{ agentModeLabel(orchAgent.mode) }} · {{ orchAgent.name }}
-          </a-tag>
-          <button
-            class="hermes-add-btn is-skill"
-            type="button"
-            @click="openPicker('skill')"
-          >
-            <PlusOutlined /> 技能
-          </button>
-          <button
-            class="hermes-add-btn is-mcp"
-            type="button"
-            @click="openPicker('mcp')"
-          >
-            <PlusOutlined /> MCP
-          </button>
-          <button
-            class="hermes-add-btn is-tool"
-            type="button"
-            @click="openPicker('tool')"
-          >
-            <PlusOutlined /> 工具
-          </button>
-          <button
-            class="hermes-add-btn is-kb"
-            type="button"
-            @click="openPicker('kb')"
-          >
-            <PlusOutlined /> 知识库
-          </button>
-          <a-upload
-            :before-upload="onChatAttachPick"
-            :multiple="true"
-            :show-upload-list="false"
-          >
-            <button class="hermes-add-btn is-attach" type="button">
-              <PaperClipOutlined /> 附件
+            <button
+              type="button"
+              class="hermes-queue-drag"
+              draggable="true"
+              :aria-label="`拖拽排序第 ${index + 1} 条问题`"
+              title="拖拽调整顺序"
+              @dragstart="onQueueDragStart($event, item.id)"
+              @dragend="draggedQueueId = ''"
+            >
+              <HolderOutlined />
             </button>
-          </a-upload>
-          <span v-if="mountedItems.length > 0" class="hermes-add-count">
-            已挂载 {{ mountedItems.length }} 项
-          </span>
-          <a-select
-            class="hermes-model-select"
-            size="small"
-            :options="modelSelectOptions"
+            <span class="hermes-queue-index">{{ index + 1 }}</span>
+            <div class="hermes-queue-content">
+              <div v-if="editingQueueId === item.id" class="hermes-queue-editing">
+                <a-textarea
+                  v-model:value="editingQueueText"
+                  class="hermes-queue-edit"
+                  :auto-size="{ minRows: 1, maxRows: 4 }"
+                  aria-label="编辑排队问题"
+                  @keydown.enter.exact.prevent="saveQueueEdit(item)"
+                  @keydown.esc.prevent="cancelQueueEdit"
+                />
+                <button type="button" aria-label="保存问题修改" @click="saveQueueEdit(item)">
+                  <CheckOutlined />
+                </button>
+                <button type="button" aria-label="取消问题修改" @click="cancelQueueEdit">
+                  <CloseOutlined />
+                </button>
+              </div>
+              <template v-else>
+                <div
+                  class="hermes-queue-text"
+                  :title="`${item.displayText}\n双击编辑`"
+                  @dblclick="startQueueEdit(item)"
+                >
+                  {{ item.displayText }}
+                </div>
+                <small v-if="item.attachments.length > 0">
+                  <PaperClipOutlined /> {{ item.attachments.length }} 个附件
+                </small>
+              </template>
+            </div>
+            <div v-if="editingQueueId !== item.id" class="hermes-queue-actions">
+              <button type="button" :aria-label="`编辑第 ${index + 1} 条问题`" @click="startQueueEdit(item)">
+                <EditOutlined />
+              </button>
+              <button
+                type="button"
+                class="is-danger"
+                :aria-label="`删除第 ${index + 1} 条问题`"
+                @click="removeQueuedQuestion(item.id)"
+              >
+                <DeleteOutlined />
+              </button>
+            </div>
+          </article>
+        </div>
+        <footer class="hermes-queue-hint">
+          <span>拖拽调整顺序，双击或点击编辑修改</span>
+          <span>当前回复结束后自动发送</span>
+        </footer>
+      </section>
+
+      <!-- 输入区：资源、正文与发送操作集中在一张对话卡片内 -->
+      <footer class="hermes-input" :class="{ 'is-command-open': commandOpen }">
+        <div
+          v-if="commandOpen"
+          class="hermes-command-panel"
+          role="dialog"
+          aria-label="选择智能体与资源"
+          @mousedown.prevent
+        >
+          <header class="hermes-command-header">
+            <div>
+              <strong>添加智能体与资源</strong>
+              <span>方向键导航，空格勾选</span>
+            </div>
+            <div class="hermes-command-header-right">
+              <kbd>/</kbd><kbd>@</kbd>
+              <button
+                type="button"
+                tabindex="-1"
+                aria-label="关闭资源选择"
+                @click="closeCommandPalette"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+          </header>
+          <div v-if="commandLoading" class="hermes-command-loading">
+            <a-spin size="small" /> 正在加载可用资源…
+          </div>
+          <div v-else class="hermes-command-categories">
+            <section
+              v-for="(category, categoryIndex) in commandCategories"
+              :key="category.source"
+              class="hermes-command-row"
+            >
+              <button
+                type="button"
+                tabindex="-1"
+                class="hermes-command-category"
+                :class="{
+                  active:
+                    commandColumn === 'category' &&
+                    commandCategoryIndex === categoryIndex,
+                  entered:
+                    commandColumn === 'items' &&
+                    commandCategoryIndex === categoryIndex,
+                }"
+                @click="focusCommandCategory(categoryIndex)"
+              >
+                <component :is="category.icon" />
+                <span class="hermes-command-category-label">{{ category.label }}</span>
+                <small v-if="selectedCommandCount(category.source)">
+                  {{ selectedCommandCount(category.source) }}
+                </small>
+                <RightOutlined class="hermes-command-enter" />
+              </button>
+              <div class="hermes-command-items">
+                <button
+                  v-for="(item, itemIndex) in category.items"
+                  :key="`${item.source}:${item.key}`"
+                  type="button"
+                  tabindex="-1"
+                  class="hermes-command-item"
+                  :class="{
+                    active:
+                      commandColumn === 'items' &&
+                      commandCategoryIndex === categoryIndex &&
+                      commandItemIndex === itemIndex,
+                    selected: isCommandItemSelected(item),
+                  }"
+                  :aria-pressed="isCommandItemSelected(item)"
+                  @click="toggleCommandItem(categoryIndex, itemIndex)"
+                >
+                  <CheckCircleOutlined v-if="isCommandItemSelected(item)" />
+                  <span>{{ item.name }}</span>
+                </button>
+                <span
+                  v-if="category.items.length === 0"
+                  class="hermes-command-empty"
+                >
+                  暂无可用资源
+                </span>
+              </div>
+            </section>
+          </div>
+          <footer class="hermes-command-footer">
+            <span><kbd>↑</kbd><kbd>↓</kbd> 移动 <kbd>←</kbd><kbd>→</kbd> 进入子行 <kbd>Space</kbd> 勾选</span>
+            <a-button
+              type="primary"
+              size="small"
+              tabindex="-1"
+              @click="confirmCommandPalette"
+            >
+              完成 <kbd>Enter</kbd>
+            </a-button>
+          </footer>
+        </div>
+
+        <div class="hermes-editor">
+          <div
+            v-if="orchAgent || mountedItems.length > 0"
+            class="hermes-selection-chips"
+            aria-label="已选智能体与资源"
+          >
+            <span
+              v-if="orchAgent"
+              class="hermes-selection-chip is-agent"
+              :title="`${agentModeLabel(orchAgent.mode)} · ${orchAgent.name}`"
+            >
+              <RobotOutlined />
+              <span class="hermes-selection-name">{{ orchAgent.name }}</span>
+              <small>{{ agentModeLabel(orchAgent.mode) }}</small>
+              <button type="button" aria-label="移除智能体" @click="clearAgent">
+                <CloseOutlined />
+              </button>
+            </span>
+            <span
+              v-for="item in mountedItems"
+              :key="`${item.source}:${item.key}`"
+              class="hermes-selection-chip"
+              :class="`is-${item.source}`"
+              :title="item.name"
+            >
+              <component :is="resourceIcon(item.source)" />
+              <span class="hermes-selection-name">{{ item.name }}</span>
+              <button
+                type="button"
+                :aria-label="`移除${item.name}`"
+                @click="removeMounted(item)"
+              >
+                <CloseOutlined />
+              </button>
+            </span>
+          </div>
+
+          <!-- 待发送附件：逐个上传进度条 + 百分比，可单个移除 -->
+          <div v-if="chatAttachments.length > 0" class="hermes-attach-list">
+            <div
+              v-for="a in chatAttachments"
+              :key="a.uid"
+              class="hermes-attach-item"
+              :class="a.status"
+            >
+              <PaperClipOutlined class="hermes-attach-icon" />
+              <div class="hermes-attach-main">
+                <span class="hermes-attach-name" :title="a.name">{{
+                  a.name
+                }}</span>
+                <a-progress
+                  :percent="a.percent"
+                  size="small"
+                  :status="
+                    a.status === 'error'
+                      ? 'exception'
+                      : a.status === 'done'
+                        ? 'success'
+                        : 'active'
+                  "
+                />
+              </div>
+              <a-button
+                type="text"
+                size="small"
+                class="hermes-attach-del"
+                @click="removeChatAttachment(a)"
+              >
+                <template #icon><CloseOutlined /></template>
+              </a-button>
+            </div>
+          </div>
+
+          <a-textarea
+            ref="composerRef"
+            v-model:value="inputValue"
+            class="hermes-composer-textarea"
+            :auto-size="{ minRows: 3, maxRows: 8 }"
             :placeholder="
-              orchAgent && !modelId ? '智能体自带配置模型' : '选择模型'
+              busy || sending
+                ? '随时继续提问，Enter 加入排队（Shift+Enter 换行）…'
+                : '描述你的问题，输入 / 或 @ 添加智能体与资源（Shift+Enter 换行）…'
             "
-            allow-clear
-            :value="modelId || undefined"
-            @change="changeModel"
+            aria-label="探索问题输入框"
+            @keydown="onComposerKeydown"
           />
         </div>
-        <!-- 待发送附件：逐个上传进度条 + 百分比，可单个移除 -->
-        <div v-if="chatAttachments.length > 0" class="hermes-attach-list">
-          <div
-            v-for="a in chatAttachments"
-            :key="a.uid"
-            class="hermes-attach-item"
-            :class="a.status"
-          >
-            <PaperClipOutlined class="hermes-attach-icon" />
-            <div class="hermes-attach-main">
-              <span class="hermes-attach-name" :title="a.name">{{
-                a.name
-              }}</span>
-              <a-progress
-                :percent="a.percent"
-                size="small"
-                :status="
-                  a.status === 'error'
-                    ? 'exception'
-                    : a.status === 'done'
-                      ? 'success'
-                      : 'active'
-                "
-              />
-            </div>
-            <a-button
-              type="text"
-              size="small"
-              class="hermes-attach-del"
-              @click="removeChatAttachment(a)"
+
+        <div class="hermes-input-tools">
+          <div class="hermes-input-actions">
+            <button
+              class="hermes-resource-trigger"
+              type="button"
+              @click="openCommandPalette()"
             >
-              <template #icon><CloseOutlined /></template>
+              <PlusOutlined /> 资源
+            </button>
+            <a-upload
+              :before-upload="onChatAttachPick"
+              :multiple="true"
+              :show-upload-list="false"
+            >
+              <button class="hermes-attach-trigger" type="button">
+                <PaperClipOutlined /> 附件
+              </button>
+            </a-upload>
+            <span class="hermes-shortcut-hint"><kbd>/</kbd> 或 <kbd>@</kbd> 快速选择</span>
+          </div>
+          <div class="hermes-input-meta">
+            <a-select
+              class="hermes-model-select"
+              size="small"
+              :options="modelSelectOptions"
+              :placeholder="
+                orchAgent && !modelId ? '智能体自带配置模型' : '选择模型'
+              "
+              allow-clear
+              :value="modelId || undefined"
+              @change="changeModel"
+            />
+            <span v-if="stopping" class="hermes-stopping-label">正在收尾</span>
+            <a-tooltip v-if="streaming" title="停止当前回复，排队问题将继续">
+              <a-button
+                class="hermes-stop"
+                aria-label="停止当前回复"
+                @click="interruptTurn"
+              >
+                <template #icon><StopOutlined /></template>
+              </a-button>
+            </a-tooltip>
+            <a-button
+              type="primary"
+              class="hermes-send"
+              :aria-label="busy || sending ? '加入排队' : '发送'"
+              :title="busy || sending ? '加入排队' : '发送'"
+              @click="handleSend"
+            >
+              <template #icon><SendOutlined /></template>
             </a-button>
           </div>
-        </div>
-        <div class="hermes-input-row">
-          <a-textarea
-            v-model:value="inputValue"
-            :rows="3"
-            placeholder="描述你的问题（Shift+Enter 换行），AI 将在云端沙箱中执行…"
-            @press-enter="onComposerEnter"
-          />
-          <a-button
-            type="primary"
-            class="hermes-send"
-            :loading="sending"
-            :disabled="stopping"
-            @click="handleSend"
-          >
-            <template #icon><SendOutlined /></template>
-            {{ streaming ? '停止' : '发送' }}
-          </a-button>
         </div>
       </footer>
     </section>
@@ -2625,92 +3281,552 @@ export default defineComponent({
     }
   }
 
-  .hermes-input {
-    margin: 4px 16px 16px;
-    padding: 10px 12px 12px;
-    border: 1px solid var(--border-color, #e7e9f0);
+  .hermes-queue {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    max-height: 228px;
+    margin: 6px 16px 0;
+    padding: 10px 12px 8px;
+    background: var(--component-background, #fff);
+    border: 1px solid var(--border-color, #e3e7ee);
     border-radius: 16px;
-    background: var(--hover-bg-color, #f7f8fb);
+    box-shadow: 0 6px 22px rgb(15 23 42 / 5%);
 
-    .hermes-input-tools {
+    .hermes-queue-header {
       display: flex;
-      flex-wrap: wrap;
+      flex-shrink: 0;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
+      justify-content: space-between;
+      min-height: 26px;
+      padding: 0 2px 7px;
 
-      .hermes-add-btn {
-        display: inline-flex;
+      > div {
+        display: flex;
+        gap: 8px;
         align-items: center;
-        gap: 4px;
-        height: 28px;
-        padding: 0 10px;
-        font-size: 12px;
-        line-height: 1;
-        color: var(--text-color-2, #3c4254);
-        background: var(--layout-header-bg-color, #fff);
-        border: 1px solid var(--border-color, #e6e8ef);
-        border-radius: 999px;
-        cursor: pointer;
-        transition:
-          border-color 0.15s ease,
-          color 0.15s ease,
-          box-shadow 0.15s ease;
-
-        .anticon {
-          font-size: 12px;
-        }
-
-        &:hover {
-          border-color: #c7c9f8;
-          color: #4338ca;
-          box-shadow: 0 4px 12px rgb(79 70 229 / 8%);
-        }
-
-        &.is-agent {
-          color: #4f46e5;
-        }
-
-        &.is-skill {
-          color: #2563eb;
-        }
-
-        &.is-mcp {
-          color: #c2410c;
-        }
-
-        &.is-tool {
-          color: #15803d;
-        }
-
-        &.is-kb {
-          color: #6d28d9;
-        }
-
-        &.is-attach {
-          color: #0f766e;
-        }
+        min-width: 0;
+        color: var(--text-color-2, #4e5969);
       }
 
-      .hermes-add-count {
+      strong {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-color-1, #1f2329);
+      }
+
+      span {
         font-size: 12px;
         color: var(--text-color-3, #8a9099);
       }
+    }
 
-      // 已选智能体标签：名字过长省略号，不换行顶高这一行工具条
-      .hermes-agent-tag {
-        margin-inline-end: 0;
-        max-width: 240px;
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      color: var(--text-color-3, #7b8492);
+      cursor: pointer;
+      background: transparent;
+      border: 0;
+      border-radius: 6px;
+
+      &:hover {
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 7%);
+      }
+    }
+
+    .hermes-queue-clear {
+      min-width: 38px;
+      height: 26px;
+      font-size: 12px;
+    }
+
+    .hermes-queue-list {
+      min-height: 0;
+      overflow-y: auto;
+      border-top: 1px solid var(--border-color, #f0f2f5);
+    }
+
+    .hermes-queue-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-height: 43px;
+      padding: 5px 0;
+      background: var(--component-background, #fff);
+      border-bottom: 1px solid var(--border-color, #f3f4f6);
+      transition: background-color 0.15s ease;
+
+      &:last-child {
+        border-bottom: 0;
+      }
+
+      &:hover {
+        background: var(--hover-bg-color, #fafbfc);
+      }
+
+      &.is-dragging {
+        opacity: 0.45;
+      }
+    }
+
+    .hermes-queue-drag {
+      flex-shrink: 0;
+      width: 22px;
+      height: 30px;
+      cursor: grab;
+
+      &:active {
+        cursor: grabbing;
+      }
+    }
+
+    .hermes-queue-index {
+      display: inline-flex;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      font-size: 11px;
+      color: var(--text-color-3, #8a9099);
+      background: var(--hover-bg-color, #f2f4f7);
+      border-radius: 6px;
+    }
+
+    .hermes-queue-content {
+      flex: 1;
+      min-width: 0;
+
+      small {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--text-color-3, #8a9099);
+      }
+    }
+
+    .hermes-queue-text {
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-color-1, #303642);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .hermes-queue-actions {
+      display: flex;
+      flex-shrink: 0;
+      gap: 3px;
+
+      button {
+        width: 28px;
+        height: 28px;
+
+        &.is-danger:hover {
+          color: var(--error-color, #ef4444);
+          background: var(--error-color-bg, #fef2f2);
+        }
+      }
+    }
+
+    .hermes-queue-editing {
+      display: flex;
+      gap: 5px;
+      align-items: flex-start;
+
+      .hermes-queue-edit {
+        flex: 1;
+        min-width: 0;
+      }
+
+      > button {
+        flex-shrink: 0;
+        width: 28px;
+        height: 28px;
+        margin-top: 1px;
+      }
+
+      :deep(textarea.ant-input) {
+        padding: 4px 8px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+    }
+
+    .hermes-queue-hint {
+      display: flex;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 2px 0;
+      font-size: 11px;
+      color: var(--text-color-3, #9aa0aa);
+      border-top: 1px solid var(--border-color, #f0f2f5);
+    }
+
+    @media (width < 640px) {
+      margin-right: 10px;
+      margin-left: 10px;
+
+      .hermes-queue-hint > span:first-child {
+        display: none;
+      }
+
+      .hermes-queue-hint {
+        justify-content: flex-end;
+      }
+    }
+  }
+
+  .hermes-input {
+    position: relative;
+    flex-shrink: 0;
+    margin: 6px 16px 16px;
+    padding: 0 14px 10px;
+    background: var(--component-background, #fff);
+    border: 1px solid var(--border-color, #e3e7ee);
+    border-radius: 20px;
+    box-shadow: 0 8px 28px rgb(15 23 42 / 7%);
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease;
+
+    &:focus-within,
+    &.is-command-open {
+      border-color: hsl(var(--primary) / 45%);
+      box-shadow: 0 10px 32px rgb(15 23 42 / 9%);
+    }
+
+    kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 5px;
+      font-family: inherit;
+      font-size: 11px;
+      line-height: 1;
+      color: var(--text-color-2, #4e5969);
+      background: var(--hover-bg-color, #f5f7fa);
+      border: 1px solid var(--border-color, #e5e8ef);
+      border-radius: 5px;
+      box-shadow: 0 1px 0 rgb(15 23 42 / 5%);
+    }
+
+    .hermes-command-panel {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 10px);
+      left: 0;
+      z-index: 20;
+      overflow: hidden;
+      background: var(--component-background, #fff);
+      border: 1px solid var(--border-color, #e2e7ef);
+      border-radius: 16px;
+      box-shadow: 0 18px 52px rgb(15 23 42 / 16%);
+    }
+
+    .hermes-command-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 58px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-color, #edf0f4);
+
+      > div:first-child {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      strong {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-color-1, #1f2329);
+      }
+
+      span {
+        font-size: 11px;
+        color: var(--text-color-3, #8a9099);
+      }
+
+      .hermes-command-header-right {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+
+        > button {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          margin-left: 4px;
+          color: var(--text-color-3, #8a9099);
+          cursor: pointer;
+          background: transparent;
+          border: 0;
+          border-radius: 7px;
+
+          &:hover {
+            color: var(--text-color-1, #1f2329);
+            background: var(--hover-bg-color, #f5f7fa);
+          }
+        }
+      }
+    }
+
+    .hermes-command-loading {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      min-height: 250px;
+      font-size: 12px;
+      color: var(--text-color-3, #8a9099);
+    }
+
+    .hermes-command-categories {
+      max-height: 330px;
+      padding: 6px 8px;
+      overflow-y: auto;
+    }
+
+    .hermes-command-row {
+      display: grid;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 5px 0;
+
+      & + .hermes-command-row {
+        border-top: 1px solid var(--border-color, #f0f2f5);
+      }
+    }
+
+    .hermes-command-category {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      font-size: 13px;
+      color: var(--text-color-2, #4e5969);
+      text-align: left;
+      cursor: pointer;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 9px;
+
+      > .anticon:first-child {
+        color: hsl(var(--primary));
+      }
+
+      .hermes-command-category-label {
+        flex: 1;
+        white-space: nowrap;
+      }
+
+      small {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 18px;
+        height: 18px;
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 9%);
+        border-radius: 9px;
+      }
+
+      .hermes-command-enter {
+        font-size: 10px;
+        color: var(--text-color-3, #a0a6b0);
+      }
+
+      &.entered {
+        background: var(--hover-bg-color, #f5f7fa);
+      }
+
+      &.active {
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 8%);
+        border-color: hsl(var(--primary) / 20%);
+      }
+    }
+
+    .hermes-command-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      max-height: 92px;
+      padding: 2px 0;
+      overflow-y: auto;
+    }
+
+    .hermes-command-item {
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+      max-width: 100%;
+      min-height: 32px;
+      padding: 5px 9px;
+      font-size: 12px;
+      color: var(--text-color-2, #4e5969);
+      cursor: pointer;
+      background: var(--component-background, #fff);
+      border: 1px solid var(--border-color, #e5e8ee);
+      border-radius: 8px;
+
+      span {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
-      .hermes-model-select {
-        margin-left: auto;
-        // 要装得下占位文案「智能体自带配置模型」（9 个字）+ 清除图标
-        width: 210px;
+      &.selected {
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 7%);
+        border-color: hsl(var(--primary) / 25%);
+      }
+
+      &.active {
+        border-color: hsl(var(--primary));
+        outline: 2px solid hsl(var(--primary) / 13%);
+        outline-offset: 1px;
+      }
+    }
+
+    .hermes-command-empty {
+      padding: 7px 2px;
+      font-size: 12px;
+      color: var(--text-color-3, #9aa0aa);
+    }
+
+    .hermes-command-footer {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 50px;
+      padding: 8px 12px;
+      background: var(--hover-bg-color, #fafbfc);
+      border-top: 1px solid var(--border-color, #edf0f4);
+
+      > span {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        font-size: 11px;
+        color: var(--text-color-3, #8a9099);
+      }
+
+      .ant-btn kbd {
+        height: 17px;
+        margin-left: 3px;
+        color: inherit;
+        background: rgb(255 255 255 / 14%);
+        border-color: rgb(255 255 255 / 28%);
+        box-shadow: none;
+      }
+    }
+
+    .hermes-editor {
+      padding: 12px 2px 4px;
+    }
+
+    .hermes-selection-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-bottom: 9px;
+    }
+
+    .hermes-selection-chip {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      max-width: 230px;
+      min-height: 30px;
+      padding: 3px 5px 3px 9px;
+      font-size: 12px;
+      color: var(--text-color-2, #3c4254);
+      background: var(--hover-bg-color, #f5f7fa);
+      border: 1px solid var(--border-color, #e5e8ef);
+      border-radius: 8px;
+
+      > .anticon {
         flex-shrink: 0;
+        color: hsl(var(--primary));
+      }
+
+      &.is-agent {
+        color: #5b4db2;
+        background: rgb(112 89 184 / 7%);
+        border-color: rgb(112 89 184 / 18%);
+
+        > .anticon {
+          color: #7059b8;
+        }
+      }
+
+      &.is-mcp > .anticon {
+        color: #c2410c;
+      }
+
+      &.is-tool > .anticon {
+        color: #15803d;
+      }
+
+      &.is-kb > .anticon {
+        color: #0f766e;
+      }
+
+      .hermes-selection-name {
+        overflow: hidden;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      small {
+        flex-shrink: 0;
+        font-size: 10px;
+        color: var(--text-color-3, #8a9099);
+      }
+
+      > button {
+        display: inline-flex;
+        flex-shrink: 0;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        color: var(--text-color-3, #8a9099);
+        cursor: pointer;
+        background: transparent;
+        border: 0;
+        border-radius: 5px;
+
+        .anticon {
+          font-size: 10px;
+        }
+
+        &:hover {
+          color: var(--text-color-1, #1f2329);
+          background: rgb(15 23 42 / 6%);
+        }
       }
     }
 
@@ -2719,7 +3835,7 @@ export default defineComponent({
       display: flex;
       flex-direction: column;
       gap: 6px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
 
       .hermes-attach-item {
         display: flex;
@@ -2764,27 +3880,163 @@ export default defineComponent({
       }
     }
 
-    .hermes-input-row {
-      display: flex;
-      gap: 10px;
-      align-items: flex-end;
+    :deep(textarea.ant-input) {
+      min-height: 76px;
+      padding: 4px 2px 8px;
+      font-size: 14px;
+      line-height: 1.7;
+      resize: none;
+      background: transparent;
+      border: none;
+      box-shadow: none;
 
-      :deep(textarea.ant-input) {
-        resize: none;
-        padding: 6px 2px;
-        font-size: 14px;
+      &::placeholder {
+        color: var(--text-color-3, #a0a6b0);
+      }
+    }
+
+    .hermes-input-tools {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 40px;
+      padding-top: 2px;
+
+      .hermes-input-actions,
+      .hermes-input-meta {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .hermes-input-actions {
+        flex: 1 1 auto;
+      }
+
+      .hermes-input-meta {
+        flex: 0 0 auto;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-left: auto;
+      }
+
+      .hermes-resource-trigger,
+      .hermes-attach-trigger {
+        display: inline-flex;
+        gap: 5px;
+        align-items: center;
+        justify-content: center;
+        min-height: 32px;
+        padding: 0 8px;
+        font-size: 12px;
+        color: var(--text-color-2, #4e5969);
+        cursor: pointer;
         background: transparent;
-        border: none;
-        box-shadow: none;
+        border: 0;
+        border-radius: 8px;
+        transition:
+          color 0.16s ease,
+          background-color 0.16s ease;
+
+        &:hover {
+          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 7%);
+        }
+      }
+
+      .hermes-resource-trigger {
+        color: hsl(var(--primary));
+      }
+
+      .hermes-shortcut-hint {
+        display: inline-flex;
+        gap: 4px;
+        align-items: center;
+        margin-left: 4px;
+        font-size: 11px;
+        color: var(--text-color-3, #9aa0aa);
+        white-space: nowrap;
+
+        kbd {
+          min-width: 18px;
+          height: 18px;
+          padding: 0 4px;
+        }
+      }
+
+      .hermes-model-select {
+        width: 190px;
+        flex-shrink: 0;
+      }
+
+      .hermes-send,
+      .hermes-stop {
+        display: inline-flex;
+        flex-shrink: 0;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 50%;
       }
 
       .hermes-send {
-        height: 36px;
-        padding: 0 16px;
         border: none;
-        border-radius: 12px;
-        background: linear-gradient(180deg, #4f46e5, #4338ca);
-        box-shadow: 0 8px 16px rgb(67 56 202 / 22%);
+        box-shadow: 0 5px 14px hsl(var(--primary) / 22%);
+      }
+
+      .hermes-stop {
+        color: var(--text-color-2, #4e5969);
+        background: var(--hover-bg-color, #f2f4f7);
+        border: 1px solid var(--border-color, #e3e7ee);
+      }
+
+      .hermes-stopping-label {
+        font-size: 11px;
+        color: var(--text-color-3, #8a9099);
+        white-space: nowrap;
+      }
+    }
+
+    @media (width < 1280px) {
+      .hermes-shortcut-hint {
+        display: none;
+      }
+    }
+
+    @media (width < 640px) {
+      margin-right: 10px;
+      margin-left: 10px;
+      padding-right: 10px;
+      padding-left: 10px;
+
+      .hermes-command-row {
+        grid-template-columns: 96px minmax(0, 1fr);
+      }
+
+      .hermes-command-footer > span {
+        display: none;
+      }
+
+      .hermes-command-footer {
+        justify-content: flex-end;
+      }
+
+      .hermes-input-tools {
+        .hermes-model-select {
+          width: 150px;
+        }
+
+        .hermes-attach-trigger {
+          font-size: 0;
+
+          .anticon {
+            font-size: 13px;
+          }
+        }
       }
     }
   }

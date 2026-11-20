@@ -128,11 +128,6 @@ async function handleSave() {
     message.warning('请输入智能体名称');
     return;
   }
-  // 用途已改为必填项（后端仍保持可空，不影响存量数据）
-  if (!form.purpose.trim()) {
-    message.warning('请输入用途');
-    return;
-  }
   const payload: api.OrchAgentSaveReq = {
     name: form.name.trim(),
     purpose: form.purpose.trim(),
@@ -169,136 +164,159 @@ function close() {
   <a-drawer
     :open="props.open"
     :title="title"
-    :width="640"
+    root-class-name="orch-drawer"
+    width="min(680px, 100vw)"
     placement="right"
     @update:open="close"
   >
     <a-spin :spinning="loading">
-      <a-form layout="vertical">
-        <a-form-item label="智能体名称" required>
-          <a-input
-            v-model:value="form.name"
-            :disabled="props.readonly"
-            placeholder="给这个智能体起个名字"
-          />
-        </a-form-item>
-        <a-form-item label="用途" required>
-          <a-input
-            v-model:value="form.purpose"
-            :disabled="props.readonly"
-            placeholder="必填，一句话说明它擅长做什么（列表检索也按此匹配）"
-          />
-        </a-form-item>
-        <a-form-item label="系统提示词">
-          <PromptEditor
-            v-model="form.systemPrompt"
-            :disabled="props.readonly"
-            :height="200"
-            placeholder="运行时会覆盖深度探索默认基础段；留空则沿用平台默认"
-          />
-        </a-form-item>
+      <div class="orch-form">
+        <section class="orch-section orch-basic">
+          <div class="orch-section-heading">
+            <div>
+              <h3>基本信息</h3>
+              <p>名称与用途用于列表展示和检索</p>
+            </div>
+          </div>
+          <a-form layout="vertical">
+            <a-row :gutter="12">
+              <a-col :span="12">
+                <a-form-item label="智能体名称" required>
+                  <a-input
+                    v-model:value="form.name"
+                    :disabled="props.readonly"
+                    placeholder="给这个智能体起个名字"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="用途（可选）">
+                  <a-input
+                    v-model:value="form.purpose"
+                    :disabled="props.readonly"
+                    placeholder="一句话说明它擅长做什么"
+                  />
+                </a-form-item>
+              </a-col>
+            </a-row>
+          </a-form>
+        </section>
 
-        <a-divider orientation="left">能力挂载</a-divider>
+        <section class="orch-section">
+          <div class="orch-section-heading">
+            <div>
+              <h3>角色指令</h3>
+              <p>留空则沿用平台默认基础段</p>
+            </div>
+          </div>
+          <a-form layout="vertical">
+            <a-form-item label="系统提示词">
+              <PromptEditor
+                v-model="form.systemPrompt"
+                :disabled="props.readonly"
+                :height="144"
+                placeholder="说明角色目标、行为边界和输出要求"
+              />
+            </a-form-item>
+          </a-form>
+        </section>
 
-        <a-row :gutter="12">
-          <a-col :span="12">
-            <a-form-item label="模型">
-              <a-select
-                v-model:value="form.modelId"
-                :disabled="props.readonly"
-                :options="modelOpts"
-                allow-clear
-                option-filter-prop="label"
-                placeholder="选择运行模型"
-                show-search
-                style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="技能">
-              <a-select
-                v-model:value="form.skillIds"
-                :disabled="props.readonly"
-                :max-tag-count="2"
-                :options="skillOpts"
-                allow-clear
-                mode="multiple"
-                option-filter-prop="label"
-                placeholder="可挂载的技能（use 口径）"
-                style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="工具">
-              <a-select
-                v-model:value="form.toolIds"
-                :disabled="props.readonly"
-                :max-tag-count="2"
-                :options="toolOpts"
-                allow-clear
-                mode="multiple"
-                option-filter-prop="label"
-                placeholder="平台工具"
-                style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="MCP">
-              <a-select
-                v-model:value="form.mcpIds"
-                :disabled="props.readonly"
-                :max-tag-count="2"
-                :options="mcpOpts"
-                allow-clear
-                mode="multiple"
-                option-filter-prop="label"
-                placeholder="MCP 连接"
-                style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="知识库">
-              <a-select
-                v-model:value="form.kbIds"
-                :disabled="props.readonly"
-                :max-tag-count="2"
-                :options="kbOpts"
-                allow-clear
-                mode="multiple"
-                option-filter-prop="label"
-                placeholder="可检索的知识库"
-                style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-        </a-row>
-      </a-form>
+        <section class="orch-section">
+          <div class="orch-section-heading">
+            <div>
+              <h3>能力挂载</h3>
+              <p>配置运行模型，以及该智能体可调用的资源</p>
+            </div>
+          </div>
+          <a-form layout="vertical">
+            <a-row :gutter="12">
+              <a-col :span="12">
+                <a-form-item label="模型">
+                  <a-select
+                    v-model:value="form.modelId"
+                    :disabled="props.readonly"
+                    :options="modelOpts"
+                    allow-clear
+                    option-filter-prop="label"
+                    placeholder="选择运行模型"
+                    show-search
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="技能">
+                  <a-select
+                    v-model:value="form.skillIds"
+                    :disabled="props.readonly"
+                    :max-tag-count="2"
+                    :options="skillOpts"
+                    allow-clear
+                    mode="multiple"
+                    option-filter-prop="label"
+                    placeholder="选择技能"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="工具">
+                  <a-select
+                    v-model:value="form.toolIds"
+                    :disabled="props.readonly"
+                    :max-tag-count="2"
+                    :options="toolOpts"
+                    allow-clear
+                    mode="multiple"
+                    option-filter-prop="label"
+                    placeholder="选择平台工具"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="MCP">
+                  <a-select
+                    v-model:value="form.mcpIds"
+                    :disabled="props.readonly"
+                    :max-tag-count="2"
+                    :options="mcpOpts"
+                    allow-clear
+                    mode="multiple"
+                    option-filter-prop="label"
+                    placeholder="选择 MCP 连接"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="知识库">
+                  <a-select
+                    v-model:value="form.kbIds"
+                    :disabled="props.readonly"
+                    :max-tag-count="2"
+                    :options="kbOpts"
+                    allow-clear
+                    mode="multiple"
+                    option-filter-prop="label"
+                    placeholder="选择知识库"
+                  />
+                </a-form-item>
+              </a-col>
+            </a-row>
+          </a-form>
+        </section>
 
-      <div class="drawer-foot">
-        <a-space>
-          <a-button @click="close">{{ props.readonly ? '关闭' : '取消' }}</a-button>
-          <a-button
-            v-if="!props.readonly"
-            :loading="saving"
-            type="primary"
-            @click="handleSave"
-          >
-            保存
-          </a-button>
-        </a-space>
+        <div class="drawer-foot">
+          <a-space>
+            <a-button @click="close">{{ props.readonly ? '关闭' : '取消' }}</a-button>
+            <a-button
+              v-if="!props.readonly"
+              :loading="saving"
+              type="primary"
+              @click="handleSave"
+            >
+              保存
+            </a-button>
+          </a-space>
+        </div>
       </div>
     </a-spin>
   </a-drawer>
 </template>
-
-<style scoped lang="less">
-.drawer-foot {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-</style>

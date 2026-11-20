@@ -377,60 +377,65 @@ onMounted(async () => {
 
 <style scoped>
 .model-plaza-page {
-  padding: 16px;
+  padding: 20px;
 }
 
-.model-plaza-layout {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
+.model-plaza-layout,
+.model-panel {
+  min-width: 0;
 }
 
 .model-plaza-hero {
-  margin-bottom: 14px;
+  margin-bottom: 18px;
 }
 
 .model-plaza-hero h2 {
   margin: 0;
   font-size: 20px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--text-color-1, #1f2329);
 }
 
 .model-plaza-hero p {
-  margin: 4px 0 0;
+  margin: 5px 0 0;
   font-size: 13px;
   color: var(--text-color-3, #8a9099);
 }
 
-/* ==================== 模型面板 ==================== */
-.model-panel {
-  flex: 1;
-  min-width: 0;
-  padding: 18px;
-  background: var(--layout-header-bg-color, #fff);
-  border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
-  border-radius: 18px;
-  box-shadow: 0 10px 30px rgb(15 23 42 / 4%);
-}
-
 .model-panel__toolbar {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
+  padding-bottom: 16px;
   margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-color, #edf0f4);
+}
+
+.model-panel__toolbar .ant-btn:last-child {
+  margin-left: auto;
 }
 
 .model-panel__pagination {
   display: flex;
   justify-content: flex-end;
-  margin-top: 16px;
+  margin-top: 18px;
 }
 
 .model-tutorial {
   max-height: 60vh;
-  overflow-y: auto;
   padding: 4px;
+  overflow-y: auto;
+}
+
+@media (width < 768px) {
+  .model-plaza-page {
+    padding: 14px;
+  }
+
+  .model-panel__toolbar .ant-btn:last-child {
+    margin-left: 0;
+  }
 }
 </style>

@@ -1,0 +1,422 @@
+/*
+ * WEMIRR 业务后台统一视觉层。
+ * 只约束布局、密度与状态，不改变 Vben / Ant Design Vue / FastCrud 的交互契约。
+ */
+:root {
+  --app-ui-radius-sm: 6px;
+  --app-ui-radius-md: 10px;
+  --app-ui-radius-lg: 14px;
+  --app-ui-card-border: var(--border-color, rgb(15 23 42 / 9%));
+  --app-ui-card-bg: var(--component-background, #fff);
+  --app-ui-muted-bg: var(--hover-bg-color, #f7f9fc);
+  --app-ui-shadow: 0 2px 10px rgb(15 23 42 / 4%);
+  --app-ui-shadow-hover: 0 8px 24px rgb(15 23 42 / 8%);
+}
+
+#app {
+  text-rendering: optimizelegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 页面容器：留白统一，避免不同模块各自漂移。 */
+.vben-page-wrapper .vben-page-wrapper-content {
+  margin: 16px !important;
+}
+
+.page-layout-card {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--app-ui-card-bg);
+  border: 1px solid var(--app-ui-card-border);
+  border-radius: var(--app-ui-radius-lg);
+  box-shadow: var(--app-ui-shadow);
+
+  .fs-page-header {
+    border-radius: var(--app-ui-radius-lg) var(--app-ui-radius-lg) 0 0;
+  }
+}
+
+/* FastCrud 列表：搜索、操作、表格、分页形成明确的纵向节奏。 */
+.fs-crud-container {
+  min-width: 0;
+  background: var(--app-ui-card-bg);
+
+  .fs-crud-search {
+    padding: 16px 16px 8px;
+    background: var(--app-ui-card-bg);
+    border-bottom: 1px solid var(--app-ui-card-border);
+
+    .ant-form-item {
+      margin-bottom: 8px;
+    }
+  }
+
+  .fs-actionbar {
+    min-height: 56px;
+    padding: 12px 16px;
+    margin: 0;
+    background: var(--app-ui-card-bg);
+  }
+
+  .fs-table-container {
+    min-width: 0;
+    padding: 0 16px;
+  }
+
+  .fs-pagination {
+    padding: 14px 16px;
+    background: var(--app-ui-card-bg);
+    border-top: 1px solid var(--app-ui-card-border);
+  }
+
+  .ant-table-wrapper {
+    max-width: 100%;
+    border: 1px solid var(--app-ui-card-border);
+    border-radius: var(--app-ui-radius-md);
+    overflow: hidden;
+  }
+
+  .ant-table-thead > tr > th {
+    font-weight: 600;
+    background: var(--app-ui-muted-bg);
+    border-bottom-color: var(--app-ui-card-border);
+  }
+
+  .ant-table-tbody > tr > td {
+    border-bottom-color: var(--app-ui-card-border);
+  }
+
+  .ant-table-tbody > tr:last-child > td {
+    border-bottom: 0;
+  }
+}
+
+/* 四类编排列表必须始终占满内容区，固定操作列只让表格内部横向滚动。 */
+.orch-list-page {
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+
+  .fs-crud-container,
+  .fs-crud-search,
+  .fs-actionbar,
+  .fs-table-container,
+  .ant-table-wrapper,
+  .ant-table-spin-container,
+  .ant-table-container {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .ant-table-content {
+    overflow-x: auto !important;
+  }
+}
+
+/* 控件：弱阴影、清晰 hover/focus，主按钮只保留一个视觉层级。 */
+.ant-btn {
+  font-weight: 500;
+  box-shadow: none;
+  transition:
+    color 0.16s ease,
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.ant-btn-primary {
+  box-shadow: 0 2px 6px hsl(var(--primary) / 16%);
+
+  &:hover:not(:disabled) {
+    box-shadow: 0 4px 12px hsl(var(--primary) / 22%);
+  }
+}
+
+.ant-input,
+.ant-input-number,
+.ant-input-affix-wrapper,
+.ant-select:not(.ant-select-customize-input) .ant-select-selector,
+.ant-picker {
+  border-color: var(--app-ui-card-border);
+}
+
+.ant-card {
+  border-color: var(--app-ui-card-border);
+  border-radius: var(--app-ui-radius-md);
+  box-shadow: var(--app-ui-shadow);
+}
+
+.ant-modal-content {
+  border-radius: var(--app-ui-radius-lg);
+  box-shadow: 0 18px 54px rgb(15 23 42 / 18%);
+}
+
+.ant-modal-header {
+  border-bottom: 1px solid var(--app-ui-card-border);
+}
+
+.ant-modal-title,
+.ant-drawer-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ant-drawer-header {
+  padding: 16px 20px;
+  border-bottom-color: var(--app-ui-card-border);
+}
+
+.ant-drawer-body {
+  padding: 20px;
+}
+
+.ant-form-item-label > label {
+  font-weight: 500;
+}
+
+.ant-divider-horizontal.ant-divider-with-text {
+  margin: 22px 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color-1, #1f2329);
+}
+
+.ant-empty {
+  padding: 24px 0;
+}
+
+/* 通用页面标题和工具栏，供业务模块共用。 */
+.page-toolbar,
+.model-panel__toolbar {
+  gap: 12px;
+}
+
+.page-title {
+  letter-spacing: -0.01em;
+}
+
+/* 键盘可达性和减少动态效果是全局底线。 */
+:where(button, [role='button'], input, select, textarea):focus-visible {
+  outline: 2px solid hsl(var(--primary) / 70%);
+  outline-offset: 2px;
+}
+
+@media (width < 768px) {
+  .vben-page-wrapper .vben-page-wrapper-content {
+    margin: 10px !important;
+  }
+
+  .fs-crud-container {
+    .fs-crud-search,
+    .fs-actionbar,
+    .fs-table-container,
+    .fs-pagination {
+      padding-right: 12px;
+      padding-left: 12px;
+    }
+  }
+
+  .ant-drawer-body {
+    padding: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+
+/* 四类智能体编排抽屉：统一的信息分区、字段密度与底部操作。 */
+.orch-drawer {
+  .ant-drawer-header {
+    padding: 15px 20px;
+  }
+
+  .ant-drawer-body {
+    padding: 0 20px;
+    background: var(--component-background, #fff);
+  }
+
+  .orch-form {
+    min-width: 0;
+    padding-top: 16px;
+  }
+
+  .orch-section {
+    min-width: 0;
+    padding: 14px 16px 4px;
+    background: var(--component-background, #fff);
+    border: 1px solid var(--app-ui-card-border);
+    border-radius: 10px;
+
+    & + .orch-section {
+      margin-top: 12px;
+    }
+
+    &.orch-basic {
+      padding-bottom: 14px;
+    }
+
+    &.orch-member-list,
+    &.orch-step-list {
+      padding-bottom: 14px;
+    }
+  }
+
+  .orch-section-heading {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 14px;
+
+    h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 22px;
+      color: var(--text-color-1, #1f2329);
+    }
+
+    p {
+      margin: 2px 0 0;
+      font-size: 12px;
+      line-height: 18px;
+      color: var(--text-color-3, #8c8c8c);
+    }
+
+    .ant-btn {
+      flex-shrink: 0;
+      margin-top: -3px;
+    }
+  }
+
+  .orch-role-badge {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    font-size: 12px;
+    line-height: 20px;
+    color: hsl(var(--primary));
+    background: hsl(var(--primary) / 7%);
+    border-radius: 5px;
+
+    &.is-verifier {
+      color: #7059b8;
+      background: rgb(112 89 184 / 8%);
+    }
+  }
+
+  .ant-form-item {
+    margin-bottom: 12px;
+  }
+
+  .ant-form-item-label {
+    padding-bottom: 5px;
+
+    > label {
+      font-size: 13px;
+      line-height: 20px;
+      color: var(--text-color-2, #4e5969);
+    }
+  }
+
+  .ant-form-item:last-child {
+    margin-bottom: 0;
+  }
+
+  .ant-select,
+  .ant-input-number {
+    width: 100%;
+  }
+
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-select:not(.ant-select-customize-input) .ant-select-selector {
+    border-radius: 6px;
+  }
+
+  .ant-input-disabled,
+  .ant-input-number-disabled,
+  .ant-select-disabled .ant-select-selector {
+    color: var(--text-color-2, #4e5969) !important;
+    background: var(--hover-bg-color, #f7f9fc) !important;
+  }
+
+  .drawer-foot {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    margin: 16px -20px 0;
+    background: rgb(255 255 255 / 96%);
+    border-top: 1px solid var(--app-ui-card-border);
+    backdrop-filter: blur(8px);
+  }
+
+  .step-head,
+  .member-head {
+    .ant-btn-text {
+      color: var(--text-color-2, #4e5969);
+
+      &:hover:not(:disabled) {
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 7%);
+      }
+
+      &.ant-btn-dangerous:hover:not(:disabled) {
+        color: #d4380d;
+        background: rgb(212 56 13 / 7%);
+      }
+    }
+  }
+}
+
+html.dark .orch-drawer .drawer-foot {
+  background: rgb(31 31 31 / 96%);
+}
+
+@media (width < 640px) {
+  .orch-drawer {
+    .ant-drawer-body {
+      padding: 0 12px;
+    }
+
+    .orch-section {
+      padding-right: 12px;
+      padding-left: 12px;
+    }
+
+    .orch-section-heading {
+      flex-wrap: wrap;
+    }
+
+    .ant-col-8,
+    .ant-col-12,
+    .ant-col-16 {
+      flex: 0 0 100%;
+      max-width: 100%;
+    }
+
+    .drawer-foot {
+      padding-right: 12px;
+      padding-left: 12px;
+      margin-right: -12px;
+      margin-left: -12px;
+    }
+
+    .step-head,
+    .member-head {
+      flex-wrap: wrap;
+    }
+  }
+}

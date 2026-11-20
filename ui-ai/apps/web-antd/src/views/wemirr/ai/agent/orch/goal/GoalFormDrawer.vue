@@ -120,11 +120,6 @@ async function handleSave() {
     message.warning('请输入目标名称');
     return;
   }
-  // 用途已改为必填项（后端仍保持可空，不影响存量数据）
-  if (!form.purpose.trim()) {
-    message.warning('请输入用途');
-    return;
-  }
   if (!form.executor?.name?.trim() && !form.executor?.sourceAgentId) {
     message.warning('执行者需要一个名称或克隆来源');
     return;
@@ -161,81 +156,100 @@ function close() {
   <a-drawer
     :open="props.open"
     :title="title"
-    :width="760"
+    root-class-name="orch-drawer"
+    width="min(800px, 100vw)"
     placement="right"
     @update:open="close"
   >
     <a-spin :spinning="loading">
-      <a-form layout="vertical">
-        <a-row :gutter="12">
-          <a-col :span="12">
-            <a-form-item label="目标名称" required>
-              <a-input
-                v-model:value="form.name"
-                :disabled="props.readonly"
-                placeholder="给这个目标起个名字"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="用途" required>
-              <a-input
-                v-model:value="form.purpose"
-                :disabled="props.readonly"
-                placeholder="必填，一句话说明这个目标要达成什么"
-              />
-            </a-form-item>
-          </a-col>
-        </a-row>
-      </a-form>
+      <div class="orch-form">
+        <section class="orch-section orch-basic">
+          <div class="orch-section-heading">
+            <div>
+              <h3>目标定义</h3>
+              <p>说明要达成的目标，便于识别和检索</p>
+            </div>
+          </div>
+          <a-form layout="vertical">
+            <a-row :gutter="12">
+              <a-col :span="12">
+                <a-form-item label="目标名称" required>
+                  <a-input
+                    v-model:value="form.name"
+                    :disabled="props.readonly"
+                    placeholder="给这个目标起个名字"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="用途（可选）">
+                  <a-input
+                    v-model:value="form.purpose"
+                    :disabled="props.readonly"
+                    placeholder="一句话说明要达成什么"
+                  />
+                </a-form-item>
+              </a-col>
+            </a-row>
+          </a-form>
+        </section>
 
-      <a-divider orientation="left">执行者</a-divider>
-      <MemberPicker
-        v-model="form.executor"
-        :agent-opts="agentOpts"
-        :agent-loader="api.GetAgentDetail"
-        :kb-opts="kbOpts"
-        :mcp-opts="mcpOpts"
-        :model-opts="modelOpts"
-        :readonly="props.readonly"
-        :skill-opts="skillOpts"
-        :tool-opts="toolOpts"
-      />
+        <section class="orch-section">
+          <div class="orch-section-heading">
+            <div>
+              <h3>执行者</h3>
+              <p>负责拆解目标并推进执行</p>
+            </div>
+            <span class="orch-role-badge">执行</span>
+          </div>
+          <MemberPicker
+            v-model="form.executor"
+            :agent-opts="agentOpts"
+            :agent-loader="api.GetAgentDetail"
+            :kb-opts="kbOpts"
+            :mcp-opts="mcpOpts"
+            :model-opts="modelOpts"
+            :readonly="props.readonly"
+            :skill-opts="skillOpts"
+            :tool-opts="toolOpts"
+          />
+        </section>
 
-      <a-divider orientation="left">检查者（验证者）</a-divider>
-      <MemberPicker
-        v-model="form.verifier"
-        :agent-opts="agentOpts"
-        :agent-loader="api.GetAgentDetail"
-        :kb-opts="kbOpts"
-        :mcp-opts="mcpOpts"
-        :model-opts="modelOpts"
-        :readonly="props.readonly"
-        :skill-opts="skillOpts"
-        :tool-opts="toolOpts"
-      />
+        <section class="orch-section">
+          <div class="orch-section-heading">
+            <div>
+              <h3>检查者</h3>
+              <p>核对执行结果，不通过时反馈并驳回</p>
+            </div>
+            <span class="orch-role-badge is-verifier">验证</span>
+          </div>
+          <MemberPicker
+            v-model="form.verifier"
+            :agent-opts="agentOpts"
+            :agent-loader="api.GetAgentDetail"
+            :kb-opts="kbOpts"
+            :mcp-opts="mcpOpts"
+            :model-opts="modelOpts"
+            :readonly="props.readonly"
+            :skill-opts="skillOpts"
+            :tool-opts="toolOpts"
+          />
+        </section>
 
-      <div class="drawer-foot">
-        <a-space>
-          <a-button @click="close">{{ props.readonly ? '关闭' : '取消' }}</a-button>
-          <a-button
-            v-if="!props.readonly"
-            :loading="saving"
-            type="primary"
-            @click="handleSave"
-          >
-            保存
-          </a-button>
-        </a-space>
+        <div class="drawer-foot">
+          <a-space>
+            <a-button @click="close">{{ props.readonly ? '关闭' : '取消' }}</a-button>
+            <a-button
+              v-if="!props.readonly"
+              :loading="saving"
+              type="primary"
+              @click="handleSave"
+            >
+              保存
+            </a-button>
+          </a-space>
+        </div>
       </div>
     </a-spin>
   </a-drawer>
 </template>
-
-<style scoped lang="less">
-.drawer-foot {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-</style>

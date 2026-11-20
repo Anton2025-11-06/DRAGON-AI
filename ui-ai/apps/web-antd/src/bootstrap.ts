@@ -24,6 +24,8 @@ import 'epic-designer/dist/style.css';
 import 'markstream-vue/index.css';
 // 引入数学公式渲染样式 (KaTeX)
 import 'katex/dist/katex.min.css';
+// WEMIRR 业务后台统一视觉层（放在组件库样式之后）
+import './styles/business-ui.less';
 
 async function bootstrap(namespace: string) {
   // 初始化组件适配器

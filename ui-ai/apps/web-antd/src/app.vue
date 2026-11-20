@@ -25,7 +25,20 @@ const tokenTheme = computed(() => {
 
   return {
     algorithm,
-    token: tokens,
+    token: {
+      ...tokens,
+      borderRadius: 8,
+      colorBgLayout: isDark.value ? tokens.colorBgLayout : '#f4f7fb',
+      fontSize: 14,
+    },
+    components: {
+      Card: {
+        borderRadiusLG: 12,
+      },
+      Table: {
+        headerBorderRadius: 10,
+      },
+    },
   };
 });
 </script>

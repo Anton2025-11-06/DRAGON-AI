@@ -188,14 +188,13 @@ function goToChat(_item: any) {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 120px;
-    height: 120px;
-    margin-bottom: 24px;
-    font-size: 56px;
-    color: #722ed1;
-    background: linear-gradient(135deg, rgb(114 46 209 / 10%) 0%, rgb(24 144 255 / 10%) 100%);
-    border-radius: 50%;
-    animation: pulse 2s ease-in-out infinite;
+    width: 72px;
+    height: 72px;
+    margin-bottom: 18px;
+    font-size: 32px;
+    color: hsl(var(--primary));
+    background: hsl(var(--primary) / 9%);
+    border-radius: 20px;
   }
 
   .empty-title {

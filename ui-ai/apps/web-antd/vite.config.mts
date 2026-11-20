@@ -13,7 +13,7 @@ export default defineConfig(async () => {
           // 网关路由规范：/api/{service_name}/{path}
           '/api': {
             changeOrigin: true,
-            target: 'http://47.112.99.147:18000',
+            target: 'http://127.0.0.1:18000',
             ws: true,
           },
         },

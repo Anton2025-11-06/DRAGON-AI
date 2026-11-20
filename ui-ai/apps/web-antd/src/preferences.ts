@@ -23,6 +23,7 @@ export const overridesPreferences = defineOverridesPreferences({
   },
   sidebar: {
     extraCollapse: true,
+    width: 180,
   },
   logo: {
     enable: true,
