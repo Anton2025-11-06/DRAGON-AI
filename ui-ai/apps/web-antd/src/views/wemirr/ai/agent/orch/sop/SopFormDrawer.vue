@@ -6,9 +6,13 @@
  * 执行者/检查者从单智能体克隆或自定义（复用 shared/MemberPicker，use 口径过滤）。
  * options（克隆来源 + 五类挂载候选）在抽屉里统一加载一次经 props 下发。数组序即流程顺序，
  * 支持上移/下移排序与增删。流程所有节点共用一份 state（顺序执行语义）。readonly 即查看态。
+ *
+ * 节点多时抽屉会被拉得很长，所以：「+ 添加节点」始终排在最后一个节点后面（不用滑回顶部
+ * 去点），每个节点自己可收起/展开（collapsed 只存本地行对象，不进提交载荷）。
  */
 import { computed, reactive, ref, watch } from 'vue';
 
+import { DownOutlined, RightOutlined } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 
 import MemberPicker, {
@@ -41,7 +45,6 @@ const kbOpts = ref<Opt[]>([]);
 const form = reactive({
   name: '',
   purpose: '',
-  status: true,
   steps: [] as StepRow[],
 });
 
@@ -53,6 +56,8 @@ interface StepRow {
   executor: MemberSpec;
   verifier: MemberSpec;
   hasVerifier: boolean;
+  /** 本地折叠态（纯 UI，不参与提交）：上移/下移随节点一起走，不会错位 */
+  collapsed: boolean;
 }
 
 const title = computed(() =>
@@ -82,6 +87,7 @@ function emptyStep(): StepRow {
     executor: emptyMember(),
     verifier: emptyMember(),
     hasVerifier: false,
+    collapsed: false,
   };
 }
 
@@ -106,7 +112,6 @@ function resetForm() {
   Object.assign(form, {
     name: '',
     purpose: '',
-    status: true,
     steps: [emptyStep()],
   });
 }
@@ -129,11 +134,11 @@ watch(
           executor: s.executor || emptyMember(),
           verifier: s.verifier || emptyMember(),
           hasVerifier: !!s.verifier,
+          collapsed: false,
         }));
         Object.assign(form, {
           name: d.name || '',
           purpose: d.purpose || '',
-          status: d.status !== 0,
           steps: steps.length ? steps : [emptyStep()],
         });
       }
@@ -169,6 +174,11 @@ async function handleSave() {
     message.warning('请输入 SOP 名称');
     return;
   }
+  // 用途已改为必填项（后端仍保持可空，不影响存量数据）
+  if (!form.purpose.trim()) {
+    message.warning('请输入用途');
+    return;
+  }
   const steps: api.OrchSopStepSpec[] = [];
   for (const [i, s] of form.steps.entries()) {
     if (!s.subject.trim()) {
@@ -194,8 +204,7 @@ async function handleSave() {
   }
   const payload: api.OrchSopSaveReq = {
     name: form.name.trim(),
-    purpose: form.purpose || undefined,
-    status: form.status,
+    purpose: form.purpose.trim(),
     steps,
   };
   saving.value = true;
@@ -237,118 +246,84 @@ function close() {
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item label="用途">
+            <a-form-item label="用途" required>
               <a-input
                 v-model:value="form.purpose"
                 :disabled="props.readonly"
-                placeholder="一句话说明这套流程做什么"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="启用状态">
-              <a-switch
-                v-model:checked="form.status"
-                :disabled="props.readonly"
-                checked-children="启用"
-                un-checked-children="停用"
+                placeholder="必填，一句话说明这套流程做什么"
               />
             </a-form-item>
           </a-col>
         </a-row>
       </a-form>
 
-      <a-divider orientation="left">
-        流程节点
-        <a-button
-          v-if="!props.readonly"
-          class="add-step-btn"
-          size="small"
-          type="link"
-          @click="addStep"
-        >
-          + 添加节点
-        </a-button>
-      </a-divider>
+      <a-divider orientation="left">流程节点</a-divider>
 
       <div v-for="(s, i) in form.steps" :key="i" class="step-card">
         <div class="step-head">
           <span class="step-no">节点 {{ i + 1 }}</span>
-          <a-space v-if="!props.readonly">
-            <a-button :disabled="i === 0" size="small" type="link" @click="moveStep(i, -1)">
-              上移
+          <span v-if="s.collapsed" class="step-title">{{ s.subject || '未命名节点' }}</span>
+          <a-space>
+            <a-button size="small" type="link" @click="s.collapsed = !s.collapsed">
+              <component :is="s.collapsed ? RightOutlined : DownOutlined" />
+              {{ s.collapsed ? '展开' : '收起' }}
             </a-button>
-            <a-button
-              :disabled="i === form.steps.length - 1"
-              size="small"
-              type="link"
-              @click="moveStep(i, 1)"
-            >
-              下移
-            </a-button>
-            <a-button danger size="small" type="link" @click="removeStep(i)">移除</a-button>
+            <template v-if="!props.readonly">
+              <a-button :disabled="i === 0" size="small" type="link" @click="moveStep(i, -1)">
+                上移
+              </a-button>
+              <a-button
+                :disabled="i === form.steps.length - 1"
+                size="small"
+                type="link"
+                @click="moveStep(i, 1)"
+              >
+                下移
+              </a-button>
+              <a-button danger size="small" type="link" @click="removeStep(i)">移除</a-button>
+            </template>
           </a-space>
         </div>
 
-        <a-form layout="vertical">
-          <a-row :gutter="12">
-            <a-col :span="12">
-              <a-form-item label="节点名称" required>
-                <a-input
-                  v-model:value="s.subject"
-                  :disabled="props.readonly"
-                  placeholder="该流程节点叫什么"
-                />
-              </a-form-item>
-            </a-col>
-            <a-col :span="12">
-              <a-form-item label="最大驳回次数">
-                <a-input-number
-                  v-model:value="s.maxAttempts"
-                  :disabled="props.readonly"
-                  :max="20"
-                  :min="1"
-                  style="width: 100%"
-                />
-              </a-form-item>
-            </a-col>
-            <a-col :span="24">
-              <a-form-item label="流程定义">
-                <a-textarea
-                  v-model:value="s.description"
-                  :autosize="{ minRows: 2, maxRows: 5 }"
-                  :disabled="props.readonly"
-                  placeholder="该节点要达成什么（供执行者遵循）"
-                />
-              </a-form-item>
-            </a-col>
-          </a-row>
-        </a-form>
+        <div v-show="!s.collapsed" class="step-body">
+          <a-form layout="vertical">
+            <a-row :gutter="12">
+              <a-col :span="12">
+                <a-form-item label="节点名称" required>
+                  <a-input
+                    v-model:value="s.subject"
+                    :disabled="props.readonly"
+                    placeholder="该流程节点叫什么"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="最大驳回次数">
+                  <a-input-number
+                    v-model:value="s.maxAttempts"
+                    :disabled="props.readonly"
+                    :max="20"
+                    :min="1"
+                    style="width: 100%"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="24">
+                <a-form-item label="流程定义">
+                  <a-textarea
+                    v-model:value="s.description"
+                    :autosize="{ minRows: 2, maxRows: 5 }"
+                    :disabled="props.readonly"
+                    placeholder="该节点要达成什么（供执行者遵循）"
+                  />
+                </a-form-item>
+              </a-col>
+            </a-row>
+          </a-form>
 
-        <div class="field-label">执行者</div>
-        <MemberPicker
-          v-model="s.executor"
-          :agent-opts="agentOpts"
-          :agent-loader="api.GetAgentDetail"
-          :kb-opts="kbOpts"
-          :mcp-opts="mcpOpts"
-          :model-opts="modelOpts"
-          :readonly="props.readonly"
-          :skill-opts="skillOpts"
-          :tool-opts="toolOpts"
-        />
-
-        <a-checkbox
-          v-if="!props.readonly"
-          v-model:checked="s.hasVerifier"
-          class="verifier-toggle"
-        >
-          配置检查者（留空则执行完即通过）
-        </a-checkbox>
-        <template v-if="s.hasVerifier">
-          <div class="field-label">检查者</div>
+          <div class="field-label">执行者</div>
           <MemberPicker
-            v-model="s.verifier"
+            v-model="s.executor"
             :agent-opts="agentOpts"
             :agent-loader="api.GetAgentDetail"
             :kb-opts="kbOpts"
@@ -358,8 +333,41 @@ function close() {
             :skill-opts="skillOpts"
             :tool-opts="toolOpts"
           />
-        </template>
+
+          <a-checkbox
+            v-if="!props.readonly"
+            v-model:checked="s.hasVerifier"
+            class="verifier-toggle"
+          >
+            配置检查者（留空则执行完即通过）
+          </a-checkbox>
+          <template v-if="s.hasVerifier">
+            <div class="field-label">检查者</div>
+            <MemberPicker
+              v-model="s.verifier"
+              :agent-opts="agentOpts"
+              :agent-loader="api.GetAgentDetail"
+              :kb-opts="kbOpts"
+              :mcp-opts="mcpOpts"
+              :model-opts="modelOpts"
+              :readonly="props.readonly"
+              :skill-opts="skillOpts"
+              :tool-opts="toolOpts"
+            />
+          </template>
+        </div>
       </div>
+
+      <!-- 添加节点：放在最后一个节点后面（节点多时不用滑回顶部去点） -->
+      <a-button
+        v-if="!props.readonly"
+        block
+        class="add-step-btn"
+        type="dashed"
+        @click="addStep"
+      >
+        + 添加节点
+      </a-button>
 
       <div class="drawer-foot">
         <a-space>
@@ -394,21 +402,32 @@ function close() {
     .step-no {
       font-weight: 600;
     }
+
+    /* 收起时用节点名占住中间（折叠后看不出是哪一段就没意义了） */
+    .step-title {
+      flex: 1;
+      margin: 0 8px;
+      overflow: hidden;
+      font-size: 12px;
+      color: #8c8c8c;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   }
 
-  .field-label {
+  .step-body .field-label {
     margin: 4px 0;
     font-size: 12px;
     color: #8c8c8c;
   }
 
-  .verifier-toggle {
+  .step-body .verifier-toggle {
     margin: 8px 0;
   }
 }
 
 .add-step-btn {
-  margin-left: 12px;
+  margin: 4px 0 12px;
 }
 
 .drawer-foot {

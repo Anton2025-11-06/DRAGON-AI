@@ -18,6 +18,7 @@ from service.service_workflow.routers.workflow_execution_router import (
 )
 from service.service_workflow.routers.workflow_file_router import file_router
 from service.service_workflow.routers.workflow_template_router import template_router
+from service.service_workflow.services import retrieval_backend
 from service.service_workflow.services.workflow_service import ensure_initialized
 
 # service_workflow：智能体编排域
@@ -31,7 +32,12 @@ app = create_app(
     routers=[mcp_router, tool_router, sandbox_router, skill_router],
     # workflow-files 上传经统一存储后端（local / oss），storage 段缺省即 local
     enable_storage=True,
-    enbale_arq_workflow_redis=True
+    enbale_arq_workflow_redis=True,
+    # 知识检索节点的召回后端（ES/Neo4j）：画布上点调试运行时这条执行是在本进程里跑的
+    # （WorkflowExecutionService._drive 的 websocket 分支），不在这里装就会报
+    # 「检索服务未就绪：ES 未初始化」；装不上只降级不阻断启动（详见 retrieval_backend 模块说明）
+    on_ready=retrieval_backend.bootstrap,
+    on_shutdown=retrieval_backend.close,
 )
 
 # 工作流相关路由：统一追加「懒加载初始化」依赖（DB 就绪前调用自愈，不阻断其他路由）

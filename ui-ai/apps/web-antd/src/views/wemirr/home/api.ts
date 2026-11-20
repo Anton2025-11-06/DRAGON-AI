@@ -209,11 +209,39 @@ export function HarnessModels() {
 export function HarnessChat(body: {
   attachments?: HarnessAttachment[];
   message: string;
-  modelId: number;
+  /** 本轮模型；选了智能体时可不传（用智能体自带的模型），传了则覆盖它 */
+  modelId?: number;
   mounts?: Partial<HarnessMounts>;
   sessionId: number;
+  /** 选了智能体时传：worker 据此分派单/团队/目标/SOP 运行时（不传=纯深度探索） */
+  orchMode?: HarnessOrchMode;
+  orchConfigId?: number;
 }) {
   return defHttp.post<{ turnId: string }>('/api/harness/chat', body);
+}
+
+// ==================== 编排智能体候选（「+智能体」选择器） ====================
+
+/** 四种编排模式（与后端 orch_runtime.MODE_ORDER 同一取值） */
+export type HarnessOrchMode = 'goal' | 'single' | 'sop' | 'team';
+
+/**
+ * 可选智能体条目（/api/harness/orch-agents 平铺返回，前端按 mode 分组）
+ *
+ * 后端只给选择器必需的公开字段（use 口径：自己创建的 ∪ 有使用权限的）。
+ */
+export interface HarnessOrchAgent {
+  mode: HarnessOrchMode;
+  id: number;
+  name: string;
+  purpose?: null | string;
+}
+
+/** 四类智能体候选（一次拉齐，弹框内分组展示，只能选一个） */
+export function HarnessOrchAgents() {
+  return defHttp.get<{ items: HarnessOrchAgent[]; total: number }>(
+    '/api/harness/orch-agents',
+  );
 }
 
 /** 请求中断本轮（worker 在事件间隙检查退出，终态帧由服务端下发） */

@@ -40,7 +40,6 @@ const kbOpts = ref<Opt[]>([]);
 const form = reactive({
   name: '',
   purpose: '',
-  status: true,
   executor: { mounts: { skillIds: [], toolIds: [], mcpIds: [], kbIds: [] } } as MemberSpec,
   verifier: { mounts: { skillIds: [], toolIds: [], mcpIds: [], kbIds: [] } } as MemberSpec,
 });
@@ -85,7 +84,6 @@ function resetForm() {
   Object.assign(form, {
     name: '',
     purpose: '',
-    status: true,
     executor: emptyMounts(),
     verifier: emptyMounts(),
   });
@@ -105,7 +103,6 @@ watch(
         Object.assign(form, {
           name: d.name || '',
           purpose: d.purpose || '',
-          status: d.status !== 0,
           executor: cfg.executor || emptyMounts(),
           verifier: cfg.verifier || emptyMounts(),
         });
@@ -123,6 +120,11 @@ async function handleSave() {
     message.warning('请输入目标名称');
     return;
   }
+  // 用途已改为必填项（后端仍保持可空，不影响存量数据）
+  if (!form.purpose.trim()) {
+    message.warning('请输入用途');
+    return;
+  }
   if (!form.executor?.name?.trim() && !form.executor?.sourceAgentId) {
     message.warning('执行者需要一个名称或克隆来源');
     return;
@@ -133,8 +135,7 @@ async function handleSave() {
   }
   const payload: api.OrchGoalSaveReq = {
     name: form.name.trim(),
-    purpose: form.purpose || undefined,
-    status: form.status,
+    purpose: form.purpose.trim(),
     executor: form.executor,
     verifier: form.verifier,
   };
@@ -177,21 +178,11 @@ function close() {
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item label="用途">
+            <a-form-item label="用途" required>
               <a-input
                 v-model:value="form.purpose"
                 :disabled="props.readonly"
-                placeholder="一句话说明这个目标要达成什么"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="启用状态">
-              <a-switch
-                v-model:checked="form.status"
-                :disabled="props.readonly"
-                checked-children="启用"
-                un-checked-children="停用"
+                placeholder="必填，一句话说明这个目标要达成什么"
               />
             </a-form-item>
           </a-col>

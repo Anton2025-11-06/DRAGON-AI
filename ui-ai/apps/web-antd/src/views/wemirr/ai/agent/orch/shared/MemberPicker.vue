@@ -10,6 +10,8 @@
  */
 import { reactive, watch } from 'vue';
 
+import PromptEditor from './PromptEditor.vue';
+
 export interface Opt {
   label: string;
   value: number;
@@ -169,10 +171,10 @@ async function onCloneChange(id: number | undefined) {
         </a-col>
         <a-col :span="24">
           <a-form-item label="系统提示词">
-            <a-textarea
-              v-model:value="local.systemPrompt"
-              :autosize="{ minRows: 3, maxRows: 8 }"
+            <PromptEditor
+              v-model="local.systemPrompt"
               :disabled="props.readonly"
+              :height="160"
               placeholder="留空则沿用平台默认基础段"
             />
           </a-form-item>

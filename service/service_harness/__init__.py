@@ -1,7 +1,8 @@
 from common.common_app.bootstrap import create_app
 from common.common_constants.constant import SERVICE_HARNESS, SERVICE_HARNESS_PORT
 from service.service_harness.routers.harness_router import (
-    chat_router, models_router, options_router, router as session_router,
+    chat_router, models_router, options_router, orch_agents_router,
+    router as session_router,
     sandbox_router,
 )
 from service.service_harness.routers.orch_agent_router import (
@@ -30,6 +31,7 @@ app = create_app(
     service_name=SERVICE_HARNESS,
     default_port=SERVICE_HARNESS_PORT,
     routers=[session_router, chat_router, models_router, options_router,
+             orch_agents_router,
              sandbox_router, orch_agent_router, orch_team_router,
              orch_goal_router, orch_sop_router],
     enable_arq_harness_redis=True,

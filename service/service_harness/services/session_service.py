@@ -218,7 +218,7 @@ class HarnessSessionService:
 
     @staticmethod
     async def create_turn(login_user: dict, session_id: int, message: str,
-                          model_id: int,
+                          model_id: Optional[int],
                           mounts: Optional[MountsReq],
                           attachments: Optional[list[dict]] = None,
                           orch_mode: str = "single",
@@ -226,7 +226,8 @@ class HarnessSessionService:
         """开一轮对话：USER 行 + ASSISTANT 行（RUNNING），返回投递要用的全部事实。
 
         本轮的模型与挂载都落在消息行上（同一会话里逐轮可切换），worker 从
-        ASSISTANT 行取它们跑本轮。模型的授权在可选清单接口已收口（这里不再回查），
+        ASSISTANT 行取它们跑本轮。走编排配置时 model_id 可以为空（落 0，worker
+        改用配置自带的模型）。模型的授权在可选清单接口已收口（这里不再回查），
         挂载的 ACL 校验在 worker 侧（ensure_action）做——这里是「本轮想用什么」
         的记录口，不是信任边界。附件引用（已上传沙箱的文件）落 USER 行，
         worker 经 turn_snapshot 取到后注入提示让模型自行读取。

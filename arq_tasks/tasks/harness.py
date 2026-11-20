@@ -791,11 +791,18 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
         # 编排分派：深度探索（config_id=0）与 single 编排走单 Agent 路径（_stream_reply）；
         # team/goal/sop 是多 Agent 流水线，交 run_pipeline_turn（orch_pipelines 构建器）。
         if config_id and orch_mode in ("team", "goal", "sop"):
-            from service.service_harness.services.orch_runtime import runtime_config
+            from service.service_harness.services.orch_runtime import (
+                apply_model_override, merge_extra_mounts, runtime_config,
+            )
             from arq_tasks.tasks.harness_pipeline import run_pipeline_turn
             cfg = await runtime_config(orch_mode, config_id)
             if cfg is None:
                 raise ValueError("编排配置不存在或已删除")
+            # 页面本轮额外勾选的四类能力：并给该模式里「真正执行的那几个角色」
+            # （团队=队长、目标=执行者+检查者、SOP=第一个节点的执行者+检查者）
+            merge_extra_mounts(cfg, orch_mode, snapshot.get("mounts"))
+            # 页面本轮又手动选了模型：同样只覆盖那几个角色的自带模型
+            apply_model_override(cfg, orch_mode, int(snapshot.get("modelId") or 0))
             result = await run_pipeline_turn(turn_id, login_user, snapshot,
                                              orch_mode, cfg)
             _model_name = None
@@ -807,11 +814,18 @@ async def run_harness_turn(ctx: dict, turn_id: str, login_user: dict) -> None:
                 from service.service_harness.services.orch_agent_service import (
                     OrchAgentService,
                 )
+                from service.service_harness.services.orch_runtime import merge_mounts
                 cfg = await OrchAgentService.runtime_config(config_id)
                 if cfg is None:
                     raise ValueError("编排智能体配置不存在或已删除")
-                mounts = cfg.get("mounts") or {}
-                model_id = int(mounts.get("modelId") or 0)
+                own_mounts = cfg.get("mounts") or {}
+                # 页面本轮勾选的四类能力并给这个单智能体
+                mounts = merge_mounts(own_mounts, snapshot.get("mounts"))
+                # 模型：页面手动选了就用它（覆盖），没选就用智能体自带的
+                model_id = model_id or int(own_mounts.get("modelId") or 0)
+                if not model_id:
+                    raise ValueError(
+                        "该单智能体未配置模型：请在本页选择模型，或到单智能体页面配好模型")
                 run_kwargs = {
                     "agent_id": f"orch_single_{config_id}",
                     "system_prompt": cfg.get("system_prompt"),

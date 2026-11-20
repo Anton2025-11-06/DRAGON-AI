@@ -282,12 +282,15 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
     # （同部门自动可看可用），edit/delete/share 属敏感动作绝不进 scope（不可由同部门推断）。
     # 验证按钮不单列动作码：「有编辑即有验证」——前端按 actions 含 edit 显隐，后端执行
     # 入口走 ensure_any(use, edit)（见 orchestr service），故这里不产生「授了却没按钮/有按钮却没码」漂移。
+    # labels：仅覆盖本资源的动作展示名（编辑 → 编辑与验证，与上面「有编辑即有验证」同义），
+    # 动作码与鉴权判定一律不动，也不污染全平台共用的 ACTION_LABELS["edit"]="编辑"。
     "orch_agent": {
         "name": "单智能体",
         "model": "service.service_harness.models.orch_agent.OrchAgent",
         "id_col": "id", "owner_col": "created_by",
         "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
         "scope": [ACTION_VIEW, ACTION_USE],
+        "labels": {ACTION_EDIT: "编辑与验证"},
         "groups": [
             {"key": "read", "name": "查看与使用",
              "hint": "看得到这个智能体、能让智能体节点/编排挂上它（同部门自动获得这两项）",
@@ -306,6 +309,7 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
         "id_col": "id", "owner_col": "created_by",
         "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
         "scope": [ACTION_VIEW, ACTION_USE],
+        "labels": {ACTION_EDIT: "编辑与验证"},
         "groups": [
             {"key": "read", "name": "查看与使用",
              "hint": "看得到这个团队、能让会话/接口调起它（同部门自动获得这两项）",
@@ -324,6 +328,7 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
         "id_col": "id", "owner_col": "created_by",
         "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
         "scope": [ACTION_VIEW, ACTION_USE],
+        "labels": {ACTION_EDIT: "编辑与验证"},
         "groups": [
             {"key": "read", "name": "查看与使用",
              "hint": "看得到这个目标编排、能让会话/接口调起它（同部门自动获得这两项）",
@@ -342,6 +347,7 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
         "id_col": "id", "owner_col": "created_by",
         "actions": [ACTION_VIEW, ACTION_USE, ACTION_EDIT, ACTION_DELETE, ACTION_SHARE],
         "scope": [ACTION_VIEW, ACTION_USE],
+        "labels": {ACTION_EDIT: "编辑与验证"},
         "groups": [
             {"key": "read", "name": "查看与使用",
              "hint": "看得到这个 SOP、能让会话/接口调起它（同部门自动获得这两项）",
@@ -372,6 +378,19 @@ ACTION_LABELS = {
     ACTION_CONTENT: "查看解析后内容", ACTION_DOC_DELETE: "删除知识",
     ACTION_EVAL: "评测",
 }
+
+
+def action_label(spec: Optional[dict[str, Any]], action: str) -> str:
+    """取某个资源上这个动作的展示名：资源级 labels 覆盖优先，否则用全局 ACTION_LABELS。
+
+    只是换文案，动作码、spec['actions']、鉴权判定一律不变；覆盖写在 spec 里而不是改
+    ACTION_LABELS，因为那份表全平台共用（知识库/工作流的「编辑」不能跟着编排改名）。
+    消费点必须全部走这里（授权弹窗元信息 + 403 文案），否则会出现「弹窗叫编辑与验证、
+    报错叫编辑」这种同一动作两个名字。
+    """
+    override = (spec or {}).get("labels") or {}
+    return override.get(action) or ACTION_LABELS.get(action, action)
+
 
 # 知识库「库内文件」组的码 → 文档侧的等价码。文档级鉴权在自身 ACL 判不过时按这一份
 # 回看父库那一行（见 ensure_action 的 parent 参数），列表侧的可见集合走同一个口径。
@@ -685,7 +704,7 @@ async def ensure_any(login_user: dict, resource_code: str, resource_id: Any,
         if await _owner_in_scope(login_user, owner_id, s):
             if any(a in spec["scope"] for a in wanted):
                 return
-    raise UnauthorizedException(_denied("／".join(ACTION_LABELS.get(a, a) for a in wanted),
+    raise UnauthorizedException(_denied("／".join(action_label(spec, a) for a in wanted),
                                         spec, owner_id))
 
 
@@ -816,7 +835,7 @@ async def _owner_in_scope(login_user: dict, owner_id: Optional[int],
 
 def _denied(action: str, spec: dict, owner_id: Optional[int]) -> str:
     """统一的 403 文案：说明是什么动作、什么资源、该找谁申请。"""
-    label = ACTION_LABELS.get(action, action)
+    label = action_label(spec, action)
     who = f"（可联系归属人 user_id={owner_id} 申请授权）" if owner_id else "（可联系归属人申请授权）"
     return f"无该{spec['name']}的{label}权限{who}"
 
@@ -902,7 +921,7 @@ __all__ = [
     "GRANTEE_USER", "GRANTEE_ROLE", "GRANTEE_DEPT", "GRANTEE_GROUP", "GRANTEE_ALL",
     "GRANTEE_LABELS", "RESOURCE_SPECS", "RESOURCE_TABLES",
     "KB_FILE_TO_DOC", "DOC_TO_KB_FILE",
-    "spec_of", "check_actions", "grantee_conds", "granted_actions",
+    "spec_of", "check_actions", "grantee_conds", "granted_actions", "action_label",
     "build_visible_cond", "decorate_actions",
     "ensure_action", "ensure_any", "ensure_action_strict", "accessible_ids", "load_owner",
     "load_resource_brief",

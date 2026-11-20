@@ -9,7 +9,8 @@
   入口不区分:两套入口就得各养一套守卫;
 - bootstrap 在 worker 进程启动时执行一次(等价 FastAPI 的 lifespan):
   加载 Nacos 配置 → 初始化 MySQL/Redis/httpx 连接池→ 额外装载知识检索节点的
-  召回后端(ES/Neo4j/rag 默认值，取自 arq_ragflow 段，失败只降级不拦启动)。事件不再需要后台桥:
+  召回后端(ES/Neo4j/rag 默认值，与 service_workflow 共用 retrieval_backend 一个入口，
+  失败只降级不拦启动)。事件不再需要后台桥:
   engine 节点执行时经 EventBus 的 pub hook 实时 PUBLISH 到 Redis 频道(含
   node.delta),API 进程的 SSE 订阅者 SUBSCRIBE 实时消费(Pub/Sub 方案)。
 """
@@ -20,7 +21,7 @@ import sys
 from urllib.parse import quote_plus
 
 from common.common_arq.queue import worker_health_key, CustomRedisSettings
-from common.common_constants.constant import SERVICE_WORKFLOW, ARQ_WORKFLOW, ARQ_RAGFLOW
+from common.common_constants.constant import SERVICE_WORKFLOW, ARQ_WORKFLOW
 from common.common_httpx.httpx import httpx_pool
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -28,6 +29,7 @@ from common.common_nacos.config import Config
 from common.common_nacos.nacos_client import nacos_client
 from common.common_redis import redis
 from common.common_storage import close_storage, init_storage
+from service.service_workflow.services import retrieval_backend
 from service.service_workflow.services.workflow_execution_service import WorkflowExecutionService
 
 
@@ -115,32 +117,14 @@ async def bootstrap(ctx: dict) -> None:
     # 读写存储(而非走 HTTP URL),未初始化会退到本地后端,OSS 环境下将读写错位置。
     await init_storage(yml_config.get("storage", {}))
 
-    # 4. 知识检索节点的召回后端：ES / rag 默认值 与 Neo4j 分开装载（与 ragflow worker、
-    #    service_rag 同源同段；get_config_content 是 namespace 级的，不按 service_name 隔离）。
-    #    整段 try 降级：工作流的其余节点不依赖 ES，不能因为检索后端起不来就把整个 worker
-    #    拦在门外——真跑到检索节点时，服务层会报「检索服务未就绪：ES 未初始化」这句可执行的错。
-    #    这里**绝不**再用 rag 段 init_storage：init_storage 会后写覆盖进程默认后端，
-    #    把工作流自己的 bucket/path_prefix 换成 rag 的那一份，文件就落错位置了。
-    rag_yml: dict = {}
-    try:
-        from common.common_es import init_es
-
-        rag_yml = await nacos_client.get_config_content(ARQ_RAGFLOW) or {}
-        await init_es(rag_yml.get("es"))
-        from service.service_rag.services import rag_settings
-
-        await rag_settings.bootstrap(rag_yml)
-        log.info("knowledge retrieval backend ready (arq_ragflow section loaded)")
-    except Exception as e:  # noqa: BLE001
-        log.warning("rag retrieval backend unavailable, 知识检索节点将报错: {}", e)
-    # Neo4j 只服务「图谱增强」那一路：它挂了不该把主链路（关键词+向量）一并算成不可用，
-    # 所以单独一段——节点开了图谱时会在 warnings 里得到「图谱未启用/不可用」的说明
-    try:
-        from common.common_neo4j import init_neo4j
-
-        await init_neo4j(rag_yml.get("neo4j"))
-    except Exception as e:  # noqa: BLE001
-        log.warning("neo4j unavailable, 知识检索节点的图谱增强不可用: {}", e)
+    # 4. 知识检索节点的召回后端：ES / rag 默认值 与 Neo4j（与 service_workflow 的 on_ready
+    #    共用 retrieval_backend 一个入口，两边配置段口径只有一份：本段优先、缺则回落
+    #    arq_ragflow）。装载失败一律只降级：工作流的其余节点不依赖 ES，不能因为检索后端
+    #    起不来就把整个 worker 拦在门外——真跑到检索节点时，服务层会报「检索服务未就绪：
+    #    ES 未初始化」这句可执行的错。这里**绝不**再用 rag 段 init_storage：init_storage
+    #    会后写覆盖进程默认后端，把工作流自己的 bucket/path_prefix 换成 rag 的那一份，
+    #    文件就落错位置了。
+    await retrieval_backend.bootstrap(yml_config)
 
     log.info("arq worker bootstrap done, queue={}", WorkerSettings.queue_name)
     _BOOTSTRAPPED = True
@@ -160,18 +144,7 @@ async def shutdown(ctx: dict) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("storage backend close failed: {}", e)
     # 知识检索后端的连接（bootstrap 装载失败时未初始化，close 对空单例是空操作）
-    try:
-        from common.common_es import close_es
-
-        await close_es()
-    except Exception as e:  # noqa: BLE001
-        log.warning("elasticsearch close failed: {}", e)
-    try:
-        from common.common_neo4j import close_neo4j
-
-        await close_neo4j()
-    except Exception as e:  # noqa: BLE001
-        log.warning("neo4j close failed: {}", e)
+    await retrieval_backend.close()
     log.info("arq worker shutdown done")
 
 

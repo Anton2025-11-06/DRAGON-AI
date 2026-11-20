@@ -29,7 +29,6 @@ import {
   useVueFlow,
   VueFlow,
 } from '@vue-flow/core';
-import { MiniMap } from '@vue-flow/minimap';
 import { message } from 'ant-design-vue';
 
 import { useAiWorkflowStore } from '#/store/ai-workflow';
@@ -42,19 +41,15 @@ import WorkflowNode from './flow-nodes/WorkflowNode.vue';
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
 import '@vue-flow/controls/dist/style.css';
-import '@vue-flow/minimap/dist/style.css';
 
 // ==================== Props ====================
 
 interface Props {
-  /** 是否显示小地图 */
-  showMinimap?: boolean;
   /** 是否只读模式 */
   readonly?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  showMinimap: true,
   readonly: false,
 });
 
@@ -726,9 +721,6 @@ defineExpose({
       <!-- 控制面板 -->
       <Controls v-if="!readonly" position="bottom-left" />
 
-      <!-- 小地图 -->
-      <MiniMap v-if="showMinimap" position="bottom-right" />
-
       <!-- 自定义节点模板 -->
       <template #node-workflow="nodeProps">
         <WorkflowNode v-bind="nodeProps" />
@@ -766,12 +758,6 @@ defineExpose({
     width: 100%;
     height: 100%;
     background-color: #fafafa;
-  }
-
-  :deep(.vue-flow__minimap) {
-    background-color: #fff;
-    border: 1px solid #e0e0e0;
-    border-radius: 4px;
   }
 
   :deep(.vue-flow__controls) {

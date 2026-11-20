@@ -7,11 +7,10 @@ import AclGrantModal from '../../../shared/components/AclGrantModal.vue';
 import createCrudOptions from './crud';
 
 const AgentFormDrawer = defineAsyncComponent(() => import('./AgentFormDrawer.vue'));
-const ValidateConsole = defineAsyncComponent(() => import('./ValidateConsole.vue'));
 
 export default defineComponent({
   name: 'OrchSingleAgentPage',
-  components: { AclGrantModal, AgentFormDrawer, ValidateConsole },
+  components: { AclGrantModal, AgentFormDrawer },
   setup() {
     const crudRef = ref();
     const crudBinding = ref();
@@ -32,14 +31,6 @@ export default defineComponent({
       formOpen.value = true;
     };
 
-    // 验证台
-    const validateOpen = ref(false);
-    const validateAgentId = ref<null | number>(null);
-    const openValidate = (row: any) => {
-      validateAgentId.value = row.id;
-      validateOpen.value = true;
-    };
-
     // 授权弹窗（复用通用 AclGrantModal，resource_code=orch_agent）
     const grantOpen = ref(false);
     const grantItem = ref<any>(null);
@@ -57,7 +48,7 @@ export default defineComponent({
         crudBinding,
         crudRef,
         createCrudOptions,
-        context: { openFormDrawer, openGrantModal, openValidate, openView, removeRow },
+        context: { openFormDrawer, openGrantModal, openView, removeRow },
       });
       crudExposeRef.value = crudExpose;
       crudExpose.doRefresh();
@@ -69,8 +60,6 @@ export default defineComponent({
       formOpen,
       formAgentId,
       formReadonly,
-      validateOpen,
-      validateAgentId,
       grantOpen,
       grantItem,
       onSaved: () => crudExposeRef.value?.doRefresh(),
@@ -89,8 +78,6 @@ export default defineComponent({
       :readonly="formReadonly"
       @saved="onSaved"
     />
-
-    <ValidateConsole v-model:open="validateOpen" :agent-id="validateAgentId" />
 
     <AclGrantModal
       v-if="grantItem"

@@ -18,12 +18,12 @@ from service.service_harness.services.orch_team_service import OrchTeamService
 router = APIRouter(prefix="/orch/team", tags=["智能体编排-团队模式"])
 
 
-@router.get("/page", summary="分页查询团队（搜索名称/用途）")
+@router.get("/page", summary="分页查询团队（名称/用途分别检索）")
 @has_permission("agent:orch:team:list")
 async def page_teams(request: Request, page: int = 1, page_size: int = 10,
-                     keyword: str = None, status: int = None):
+                     name: str = None, purpose: str = None, status: int = None):
     data = await OrchTeamService.page(await get_login_user(request), page, page_size,
-                                      keyword, status)
+                                      name, purpose, status)
     return ApiResponse.success(data=data)
 
 

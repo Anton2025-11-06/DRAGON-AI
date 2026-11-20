@@ -109,6 +109,7 @@ def create_app(service_name: str,
                enable_neo4j: bool = False,
                enable_workspace_manager: bool = False,
                on_ready: Optional[Callable[[dict], Awaitable[None]]] = None,
+               on_shutdown: Optional[Callable[[], Awaitable[None]]] = None,
 
                ) -> FastAPI:
     """
@@ -136,6 +137,10 @@ def create_app(service_name: str,
     :param on_ready: 全部依赖初始化成功后的回调，收到本服务的 Nacos 配置字典。
         给「配置要落进全局单例」的模块用（如 service_rag 的 rag_settings.bootstrap）：
         放在每个请求里懒加载会让首个请求读到默认值，放在 import 期又拿不到 Nacos 配置
+    :param on_shutdown: 依赖释放阶段的回调（在关闭连接池之前），给「自己装了可选后端」
+        的服务用（如 service_workflow 在 on_ready 里装的 ES/Neo4j）：这些依赖不在
+        enable_* 开关里，没有这个钩子就会带着未关闭的会话退出进程。回调自身要吞掉
+        异常——退出期任何一步失败都不该挡住后面的释放
     """
     port = int(os.environ.get(service_name + "_port", default_port))
 
@@ -250,6 +255,12 @@ def create_app(service_name: str,
         yield
 
         # Nacos 不可用时客户端可能未初始化/连接失效，注销失败不阻断进程退出
+        try:
+            if on_shutdown is not None:
+                # 单独一段：业务侧的可选后端释放失败，不能把下面的注销/关池一并跳过
+                await on_shutdown()
+        except Exception as e:
+            log.warning(f"on_shutdown hook failed: {e}")
         try:
             await nacos_client.deregister_service()
             await nacos_client.close()

@@ -53,15 +53,19 @@ class ChatReq(BaseModel):
 
     sessionId: int = Field(..., ge=1, description="会话 id")
     message: str = Field(..., min_length=1, max_length=8000, description="本轮用户输入")
-    modelId: int = Field(..., ge=1, description="本轮选用的模型 id")
+    # 选了智能体（orchConfigId>0）时可缺省：本轮用该编排配置里自带的模型；
+    # 传了则覆盖执行角色的自带模型（页面文案「选择该模型，将会覆盖智能体已配置的模型」）
+    modelId: Optional[int] = Field(
+        None, ge=1, description="本轮选用的模型 id（走编排配置时可不传）")
     mounts: Optional[MountsReq] = Field(
         None, description="本轮挂载快照（不传=本轮不挂载任何能力）")
     attachments: Optional[list[AttachmentItem]] = Field(
         None, max_length=20, description="本轮附件（已上传到沙箱工作区的文件引用，落 USER 行供 worker 注入提示）")
-    # 智能体编排验证台：复用与深度探索完全相同的 /chat 管线，只多带这两个字段
-    # 落到轮次行，worker 据此分派。缺省 single/0 = 深度探索原路径（行为不变）。
+    # 智能体编排：深度探索页「+智能体」选了某个已保存的编排配置（四模式之一），
+    # 复用与纯深度探索完全相同的 /chat 管线，只多带这两个字段落到轮次行，
+    # worker 据此分派。缺省 single/0 = 深度探索原路径（行为不变）。
     orchMode: Optional[str] = Field(
         None, pattern="^(single|team|goal|sop)$",
-        description="编排模式（验证台传入；不传=深度探索）")
+        description="编排模式（页面选了智能体时传入；不传=纯深度探索）")
     orchConfigId: Optional[int] = Field(
         None, ge=0, description="编排配置 id（tb_orch_* 主键；不传/0=深度探索）")

@@ -30,9 +30,9 @@ from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
 from common.common_permission.permission import build_data_scope_filter, is_admin
 from common.common_permission.resource_guard import (
-    ACTION_LABELS, ACTION_SHARE, GRANTEE_ALL, GRANTEE_DEPT, GRANTEE_GROUP, GRANTEE_LABELS,
-    GRANTEE_ROLE, GRANTEE_USER, RESOURCE_SPECS, check_actions, ensure_action_strict,
-    load_resource_brief, maybe_session, spec_of)
+    ACTION_SHARE, GRANTEE_ALL, GRANTEE_DEPT, GRANTEE_GROUP, GRANTEE_LABELS,
+    GRANTEE_ROLE, GRANTEE_USER, RESOURCE_SPECS, action_label, check_actions,
+    ensure_action_strict, load_resource_brief, maybe_session, spec_of)
 
 # 资源类型 → 功能权限点（页面准入用；数据权限另由 share 判定）。
 # 权限点串已在 sql/v2_init.sql PART 8 建好，这里只做映射，不再新增第二份定义
@@ -65,6 +65,8 @@ class AclService:
 
         弹窗勾选框、403 文案、SQL 注释三处的动作名同源于 RESOURCE_SPECS/ACTION_LABELS，
         前端拿到什么渲染什么，避免「后端加了动作、前端少个勾选项」这种静默漂移。
+        名称统一走 action_label（资源级 labels 可覆盖本资源的叫法，如编排四模式的
+        「编辑与验证」），不直接取 ACTION_LABELS，否则弹窗与报错文案会叫两个名字。
         groups 是「操作范围」那一列的分类（每个资源在 spec 里各写各的组），
         下发时就按组把名称一并带好，前端只补图标和排版，不再自己猜哪个动作算一类。
         """
@@ -76,12 +78,12 @@ class AclService:
                 "resource_code": code,
                 "resource_name": spec["name"],
                 "grant_permission": GRANT_PERMISSIONS.get(code, ""),
-                "actions": [{"code": a, "name": ACTION_LABELS.get(a, a)} for a in spec["actions"]],
+                "actions": [{"code": a, "name": action_label(spec, a)} for a in spec["actions"]],
                 # 数据范围档（同部门自动获得的动作）：弹窗里给个提示，免得重复授权
-                "scope_actions": [{"code": a, "name": ACTION_LABELS.get(a, a)}
+                "scope_actions": [{"code": a, "name": action_label(spec, a)}
                                   for a in spec.get("scope", [])],
                 "groups": [{"key": g["key"], "name": g["name"], "hint": g.get("hint", ""),
-                            "actions": [{"code": a, "name": ACTION_LABELS.get(a, a)}
+                            "actions": [{"code": a, "name": action_label(spec, a)}
                                         for a in g["actions"]]}
                            for g in (spec.get("groups") or [])],
                 "grantee_types": [{"code": t, "name": n} for t, n in GRANTEE_LABELS.items()],
@@ -109,6 +111,8 @@ class AclService:
                 session, [(r.grantee_type, r.grantee_id) for r in rows])
 
         groups: dict[tuple, dict] = {}
+        # 动作名用本资源的展示名（与弹窗勾选框、403 文案同源，不硬编全局表）
+        spec = spec_of(brief["resource_code"])
         for r in rows:
             key = (r.grantee_type, r.grantee_id, r.dept_include_sub)
             item = groups.setdefault(key, {
@@ -120,7 +124,7 @@ class AclService:
                 "expire_time": r.expire_time,
                 "actions": []})
             item["actions"].append({"acl_id": r.acl_id, "action": r.action,
-                                    "action_name": ACTION_LABELS.get(r.action, r.action)})
+                                    "action_name": action_label(spec, r.action)})
         return {"resource": brief, "items": list(groups.values())}
 
     @staticmethod

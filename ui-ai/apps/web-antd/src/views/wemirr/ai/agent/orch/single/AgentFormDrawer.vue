@@ -10,6 +10,7 @@ import { computed, reactive, ref, watch } from 'vue';
 
 import { message } from 'ant-design-vue';
 
+import PromptEditor from '../shared/PromptEditor.vue';
 import * as api from './api';
 
 const props = defineProps<{
@@ -42,7 +43,6 @@ const form = reactive({
   name: '',
   purpose: '',
   systemPrompt: '',
-  status: true,
   skillIds: [] as number[],
   toolIds: [] as number[],
   mcpIds: [] as number[],
@@ -85,7 +85,6 @@ function resetForm() {
     name: '',
     purpose: '',
     systemPrompt: '',
-    status: true,
     skillIds: [],
     toolIds: [],
     mcpIds: [],
@@ -109,7 +108,6 @@ watch(
           name: d.name || '',
           purpose: d.purpose || '',
           systemPrompt: d.systemPrompt || '',
-          status: d.status !== 0,
           skillIds: m.skillIds || [],
           toolIds: m.toolIds || [],
           mcpIds: m.mcpIds || [],
@@ -130,11 +128,15 @@ async function handleSave() {
     message.warning('请输入智能体名称');
     return;
   }
+  // 用途已改为必填项（后端仍保持可空，不影响存量数据）
+  if (!form.purpose.trim()) {
+    message.warning('请输入用途');
+    return;
+  }
   const payload: api.OrchAgentSaveReq = {
     name: form.name.trim(),
-    purpose: form.purpose || undefined,
+    purpose: form.purpose.trim(),
     systemPrompt: form.systemPrompt || undefined,
-    status: form.status,
     mounts: {
       skillIds: form.skillIds,
       toolIds: form.toolIds,
@@ -180,18 +182,18 @@ function close() {
             placeholder="给这个智能体起个名字"
           />
         </a-form-item>
-        <a-form-item label="用途">
+        <a-form-item label="用途" required>
           <a-input
             v-model:value="form.purpose"
             :disabled="props.readonly"
-            placeholder="一句话说明它擅长做什么（列表检索也按此匹配）"
+            placeholder="必填，一句话说明它擅长做什么（列表检索也按此匹配）"
           />
         </a-form-item>
         <a-form-item label="系统提示词">
-          <a-textarea
-            v-model:value="form.systemPrompt"
-            :autosize="{ minRows: 6, maxRows: 14 }"
+          <PromptEditor
+            v-model="form.systemPrompt"
             :disabled="props.readonly"
+            :height="200"
             placeholder="运行时会覆盖深度探索默认基础段；留空则沿用平台默认"
           />
         </a-form-item>
@@ -270,16 +272,6 @@ function close() {
                 option-filter-prop="label"
                 placeholder="可检索的知识库"
                 style="width: 100%"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="启用状态">
-              <a-switch
-                v-model:checked="form.status"
-                :disabled="props.readonly"
-                checked-children="启用"
-                un-checked-children="停用"
               />
             </a-form-item>
           </a-col>

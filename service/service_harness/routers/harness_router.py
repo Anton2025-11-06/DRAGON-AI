@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""深度探索路由：会话管理 / 对话（ARQ 投递 + SSE 订阅）/ 模型可选清单。
+"""深度探索路由：会话管理 / 对话（ARQ 投递 + SSE 订阅）/ 模型可选清单 / 编排智能体候选。
 
 权限口径（与首页沙箱 demo 路由 sandbox_router 一致）：任何登录用户可访问，
 不绑定业务权限码，网关 JWT 中间件统一鉴权；资源归属在 service 里按
@@ -118,10 +118,14 @@ async def send_chat(request: Request, body: ChatReq):
     KB 检索的鉴权上下文。
     """
     login_user = await get_login_user(request)
-    # 编排验证台：本轮要跑某个已保存的编排配置（orchConfigId>0）时，先卡一次
-    # 「能跑起来才能验证」= ensure_any(use, edit)（与深度探索不同的唯一一道门）。
+    # 编排智能体：本轮要跑某个已保存的编排配置（orchConfigId>0）时，先卡一次
+    # 「能跑起来才能用」= ensure_any(use, edit)（与纯深度探索不同的唯一一道门）。
     orch_mode = body.orchMode or "single"
     orch_config_id = int(body.orchConfigId or 0)
+    # 模型缺省只在「本轮走编排配置」时成立（用配置里自带的模型）：纯深度探索没了
+    # 模型什么也跑不了，这里挡住比到 worker 里 build_model(0) 报错早一轮。
+    if not orch_config_id and not body.modelId:
+        return ApiResponse.error(400, "请先选择一个已授权的模型")
     if orch_config_id:
         from service.service_harness.services.orch_runtime import (
             ensure_runnable as orch_ensure_runnable,
@@ -222,6 +226,24 @@ async def list_options(request: Request, kind: str):
         data = await HarnessOptionsService.options(login_user, kind)
     except ValueError as e:
         return ApiResponse.error(400, str(e))
+    return ApiResponse.success(data={"items": data, "total": len(data)})
+
+
+# ==================== 编排智能体候选（「+智能体」选择器） ====================
+
+orch_agents_router = APIRouter(prefix="/orch-agents", tags=["深度探索-智能体选择"])
+
+
+@orch_agents_router.get("", summary="可选智能体清单（四模式，use 口径：自建 ∪ 授权）")
+async def list_orch_agents(request: Request):
+    """深度探索页「+智能体」弹框数据源：四类平铺返回，前端按 mode 分组。
+
+    与 /options 同一口径——任何登录用户可访问，可见集由 ACL 下推（use 口径
+    = 自己创建的 ∪ 有使用权限的），不回配置内容；真正跑之前 /chat 再卡一次 ensure_runnable。
+    """
+    from service.service_harness.services.orch_runtime import usable_agents
+    login_user = await get_login_user(request)
+    data = await usable_agents(login_user)
     return ApiResponse.success(data={"items": data, "total": len(data)})
 
 

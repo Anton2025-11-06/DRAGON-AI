@@ -90,13 +90,29 @@ service_workflow:
     pool_size: 10 
     max_overflow: 10
     echo: False
+  # 工作流「知识检索」节点的召回后端：本段优先，缺则回落 arq_ragflow 的同名两段
+  # （装载入口 service_workflow.services.retrieval_backend，API 进程与 worker 共用一个口径）。
+  # 装不上只降级不阻断启动：其余节点不依赖 ES，真跑到检索节点才会报「检索服务未就绪」。
+  # 两个坑：1) arq_workflow 段只被用来取 arq 的 redis 地址，es/neo4j 写在那里读不到；
+  #           2) 缩进必须用空格——YAML 里的 TAB 会让整份配置解析失败（连带 mysql/redis 一起读不出来）。
+  es:
+    url: http://127.0.0.1:9200
+    # username: ''                  # 开了 security 才填（与 service_rag.es 同一套键）
+    # password: ''
+    # index: rag_knowledge_chunk    # 必须与知识库写入用的同一个索引，否则召回永远为空
+  neo4j:                            # 只服务「图谱增强」那一路，不填则该路降级（切片检索不受影响）
+    url: bolt://127.0.0.1:7687
+    user: neo4j
+    password: Jzh@616294
 
+# arq workflow worker 的队列 Redis（common_arq.queue.CustomRedisSettings 只读本段的 redis.url）：
+# 知识检索节点的 es/neo4j 不从这一份读，写在这里等于没写（见上面 service_workflow 段的说明）
 arq_workflow:
   redis:
     url: redis://127.0.0.1:26739/0
     password: Jzh@616294
-0
-# a ==================== 知识库（RAG）模块 ====================
+
+# ==================== 知识库（RAG）模块 ====================
 # service_rag（API 进程）与 arq_ragflow（摄取/图谱 worker）必须读到同一套
 # mysql/storage/es/neo4j：上传在 API 进程落 OSS、解析在 worker 取文件，两处存储后端
 # 不一致就会出现「上传成功、worker 找不到文件」；两段的 es/neo4j 亦必须同实例，

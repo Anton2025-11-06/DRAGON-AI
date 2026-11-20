@@ -336,6 +336,35 @@ export default defineComponent({
     const kbOptions = ref<api.HarnessOptionItem[]>([]);
     const pickerSelected = ref<MountedItem[]>([]);
 
+    // 智能体选择（四类编排配置：单/团队/目标/SOP，use 口径，只能选一个）
+    const orchAgent = ref<api.HarnessOrchAgent | null>(null);
+    const agentPickerVisible = ref(false);
+    const agentPickerLoading = ref(false);
+    const agentOptions = ref<api.HarnessOrchAgent[]>([]);
+    /** 弹框里当前勾选的键（点「确定」才落到 orchAgent）：`${mode}:${id}` */
+    const agentPickKey = ref('');
+    /** 弹框分组顺序与标题（与四个智能体页面同序） */
+    const AGENT_MODE_LABELS: Array<{
+      label: string;
+      mode: api.HarnessOrchMode;
+    }> = [
+      { label: '单智能体', mode: 'single' },
+      { label: '团队智能体', mode: 'team' },
+      { label: '目标智能体', mode: 'goal' },
+      { label: 'SOP', mode: 'sop' },
+    ];
+    const agentGroups = computed(() =>
+      AGENT_MODE_LABELS.map((g) => ({
+        ...g,
+        items: agentOptions.value.filter((a) => a.mode === g.mode),
+      })),
+    );
+    /** 同一张表的不同模式 id 可能重号，分组键带上 mode */
+    const agentKeyOf = (a: api.HarnessOrchAgent) => `${a.mode}:${a.id}`;
+    /** 已选智能体的模式文案（标签上显示「团队智能体 · xxx」，便于分辨重名） */
+    const agentModeLabel = (mode: api.HarnessOrchMode) =>
+      AGENT_MODE_LABELS.find((g) => g.mode === mode)?.label || mode;
+
     // ==================== 沙箱 ====================
     const sandboxLoading = ref(false);
     // 工作区绝对根：与后端 WORKSPACE_ROOT 对齐；前端所有路径都以此开头，避免“无 path”传参。
@@ -626,6 +655,7 @@ export default defineComponent({
       loadedSessions.delete(0);
       composerMeta.delete(0);
       mountedItems.value = [];
+      orchAgent.value = null;
       inputValue.value = '';
     }
 
@@ -659,9 +689,16 @@ export default defineComponent({
       }
     }
 
-    /** 切模型：纯前端 composer 状态，随每次发消息一并传给后端（不绑会话，可随时切换） */
-    function changeModel(value: number) {
-      modelId.value = value;
+    /**
+     * 切模型：纯前端 composer 状态，随每次发消息一并传给后端（不绑会话，可随时切换）。
+     * 开了 allowClear 后 X 以 undefined 进来 → 等同清空本轮选择。
+     */
+    function changeModel(value?: number) {
+      modelId.value = Number(value) || 0;
+      // 已选智能体又手动指定模型：明确告知这会盖掉智能体里配好的模型
+      if (orchAgent.value && modelId.value) {
+        message.warning('选择该模型，将会覆盖智能体已配置的模型');
+      }
     }
 
     // ==================== 对话（ARQ 投递 + SSE 订阅） ====================
@@ -684,7 +721,8 @@ export default defineComponent({
       }
       const atts = readyAttachments();
       if (!text && atts.length === 0) return;
-      if (!modelId.value) {
+      // 选了智能体就可以不选模型（用智能体自带的）；纯深度探索没模型跑不了
+      if (!modelId.value && !orchAgent.value) {
         message.warning('请先在下方选择一个已授权的模型');
         return;
       }
@@ -744,8 +782,11 @@ export default defineComponent({
         const res = await api.HarnessChat({
           sessionId: sid,
           message: messageText,
-          modelId: modelId.value,
+          modelId: modelId.value || undefined,
           mounts: currentMounts(),
+          // 选了智能体：本轮交该编排配置执行，页面勾选的四类能力由后端并给执行角色
+          orchMode: orchAgent.value?.mode,
+          orchConfigId: orchAgent.value?.id,
           attachments:
             attachments && attachments.length ? attachments : undefined,
         });
@@ -783,7 +824,8 @@ export default defineComponent({
     /** 提交 AskUser 表单：拼 answers JSON 走 message 字段，气泡显示可读文本 */
     async function submitAskUser(msg: ChatMsg) {
       if (msg.answered || sending.value) return;
-      if (!modelId.value) {
+      // 与 handleSend 同口径：选了智能体即可免选模型
+      if (!modelId.value && !orchAgent.value) {
         message.warning('请先在下方选择一个已授权的模型');
         return;
       }
@@ -1193,6 +1235,43 @@ export default defineComponent({
       }
     }
 
+    // ==================== 智能体 picker（四类，单选）====================
+    async function openAgentPicker() {
+      agentPickerVisible.value = true;
+      agentPickerLoading.value = true;
+      agentPickKey.value = orchAgent.value ? agentKeyOf(orchAgent.value) : '';
+      try {
+        // 每次打开都刷新：use 授权可能刚被授予/收回，缓存的旧口径会误导选择
+        agentOptions.value = (await api.HarnessOrchAgents()).items || [];
+      } catch {
+        agentOptions.value = [];
+      } finally {
+        agentPickerLoading.value = false;
+      }
+    }
+
+    /** 单选：点中即选中，再点同一个取消；换智能体直接点另一个即可 */
+    function toggleAgentPick(item: api.HarnessOrchAgent) {
+      const key = agentKeyOf(item);
+      agentPickKey.value = agentPickKey.value === key ? '' : key;
+    }
+
+    function confirmAgentPicker() {
+      const next =
+        agentOptions.value.find((a) => agentKeyOf(a) === agentPickKey.value) ||
+        null;
+      orchAgent.value = next;
+      // 添加了智能体→模型选择自动置空（框里改显「智能体自带配置模型」）；
+      // 用户再手动选则视为覆盖，见 changeModel 的提示
+      if (next) modelId.value = 0;
+      agentPickerVisible.value = false;
+    }
+
+    /** X 掉已选智能体：回到纯深度探索（本轮不再走任何编排运行时） */
+    function clearAgent() {
+      orchAgent.value = null;
+    }
+
     // ==================== 沙箱文件逻辑 ====================
     async function loadSandboxFiles(dir = currentPath.value) {
       // 任何目录导航（返回/进入/面包屑/刷新）都先收起预览弹窗，回到文件列表
@@ -1488,6 +1567,18 @@ export default defineComponent({
       pickerSelected,
       togglePick,
       confirmPicker,
+      // 智能体 picker
+      orchAgent,
+      agentPickerVisible,
+      agentPickerLoading,
+      agentGroups,
+      agentPickKey,
+      agentKeyOf,
+      agentModeLabel,
+      openAgentPicker,
+      toggleAgentPick,
+      confirmAgentPicker,
+      clearAgent,
       sandboxLoading,
       currentPath,
       workspace,
@@ -1629,7 +1720,9 @@ export default defineComponent({
                 <summary class="hermes-seg-summary">
                   <LoadingOutlined v-if="seg.active" spin />
                   <BulbOutlined v-else />
-                  <span>{{ seg.active ? '思考中…' : '已完成思考' }}</span>
+                  <span class="hermes-seg-label">{{
+                    seg.active ? '思考中…' : '已完成思考'
+                  }}</span>
                   <span v-if="thinkingHint(seg.text)" class="hermes-seg-hint">{{
                     thinkingHint(seg.text)
                   }}</span>
@@ -1803,6 +1896,23 @@ export default defineComponent({
       <footer class="hermes-input">
         <div class="hermes-input-tools">
           <button
+            class="hermes-add-btn is-agent"
+            type="button"
+            @click="openAgentPicker"
+          >
+            <PlusOutlined /> 智能体
+          </button>
+          <!-- 已选智能体：X 掉即回到纯深度探索（不走任何编排运行时） -->
+          <a-tag
+            v-if="orchAgent"
+            class="hermes-agent-tag"
+            closable
+            color="purple"
+            @close="clearAgent"
+          >
+            {{ agentModeLabel(orchAgent.mode) }} · {{ orchAgent.name }}
+          </a-tag>
+          <button
             class="hermes-add-btn is-skill"
             type="button"
             @click="openPicker('skill')"
@@ -1846,7 +1956,10 @@ export default defineComponent({
             class="hermes-model-select"
             size="small"
             :options="modelSelectOptions"
-            placeholder="选择模型"
+            :placeholder="
+              orchAgent && !modelId ? '智能体自带配置模型' : '选择模型'
+            "
+            allow-clear
             :value="modelId || undefined"
             @change="changeModel"
           />
@@ -2158,6 +2271,36 @@ export default defineComponent({
           <a-empty v-if="kbOptions.length === 0" description="暂无可用知识库" />
         </div>
       </template>
+    </a-modal>
+
+    <!-- 智能体选择弹窗：按 单/团队/目标/SOP 分组，组内跨组都只能选一个 -->
+    <a-modal
+      v-model:open="agentPickerVisible"
+      title="选择智能体（只能选一个）"
+      width="560px"
+      @ok="confirmAgentPicker"
+    >
+      <div v-if="agentPickerLoading" class="hermes-picker-loading">
+        <a-spin />
+      </div>
+      <div v-else class="hermes-agent-groups">
+        <div v-for="g in agentGroups" :key="g.mode" class="hermes-agent-group">
+          <div class="hermes-agent-group-title">{{ g.label }}</div>
+          <div
+            v-for="a in g.items"
+            :key="agentKeyOf(a)"
+            class="hermes-picker-item"
+            :class="{ active: agentPickKey === agentKeyOf(a) }"
+            @click="toggleAgentPick(a)"
+          >
+            <b>{{ a.name }}</b>
+            <span>{{ a.purpose || '未填写用途' }}</span>
+          </div>
+          <div v-if="g.items.length === 0" class="hermes-agent-group-empty">
+            暂无可用（需本人创建或被授权使用）
+          </div>
+        </div>
+      </div>
     </a-modal>
 
     <!-- 沙箱文件预览弹窗（输出物卡片与工作区文件共用一份，内容按扩展名选渲染方式） -->
@@ -2485,6 +2628,12 @@ export default defineComponent({
           transform: translateY(0);
         }
 
+        &.is-agent {
+          color: #6366f1;
+          background: rgba(99, 102, 241, 0.1);
+          border-color: rgba(99, 102, 241, 0.32);
+        }
+
         &.is-skill {
           color: #1677ff;
           background: rgba(22, 119, 255, 0.1);
@@ -2521,9 +2670,19 @@ export default defineComponent({
         color: var(--text-color-3, #8a9099);
       }
 
+      // 已选智能体标签：名字过长省略号，不换行顶高这一行工具条
+      .hermes-agent-tag {
+        margin-inline-end: 0;
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .hermes-model-select {
         margin-left: auto;
-        width: 160px;
+        // 要装得下占位文案「智能体自带配置模型」（9 个字）+ 清除图标
+        width: 210px;
         flex-shrink: 0;
       }
     }
@@ -2802,6 +2961,29 @@ export default defineComponent({
   }
 }
 
+// 智能体弹框：四类各一节，候选多时组内整体滚动，标题不参与滚动之外的布局挤压
+.hermes-agent-groups {
+  max-height: 420px;
+  overflow-y: auto;
+
+  .hermes-agent-group {
+    margin-bottom: 12px;
+  }
+
+  .hermes-agent-group-title {
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-color-2, #4e5969);
+  }
+
+  .hermes-agent-group-empty {
+    padding: 2px 12px 6px;
+    font-size: 12px;
+    color: var(--text-color-3, #b0b6bf);
+  }
+}
+
 .hermes-file-meta {
   margin-bottom: 8px;
   font-size: 12px;
@@ -2938,6 +3120,14 @@ export default defineComponent({
       &::-webkit-details-marker {
         display: none;
       }
+    }
+
+    // 思考态标签（【思考中】【已完成思考】）必须单行展示：summary 是 flex 布局，
+    // 而中文文本的 min-content 宽度只有 1 个字，子项默认 flex-shrink:1 时被 hint
+    // 挤窄就会拆成“思考”一行、“中”一行，所以这里锁死不收缩 + 禁止换行
+    .hermes-seg-label {
+      flex: none;
+      white-space: nowrap;
     }
 
     .hermes-seg-body {

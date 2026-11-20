@@ -17,12 +17,12 @@ from service.service_harness.services.orch_agent_service import OrchAgentService
 router = APIRouter(prefix="/orch/agent", tags=["智能体编排-单智能体"])
 
 
-@router.get("/page", summary="分页查询单智能体（搜索名称/用途）")
+@router.get("/page", summary="分页查询单智能体（名称/用途分别检索）")
 @has_permission("agent:orch:single:list")
 async def page_agents(request: Request, page: int = 1, page_size: int = 10,
-                      keyword: str = None, status: int = None):
+                      name: str = None, purpose: str = None, status: int = None):
     data = await OrchAgentService.page(await get_login_user(request), page, page_size,
-                                       keyword, status)
+                                       name, purpose, status)
     return ApiResponse.success(data=data)
 
 

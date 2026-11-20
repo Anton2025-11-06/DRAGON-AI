@@ -4,8 +4,9 @@ import { defHttp } from '#/api/request';
  * SOP 模式编排前端接口层。
  *
  * 流程节点：名称/流程定义/执行者/检查者/最大驳回次数（默认 3）。执行者/检查者来源两条路：
- * 从单智能体克隆（sourceAgentId，后端逐成员 use 口径过滤无权能力）或页面自定义。验证台复用
- * 深度探索 SSE 管线（/api/harness/chat 带 orchMode=sop + orchConfigId），worker 据此跑
+ * 从单智能体克隆（sourceAgentId，后端逐成员 use 口径过滤无权能力）或页面自定义。列表页的
+ * 「验证」按钮已删除（验证能力包含在「编辑与验证」这个授权类型里），SOP 统一在深度探索页
+ * 运行：发消息带 orchMode=sop + orchConfigId，worker 据此跑
  * SOPEngine（顺序流程，所有节点共用一份 state）。
  */
 const BASE_URL = '/api/harness/orch/sop';
@@ -72,7 +73,6 @@ export interface OrchSopSaveReq {
   name: string;
   purpose?: null | string;
   steps: OrchSopStepSpec[];
-  status?: boolean;
 }
 
 /** 挂载/模型候选（后端 usable-resources 平铺返回） */
@@ -86,10 +86,10 @@ export interface ResourceOption {
 
 // ==================== CRUD ====================
 export const PageList = (params: {
-  keyword?: string;
+  name?: string;
+  purpose?: string;
   page: number;
   page_size: number;
-  status?: number;
 }) => defHttp.get<{ items: OrchSopItem[]; total: number }>(`${BASE_URL}/page`, { params });
 
 export const GetDetail = (id: number) =>
@@ -117,24 +117,8 @@ export const ListAgentsForClone = () =>
 export const GetAgentDetail = (id: number) =>
   defHttp.get<any>(`${BASE_URL}/clone-source/${id}`);
 
-// ==================== 验证台：复用 harness 会话/对话/SSE ====================
-export const CreateSession = (title: string) =>
-  defHttp.post<{ id: number }>('/api/harness/session', { title });
+// ==================== 模型候选（表单抽屉的模型 picker） ====================
 
-/** 发送一轮：带 orchMode=sop + orchConfigId，worker 跑 SOPEngine */
-export const OrchChat = (body: {
-  message: string;
-  modelId: number;
-  orchConfigId: number;
-  orchMode: string;
-  sessionId: number;
-}) => defHttp.post<{ turnId: string }>('/api/harness/chat', body);
-
-export const OrchInterrupt = (turnId: string) =>
-  defHttp.post(`/api/harness/chat/${turnId}/interrupt`);
-
-export const SubscribeUrl = (turnId: string) =>
-  `/api/harness/chat/${turnId}/subscribe`;
-
+/** 本人已授权且支持工具调用的模型清单 */
 export const ListModels = () =>
   defHttp.get<{ items: ResourceOption[]; total: number }>('/api/harness/models');

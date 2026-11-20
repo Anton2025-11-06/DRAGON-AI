@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from common.common_log.log_init import log
 from common.common_mysql.mysql import mysql_client
@@ -42,12 +42,15 @@ class OrchSopService:
     # ==================== 查询 ====================
     @staticmethod
     async def page(login_user: dict, page: int = 1, page_size: int = 10,
-                   keyword: str = None, status: int = None) -> dict:
+                   name: str = None, purpose: str = None,
+                   status: int = None) -> dict:
+        """分页 + 搜索（名称、用途两个独立条件，各自 like，同时填即取交集）。"""
         async with mysql_client.get_session() as session:
             conds = [OrchSop.is_deleted == 0]
-            if keyword:
-                like = f"%{keyword}%"
-                conds.append(or_(OrchSop.name.like(like), OrchSop.purpose.like(like)))
+            if name:
+                conds.append(OrchSop.name.like(f"%{name}%"))
+            if purpose:
+                conds.append(OrchSop.purpose.like(f"%{purpose}%"))
             if status is not None:
                 conds.append(OrchSop.status == status)
             visible = build_visible_cond(login_user, RESOURCE_CODE, OrchSop.id,

@@ -155,6 +155,11 @@ def build_meta_filters(raw: Optional[Sequence[dict]]) -> tuple[list[dict], list[
         value = one.get("value")
         if not field:
             continue
+        if value is None or (isinstance(value, str) and not value.strip()) \
+                or (isinstance(value, (list, tuple, set)) and not value):
+            # 值空着就是这条还没填完（画布上可以先加一行再逐步填）：当成没有这条条件。
+            # 不能拿空串去拼 term——那会把结果清成 0 条，「一个都没搜到」比「这条没生效」难查得多
+            continue
         spec = _META_FIELDS.get(field.lower().replace("_", ""))
         if spec is None:
             notes.append(f"元数据过滤字段 {field} 不在可检索字段内，已忽略该条件")
@@ -313,9 +318,12 @@ class _SearchRunner:
         """鉴权 → 分组 → 各组召回 → 库级裁剪 → 图谱叠加 → 重排 → 补全出口字段。"""
         if not es_client.ready:
             # 存储没连上时报一句可执行的提示，而不是返回一个空结果集让用户去猜：
-            # 「搜不到」和「服务没配好」在页面上长得一模一样，但只有后者能修
-            raise ValueError("检索服务未就绪：ES 未初始化（检查 Nacos 的 es 配置段与"
-                             "服务启动时的 enable_es）")
+            # 「搜不到」和「服务没配好」在页面上长得一模一样，但只有后者能修。
+            # 配置段按调用方分两处说清楚：知识库检索走 service_rag（enable_es），
+            # 工作流的知识检索节点走 service_workflow（arq_workflow 段只装 redis，写那里读不到）
+            raise ValueError("检索服务未就绪：ES 未初始化（检查 Nacos 的 es 配置段："
+                             "知识库页面看 service_rag.es，工作流节点看 service_workflow.es，"
+                             "并重起对应的服务/worker）")
         t_stage = time.perf_counter()
         self.targets = await self._load_targets()
         self.watch.add("鉴权取库", t_stage)

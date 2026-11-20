@@ -834,7 +834,6 @@ onBeforeUnmount(() => {
         <div class="center-panel">
           <VueFlowCanvas
             ref="canvasRef"
-            :show-minimap="true"
             :readonly="false"
             @graph-ready="handleGraphReady"
             @node-click="handleNodeClick"

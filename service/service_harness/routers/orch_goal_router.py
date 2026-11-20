@@ -16,12 +16,12 @@ from service.service_harness.services.orch_goal_service import OrchGoalService
 router = APIRouter(prefix="/orch/goal", tags=["智能体编排-目标模式"])
 
 
-@router.get("/page", summary="分页查询目标（搜索名称/用途）")
+@router.get("/page", summary="分页查询目标（名称/用途分别检索）")
 @has_permission("agent:orch:goal:list")
 async def page_goals(request: Request, page: int = 1, page_size: int = 10,
-                     keyword: str = None, status: int = None):
+                     name: str = None, purpose: str = None, status: int = None):
     data = await OrchGoalService.page(await get_login_user(request), page, page_size,
-                                      keyword, status)
+                                      name, purpose, status)
     return ApiResponse.success(data=data)
 
 

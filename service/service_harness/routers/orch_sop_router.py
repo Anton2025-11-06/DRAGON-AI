@@ -16,12 +16,12 @@ from service.service_harness.services.orch_sop_service import OrchSopService
 router = APIRouter(prefix="/orch/sop", tags=["智能体编排-SOP模式"])
 
 
-@router.get("/page", summary="分页查询 SOP（搜索名称/用途）")
+@router.get("/page", summary="分页查询 SOP（名称/用途分别检索）")
 @has_permission("agent:orch:sop:list")
 async def page_sops(request: Request, page: int = 1, page_size: int = 10,
-                    keyword: str = None, status: int = None):
+                    name: str = None, purpose: str = None, status: int = None):
     data = await OrchSopService.page(await get_login_user(request), page, page_size,
-                                     keyword, status)
+                                     name, purpose, status)
     return ApiResponse.success(data=data)
 
 

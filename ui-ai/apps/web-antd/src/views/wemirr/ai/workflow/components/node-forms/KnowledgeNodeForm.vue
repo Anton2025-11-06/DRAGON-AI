@@ -196,11 +196,12 @@ function handleChange() {
     // 重排序开关原样存：面板上开关显示的仓位必须等于真实行为
     // （关掉=本次明确不重排，不再偷偷沿用库配置）
     rerankConfig: { ...formData.rerankConfig },
+    // 过滤条件整组原样带回（不按填没填过滤）：父级会把自己 emit 出去的 config 回灌给
+    // props.config，这里一过滤，刚点「添加过滤条件」长出来的那行就在下一轮 watch 里被抹掉，
+    // 界面上看着就是「点了没反应」（与 IfElse 表单同一口径）。空行在执行侧被当「没写完」跳过
     metadataFilters:
       formData.metadataFilters && formData.metadataFilters.length > 0
-        ? formData.metadataFilters.filter(
-            (f: MetadataFilter) => f.field && f.operator,
-          )
+        ? formData.metadataFilters.map((f: MetadataFilter) => ({ ...f }))
         : undefined,
     withGraph: !!formData.withGraph,
     graphChatModelId: formData.withGraph
@@ -445,7 +446,7 @@ onMounted(() => {
       </a-button>
       <div class="form-hint">
         只能按已建索引的字段过滤；填了不认识的字段不会报错，但这条条件会被忽略并写进
-        warnings
+        warnings（值空着等同于没写这条条件，不会拿空值去把结果清成 0 条）
       </div>
     </div>
 
