@@ -248,60 +248,55 @@ defineExpose({ loadTree });
 
 <style scoped lang="less">
 .dept-tree {
-  padding: 8px;
+  height: 100%;
+  padding: 0;
 
   &__container {
     display: flex;
     flex-direction: column;
     height: 100%;
     overflow: hidden;
-    background: var(--background);
-    border-radius: 8px;
   }
 
   &__search {
-    padding: 12px;
-    border-bottom: 1px solid var(--border);
+    padding: 0 0 14px;
+    border-bottom: 1px solid var(--border-color, #edf0f2);
   }
 
   &__content {
     flex: 1;
-    padding: 8px;
+    padding: 10px 2px 0 0;
     overflow-y: auto;
-    scroll-behavior: smooth;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
+    scrollbar-width: thin;
   }
 
   &__tree {
     :deep(.ant-tree-treenode) {
       width: 100%;
-      padding: 4px 0;
-      transition: all 0.2s ease;
-
-      &:hover {
-        background: var(--accent);
-        border-radius: 6px;
-      }
+      padding: 2px 0;
     }
 
     :deep(.ant-tree-node-content-wrapper) {
       flex: 1;
       min-width: 0;
-      padding: 4px 8px;
-      border-radius: 6px;
-      transition: all 0.2s ease;
+      min-height: 36px;
+      padding: 5px 9px;
+      border-radius: 7px;
+      transition:
+        color 0.18s ease,
+        background 0.18s ease;
+
+      &:hover {
+        background: var(--component-background-light, #f4f6f8);
+      }
 
       &.ant-tree-node-selected {
-        color: white;
-        background: var(--primary) !important;
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 9%) !important;
 
         .dept-tree__highlight {
-          color: white;
-          background: rgb(255 255 255 / 30%);
+          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 10%);
         }
       }
     }
@@ -310,6 +305,7 @@ defineExpose({ loadTree });
       display: flex;
       align-items: center;
       justify-content: center;
+      width: 22px;
     }
   }
 
@@ -324,6 +320,7 @@ defineExpose({ loadTree });
     flex: 1;
     min-width: 0;
     overflow: hidden;
+    font-size: 13px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -331,39 +328,48 @@ defineExpose({ loadTree });
   &__highlight {
     padding: 0 2px;
     font-weight: 600;
-    color: #ff4d4f;
-    background: rgb(255 77 79 / 10%);
-    border-radius: 2px;
+    color: hsl(var(--primary));
+    background: hsl(var(--primary) / 8%);
+    border-radius: 3px;
   }
 
   &__actions {
     display: flex;
+    flex: none;
     visibility: hidden;
-    gap: 8px;
+    gap: 3px;
     opacity: 0;
-    transition: all 0.2s ease;
+    transition: opacity 0.18s ease;
   }
 
-  &__node:hover &__actions {
+  &__node:hover &__actions,
+  &__node:focus-within &__actions {
     visibility: visible;
     opacity: 1;
   }
 
   &__action {
-    padding: 4px;
-    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 25px;
+    height: 25px;
+    padding: 0;
+    font-size: 13px;
     cursor: pointer;
-    border-radius: 4px;
-    transition: all 0.2s ease;
+    border-radius: 5px;
+    transition:
+      color 0.18s ease,
+      background 0.18s ease;
 
     &--add:hover {
-      color: var(--primary);
-      background: var(--primary-100);
+      color: hsl(var(--primary));
+      background: hsl(var(--primary) / 10%);
     }
 
     &--delete:hover {
       color: #ff4d4f;
-      background: rgb(255 77 79 / 10%);
+      background: rgb(255 77 79 / 9%);
     }
   }
 
@@ -371,14 +377,13 @@ defineExpose({ loadTree });
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 200px;
+    height: 220px;
   }
 }
 
-/* 淡入淡出动画 */
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.3s ease;
+  transition: opacity 0.2s ease;
 }
 
 .fade-enter-from,

@@ -1,4 +1,5 @@
 <script lang="ts" setup name="RagKnowledgeEval">
+import type { KbOption } from '../doc/api';
 /**
  * 知识评测页（RAGAS）：指定知识库 + 问答对数据集，跑五指标 + 三段耗时评估召回与问答质量。
  *
@@ -14,13 +15,7 @@
  *
  * 指标口径与后端 common_constants/rag_constant.py 第十一节静态对账（见 ./api.ts）。
  */
-import type {
-  EvalItemResp,
-  EvalPair,
-  EvalRunResp,
-  ModelOption,
-} from './api';
-import type { KbOption } from '../doc/api';
+import type { EvalPair, EvalRunResp, ModelOption } from './api';
 
 import { computed, onMounted, ref, watch } from 'vue';
 
@@ -56,15 +51,21 @@ import {
 } from 'ant-design-vue';
 
 import {
+  KG_DEPTH_MAX,
+  KG_DEPTH_MIN,
+  KG_SCALE_MAX,
+  KG_SCALE_MIN,
+} from '../doc/api';
+import {
   CreateEvalRun,
   DeleteEvalRun,
   DownloadEvalTemplate,
-  EvalKbs,
   EVAL_METRIC_LABELS,
   EVAL_METRICS_ALL,
   EVAL_STATUS_ALL,
   EVAL_STATUS_COLORS,
   EVAL_STATUS_LABELS,
+  EvalKbs,
   EvalRunDetail,
   EvalRunPage,
   fetchEvalChatModels,
@@ -72,12 +73,6 @@ import {
   ImportEvalPairs,
   RerunEvalRun,
 } from './api';
-import {
-  KG_DEPTH_MAX,
-  KG_DEPTH_MIN,
-  KG_SCALE_MAX,
-  KG_SCALE_MIN,
-} from '../doc/api';
 
 const { hasPermission } = useAccess();
 // 与后端 eval_router 上 @has_permission("ai:kb:eval") 同一位：没权限就不发请求，免得满屏 403
@@ -126,7 +121,8 @@ function addPair() {
 
 function removePair(idx: number) {
   pairs.value.splice(idx, 1);
-  if (pairs.value.length === 0) pairs.value.push({ question: '', reference: '' });
+  if (pairs.value.length === 0)
+    pairs.value.push({ question: '', reference: '' });
 }
 
 async function loadKbs() {
@@ -179,7 +175,10 @@ async function onDownloadTemplate() {
 async function onImport(file: File) {
   try {
     const res = await ImportEvalPairs(file);
-    pairs.value = res.pairs.map((p) => ({ question: p.question, reference: p.reference ?? '' }));
+    pairs.value = res.pairs.map((p) => ({
+      question: p.question,
+      reference: p.reference ?? '',
+    }));
     message.success(`已导入 ${res.total} 个问答对，可继续编辑`);
   } catch (error: any) {
     message.error(error?.message || '导入失败');
@@ -226,7 +225,9 @@ async function onSubmit() {
       graphScale: form.value.graphScale,
       graphSourceChunks: form.value.graphSourceChunks,
     });
-    message.success(`评测已提交（共 ${res.totalPairs} 个问答对），稍后点「刷新」查看结果`);
+    message.success(
+      `评测已提交（共 ${res.totalPairs} 个问答对），稍后点「刷新」查看结果`,
+    );
     // 成功才关窗：校验不过 / 接口报错都留在弹窗里就地改，不用重填一遍
     createOpen.value = false;
     await loadRuns();
@@ -315,6 +316,20 @@ function fmtMetric(v: null | number | undefined): string {
   return v === null || v === undefined ? '—' : v.toFixed(2);
 }
 
+const EVAL_METRIC_SHORT_LABELS: Record<string, string> = {
+  faithfulness: '忠实度',
+  answer_relevancy: '相关性',
+  context_precision: '精确率',
+  context_recall: '召回率',
+  answer_correctness: '正确性',
+};
+
+function metricPercent(v: null | number | undefined): number {
+  return v === null || v === undefined
+    ? 0
+    : Math.round(Math.max(0, Math.min(1, v)) * 100);
+}
+
 /**
  * 总耗时展示：一场评测几十秒到几分钟，原样毫秒没眼读——按档折算成 秒/分。
  */
@@ -325,7 +340,7 @@ function fmtDuration(ms: number | undefined): string {
     const s = Math.round((v % 60_000) / 1000);
     return s > 0 ? `${m}m ${s}s` : `${m}m`;
   }
-  if (v >= 1_000) return `${(v / 1000).toFixed(1)}s`;
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}s`;
   return `${v}ms`;
 }
 
@@ -334,9 +349,11 @@ function fmtDuration(ms: number | undefined): string {
  * 对齐 RAGAS 官方定义的通俗说法——公式留在文档里，表头只说「越高代表什么」。
  */
 const EVAL_METRIC_HINTS: Record<string, string> = {
-  faithfulness: '生成答案里的说法有多少能在召回原文中找到依据，越高代表编造越少',
+  faithfulness:
+    '生成答案里的说法有多少能在召回原文中找到依据，越高代表编造越少',
   answer_relevancy: '答案与问题的相关程度，越高代表越切题、不答非所问',
-  context_precision: '召回的原文中有多少条真正有用（越靠前权重越高），越高代表召回越干净',
+  context_precision:
+    '召回的原文中有多少条真正有用（越靠前权重越高），越高代表召回越干净',
   context_recall: '参考答案需要的信息有多少被召回原文覆盖，越高代表漏召回越少',
   answer_correctness: '生成答案与参考答案在事实与语义上的接近程度',
 };
@@ -383,15 +400,26 @@ function runBarClass(record: EvalRunResp): string {
   return 'is-full';
 }
 
-const runColumns = [
+const runColumns: any[] = [
   { title: '运行', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
-  { title: '知识库', dataIndex: 'kbName', key: 'kbName', width: 140, ellipsis: true },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 150 },
-  { title: '问答对', dataIndex: 'totalPairs', key: 'totalPairs', width: 100 },
-  { title: '指标分数', key: 'metrics', width: 260 },
-  { title: '总耗时', dataIndex: 'totalLatencyMs', key: 'totalLatencyMs', width: 100 },
+  {
+    title: '知识库',
+    dataIndex: 'kbName',
+    key: 'kbName',
+    width: 140,
+    ellipsis: true,
+  },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 136 },
+  { title: '问答对', dataIndex: 'totalPairs', key: 'totalPairs', width: 80 },
+  { title: '指标分数', key: 'metrics', width: 320 },
+  {
+    title: '总耗时',
+    dataIndex: 'totalLatencyMs',
+    key: 'totalLatencyMs',
+    width: 90,
+  },
   { title: '创建时间', dataIndex: 'createTime', key: 'createTime', width: 160 },
-  { title: '操作', key: 'action', width: 170, fixed: 'right' },
+  { title: '操作', key: 'action', width: 160, fixed: 'right' },
 ];
 
 // ==================== 三、详情 ====================
@@ -401,13 +429,44 @@ const detail = ref<EvalRunResp | null>(null);
 
 const itemColumns = [
   { title: '#', dataIndex: 'itemId', key: 'itemId', width: 60 },
-  { title: '问题', dataIndex: 'question', key: 'question', width: 220, ellipsis: true },
+  {
+    title: '问题',
+    dataIndex: 'question',
+    key: 'question',
+    width: 220,
+    ellipsis: true,
+  },
   { title: '状态', dataIndex: 'status', key: 'status', width: 90 },
-  { title: '忠实度', dataIndex: 'faithfulness', key: 'faithfulness', width: 80 },
-  { title: '答案相关性', dataIndex: 'answerRelevancy', key: 'answerRelevancy', width: 100 },
-  { title: '上下文精确率', dataIndex: 'contextPrecision', key: 'contextPrecision', width: 110 },
-  { title: '上下文召回率', dataIndex: 'contextRecall', key: 'contextRecall', width: 110 },
-  { title: '答案正确性', dataIndex: 'answerCorrectness', key: 'answerCorrectness', width: 100 },
+  {
+    title: '忠实度',
+    dataIndex: 'faithfulness',
+    key: 'faithfulness',
+    width: 80,
+  },
+  {
+    title: '答案相关性',
+    dataIndex: 'answerRelevancy',
+    key: 'answerRelevancy',
+    width: 100,
+  },
+  {
+    title: '上下文精确率',
+    dataIndex: 'contextPrecision',
+    key: 'contextPrecision',
+    width: 110,
+  },
+  {
+    title: '上下文召回率',
+    dataIndex: 'contextRecall',
+    key: 'contextRecall',
+    width: 110,
+  },
+  {
+    title: '答案正确性',
+    dataIndex: 'answerCorrectness',
+    key: 'answerCorrectness',
+    width: 100,
+  },
   { title: '召回/生成/打分耗时 (ms)', key: 'took', width: 170 },
 ];
 
@@ -484,7 +543,7 @@ onMounted(() => {
         :pagination="pagination"
         row-key="runId"
         size="small"
-        :scroll="{ x: 1220, y: 400 }"
+        :scroll="{ x: 1280, y: 400 }"
         @change="onTableChange"
       >
         <!-- 列头定制：指标分数带「?」悬停讲五个指标的口径。其余列必须兜底回 title，
@@ -494,8 +553,13 @@ onMounted(() => {
             指标分数
             <Tooltip>
               <template #title>
-                <div v-for="m in EVAL_METRICS_ALL" :key="m" class="metric-help-line">
-                  <b>{{ EVAL_METRIC_LABELS[m] }}</b>：{{ EVAL_METRIC_HINTS[m] }}
+                <div
+                  v-for="m in EVAL_METRICS_ALL"
+                  :key="m"
+                  class="metric-help-line"
+                >
+                  <b>{{ EVAL_METRIC_LABELS[m] }}</b>
+                  ：{{ EVAL_METRIC_HINTS[m] }}
                 </div>
               </template>
               <QuestionCircleOutlined class="metric-help-icon" />
@@ -508,7 +572,7 @@ onMounted(() => {
             <!-- 失败原因挂在状态 Tag 上：runner 会把「N 条失败 + 首条原因」写进 run.error，
                  只靠点进详情才看得到，列表里一排绿标没人会去点 -->
             <Tooltip :title="record.error || ''">
-              <Tag :color="runTagColor(record)">
+              <Tag :color="runTagColor(record as EvalRunResp)">
                 {{
                   record.statusLabel ||
                   EVAL_STATUS_LABELS[record.status] ||
@@ -517,14 +581,20 @@ onMounted(() => {
               </Tag>
             </Tooltip>
             <div class="run-progress-row">
-              <div class="run-progress" :class="runBarClass(record)">
+              <div
+                class="run-progress"
+                :class="runBarClass(record as EvalRunResp)"
+              >
                 <div
-                  v-if="!isRunInFlight(record)"
+                  v-if="!isRunInFlight(record as EvalRunResp)"
                   class="run-progress-fill"
-                  :style="{ width: `${runBarPercent(record)}%` }"
+                  :style="{ width: `${runBarPercent(record as EvalRunResp)}%` }"
                 ></div>
               </div>
-              <span v-if="showDoneFraction(record)" class="done-hint">
+              <span
+                v-if="showDoneFraction(record as EvalRunResp)"
+                class="done-hint"
+              >
                 {{ record.donePairs }}/{{ record.totalPairs }}
               </span>
             </div>
@@ -533,12 +603,25 @@ onMounted(() => {
             {{ record.totalPairs }}
           </template>
           <template v-else-if="column.key === 'metrics'">
-            <Space v-if="record.status === 'DONE'" direction="vertical" :size="0">
-              <span v-for="m in EVAL_METRICS_ALL" :key="m" class="metric-line">
-                {{ EVAL_METRIC_LABELS[m] }}:
-                <b>{{ fmtMetric(record.metricAvgs?.[m]) }}</b>
-              </span>
-            </Space>
+            <div v-if="record.status === 'DONE'" class="metric-grid">
+              <Tooltip
+                v-for="m in EVAL_METRICS_ALL"
+                :key="m"
+                :title="EVAL_METRIC_HINTS[m]"
+              >
+                <div class="metric-tile">
+                  <span>{{ EVAL_METRIC_SHORT_LABELS[m] }}</span>
+                  <strong>{{ fmtMetric(record.metricAvgs?.[m]) }}</strong>
+                  <div class="metric-track">
+                    <i
+                      :style="{
+                        width: `${metricPercent(record.metricAvgs?.[m])}%`,
+                      }"
+                    ></i>
+                  </div>
+                </div>
+              </Tooltip>
+            </div>
             <span v-else class="param-label">—</span>
           </template>
           <template v-else-if="column.key === 'totalLatencyMs'">
@@ -546,7 +629,13 @@ onMounted(() => {
           </template>
           <template v-else-if="column.key === 'action'">
             <Space :size="4">
-              <Button size="small" type="link" @click="openDetail(record.runId)">详情</Button>
+              <Button
+                size="small"
+                type="link"
+                @click="openDetail(record.runId)"
+              >
+                详情
+              </Button>
               <!-- 重新执行：配置快照沿用，状态/耗时/指标清零后重新投队列；
                    还在排队/跑动中的场次后端会拦，这里先不把入口露出来 -->
               <Popconfirm
@@ -579,53 +668,86 @@ onMounted(() => {
       title="评测详情"
       width="90%"
       placement="right"
-      :body-style="{ paddingTop: '12px' }"
+      :body-style="{ padding: '0 20px 20px' }"
     >
       <Spin :spinning="detailLoading">
         <template v-if="detail">
-          <!-- run.error 现在也装「部分失败」的说明（终态是 DONE 但有条项没拿到分）：
-               整单失败才用红色，免得把 9/10 成功渲染成一整条报错 -->
           <Alert
             v-if="detail.error"
             :type="detail.status === 'FAILED' ? 'error' : 'warning'"
             show-icon
-            class="mb-2"
+            class="detail-alert"
             :message="detail.error"
           />
-          <Card size="small" class="mb-2">
-            <Space wrap :size="16">
-              <span><span class="param-label">运行：</span>{{ detail.name }}</span>
-              <span><span class="param-label">知识库：</span>{{ detail.kbName }}</span>
-              <span>
-                <span class="param-label">状态：</span>
-                <Tag :color="runTagColor(detail)">
-                  {{ detail.statusLabel || detail.status }}
-                </Tag>
-              </span>
-              <span><span class="param-label">问答对：</span>{{ detail.donePairs }}/{{ detail.totalPairs }}</span>
-              <span><span class="param-label">TopK：</span>{{ detail.topK }}</span>
-              <span><span class="param-label">阈值：</span>{{ detail.scoreThreshold }}</span>
-              <span><span class="param-label">模式：</span>{{ detail.retrievalMode || '默认' }}</span>
-              <span>
-                <span class="param-label">图谱增强：</span>
-                {{
-                  detail.withGraph
-                    ? `开（深度 ${detail.graphDepth} · 规模 ${detail.graphScale}）`
-                    : '关'
-                }}
-              </span>
-              <span>
-                <span class="param-label">总耗时：</span>{{ fmtDuration(detail.totalLatencyMs) }}
-              </span>
-              <span><span class="param-label">创建时间：</span>{{ detail.createTime }}</span>
-            </Space>
-            <div class="detail-avgs">
-              <span v-for="m in EVAL_METRICS_ALL" :key="m" class="metric-chip">
-                {{ EVAL_METRIC_LABELS[m] }}
-                <b>{{ fmtMetric(detail.metricAvgs?.[m]) }}</b>
-              </span>
+          <section class="detail-overview">
+            <div class="detail-heading">
+              <div class="detail-heading-main">
+                <span class="detail-eyebrow">EVALUATION RUN</span>
+                <h2>{{ detail.name }}</h2>
+                <p>{{ detail.kbName }} · {{ detail.createTime }}</p>
+              </div>
+              <Tag :color="runTagColor(detail)" class="detail-status">
+                {{ detail.statusLabel || detail.status }}
+              </Tag>
             </div>
-          </Card>
+
+            <div class="detail-meta">
+              <div>
+                <span>完成问答对</span>
+                <strong>{{ detail.donePairs }}/{{ detail.totalPairs }}</strong>
+              </div>
+              <div>
+                <span>TopK</span>
+                <strong>{{ detail.topK }}</strong>
+              </div>
+              <div>
+                <span>相似度阈值</span>
+                <strong>{{ detail.scoreThreshold ?? '默认' }}</strong>
+              </div>
+              <div>
+                <span>检索模式</span>
+                <strong>{{ detail.retrievalMode || '默认' }}</strong>
+              </div>
+              <div>
+                <span>图谱增强</span>
+                <strong>
+                  {{
+                    detail.withGraph
+                      ? `深度 ${detail.graphDepth} · 规模 ${detail.graphScale}`
+                      : '关闭'
+                  }}
+                </strong>
+              </div>
+              <div>
+                <span>总耗时</span>
+                <strong>{{ fmtDuration(detail.totalLatencyMs) }}</strong>
+              </div>
+            </div>
+
+            <div class="detail-avgs">
+              <div v-for="m in EVAL_METRICS_ALL" :key="m" class="metric-card">
+                <span>{{ EVAL_METRIC_LABELS[m] }}</span>
+                <strong>{{ fmtMetric(detail.metricAvgs?.[m]) }}</strong>
+                <div class="metric-track">
+                  <i
+                    :style="{
+                      width: `${metricPercent(detail.metricAvgs?.[m])}%`,
+                    }"
+                  ></i>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="item-table-heading">
+            <div>
+              <h3>问答对明细</h3>
+              <p>
+                共
+                {{ detail.items?.length || 0 }} 条，展开行可查看答案与召回片段
+              </p>
+            </div>
+          </div>
 
           <Table
             :columns="itemColumns"
@@ -637,19 +759,35 @@ onMounted(() => {
           >
             <template #bodyCell="{ column, record: it }">
               <template v-if="column.key === 'status'">
-                <Tag :color="EVAL_STATUS_COLORS[it.status] || 'default'">{{ it.statusLabel || it.status }}</Tag>
+                <Tag :color="EVAL_STATUS_COLORS[it.status] || 'default'">
+                  {{ it.statusLabel || it.status }}
+                </Tag>
               </template>
-              <template v-else-if="['faithfulness', 'answerRelevancy', 'contextPrecision', 'contextRecall', 'answerCorrectness'].includes(column.key)">
-                {{ fmtMetric(it[column.key]) }}
+              <template
+                v-else-if="
+                  column.key &&
+                  [
+                    'faithfulness',
+                    'answerRelevancy',
+                    'contextPrecision',
+                    'contextRecall',
+                    'answerCorrectness',
+                  ].includes(String(column.key))
+                "
+              >
+                {{ fmtMetric(it[String(column.key)]) }}
               </template>
               <template v-else-if="column.key === 'took'">
-                {{ it.tookRecallMs }} / {{ it.tookGenerateMs }} / {{ it.tookScoreMs }}
+                {{ it.tookRecallMs }} / {{ it.tookGenerateMs }} /
+                {{ it.tookScoreMs }}
               </template>
             </template>
             <!-- 展开入口只有 antd 因本插槽自动加上的行首箭头，不再另摆一个「展开」按钮列 -->
             <template #expandedRowRender="{ record: it }">
               <div class="item-detail">
-                <div v-if="it.error" class="item-error">错误：{{ it.error }}</div>
+                <div v-if="it.error" class="item-error">
+                  错误：{{ it.error }}
+                </div>
                 <div class="item-block">
                   <div class="item-label">问题</div>
                   <div class="item-text">{{ it.question }}</div>
@@ -658,20 +796,37 @@ onMounted(() => {
                   <div class="item-label">参考答案</div>
                   <div class="item-text">{{ it.reference || '（无）' }}</div>
                 </div>
-                <div class="item-block">
+                <div class="item-block item-block--wide">
                   <div class="item-label">生成答案</div>
-                  <div class="item-text">{{ it.generatedAnswer || '（无）' }}</div>
+                  <div class="item-text">
+                    {{ it.generatedAnswer || '（无）' }}
+                  </div>
                 </div>
-                <div class="item-block">
-                  <div class="item-label">召回片段（{{ (it.contexts || []).length }} 条）</div>
-                  <div v-if="(it.contexts || []).length" class="ctx-list">
-                    <div v-for="(c, ci) in it.contexts" :key="ci" class="ctx-item">
-                      <Tag v-if="c.recall" color="purple">{{ c.recall }}</Tag>
-                      <Tag v-if="c.score != null" color="green">score {{ c.score }}</Tag>
+                <div class="item-block item-block--wide">
+                  <div class="item-label">
+                    召回片段（{{ (it.contexts || []).length }} 条）
+                  </div>
+                  <div v-if="(it.contexts || []).length > 0" class="ctx-list">
+                    <div
+                      v-for="(c, ci) in it.contexts"
+                      :key="ci"
+                      class="ctx-item"
+                    >
+                      <div class="ctx-meta">
+                        <span class="ctx-index">片段 {{ Number(ci) + 1 }}</span>
+                        <Tag v-if="c.recall">{{ c.recall }}</Tag>
+                        <span v-if="c.score != null" class="ctx-score">
+                          相关性 {{ Number(c.score).toFixed(4) }}
+                        </span>
+                      </div>
                       <div class="ctx-text">{{ c.content }}</div>
                     </div>
                   </div>
-                  <Empty v-else :image="Empty.PRESENTED_IMAGE_SIMPLE" description="没有召回片段" />
+                  <Empty
+                    v-else
+                    :image="Empty.PRESENTED_IMAGE_SIMPLE"
+                    description="没有召回片段"
+                  />
                 </div>
               </div>
             </template>
@@ -808,7 +963,9 @@ onMounted(() => {
             />
           </div>
           <div class="param-item item-model">
-            <Tooltip title="answer_relevancy 用文本向量算问题与反向生成问题的相似度">
+            <Tooltip
+              title="answer_relevancy 用文本向量算问题与反向生成问题的相似度"
+            >
               <span class="param-label">向量模型</span>
             </Tooltip>
             <Select
@@ -847,7 +1004,11 @@ onMounted(() => {
               <template #icon><DownloadOutlined /></template>
               下载模板
             </Button>
-            <Upload :before-upload="onImport" :show-upload-list="false" accept=".xlsx,.xlsm">
+            <Upload
+              :before-upload="onImport"
+              :show-upload-list="false"
+              accept=".xlsx,.xlsm"
+            >
               <Button size="small">
                 <template #icon><UploadOutlined /></template>
                 导入 Excel
@@ -870,8 +1031,9 @@ onMounted(() => {
               class="grow"
             />
             <Input.TextArea
-              v-model:value="p.reference"
+              :value="p.reference || ''"
               placeholder="参考答案（标准答案）"
+              @update:value="p.reference = $event"
               :auto-size="{ minRows: 1, maxRows: 3 }"
               :maxlength="2000"
               class="grow"
@@ -887,7 +1049,9 @@ onMounted(() => {
 
       <template #footer>
         <Button @click="createOpen = false">取消</Button>
-        <Button type="primary" :loading="submitting" @click="onSubmit">执行投递</Button>
+        <Button type="primary" :loading="submitting" @click="onSubmit">
+          执行投递
+        </Button>
       </template>
     </Modal>
   </div>
@@ -1052,8 +1216,52 @@ onMounted(() => {
   line-height: 32px;
 }
 
-.metric-line {
-  font-size: 12px;
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(42px, 1fr));
+  gap: 6px;
+}
+
+.metric-tile {
+  padding: 5px 6px;
+  cursor: help;
+  background: var(--component-background-light, #f7f8fa);
+  border: 1px solid var(--border-color, #edf0f2);
+  border-radius: 6px;
+}
+
+.metric-tile > span {
+  display: block;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-color-secondary, #8b9098);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-tile > strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 21px;
+  color: var(--text-color, #30343b);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-track {
+  height: 3px;
+  margin-top: 3px;
+  overflow: hidden;
+  background: var(--border-color, #e4e7eb);
+  border-radius: 2px;
+}
+
+.metric-track i {
+  display: block;
+  height: 100%;
+  background: hsl(var(--primary));
+  border-radius: inherit;
 }
 
 /* 表头「?」图标：小一号、次色，悬停变主色；Tooltip 里的逐条说明行留点行距好读 */
@@ -1128,38 +1336,169 @@ onMounted(() => {
   animation: run-progress-slide 1.2s ease-in-out infinite;
 }
 
-.detail-avgs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
+.detail-alert {
+  margin: 16px 0 12px;
 }
 
-.metric-chip {
-  padding: 2px 10px;
-  font-size: 12px;
-  background: var(--fill-quaternary, #f5f5f5);
+.detail-overview {
+  padding: 22px;
+  margin: 16px 0 20px;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e6eaf0);
   border-radius: 12px;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 4%);
+}
+
+.detail-heading {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.detail-heading-main {
+  min-width: 0;
+}
+
+.detail-eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  color: hsl(var(--primary));
+}
+
+.detail-heading h2 {
+  margin: 4px 0;
+  overflow: hidden;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--text-color, #24292f);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-heading p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-color-secondary, #8a9199);
+}
+
+.detail-status {
+  flex: none;
+  margin-top: 5px;
+}
+
+.detail-meta {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 0;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-color, #edf0f2);
+  border-bottom: 1px solid var(--border-color, #edf0f2);
+}
+
+.detail-meta > div {
+  min-width: 0;
+}
+
+.detail-meta span,
+.metric-card > span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-color-secondary, #8a9199);
+}
+
+.detail-meta strong {
+  display: block;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-color, #3d434b);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-avgs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.metric-card {
+  padding: 12px 14px;
+  background: var(--component-background-light, #f7f8fa);
+  border: 1px solid var(--border-color, #edf0f2);
+  border-radius: 8px;
+}
+
+.metric-card > strong {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 30px;
+  color: var(--text-color, #262b33);
+  font-variant-numeric: tabular-nums;
+}
+
+.item-table-heading {
+  margin: 0 0 10px;
+}
+
+.item-table-heading h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.item-table-heading p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-color-secondary, #8a9199);
 }
 
 .item-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 4px;
+}
+
+.item-block {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e8ebef);
+  border-radius: 8px;
+}
+
+.item-block--wide,
+.item-error {
+  grid-column: 1 / -1;
 }
 
 .item-error {
+  padding: 9px 12px;
   color: #cf1322;
+  background: #fff2f0;
+  border-radius: 6px;
 }
 
 .item-label {
-  margin-bottom: 2px;
+  margin-bottom: 7px;
   font-size: 12px;
-  color: var(--text-color-secondary, #888);
+  font-weight: 600;
+  color: var(--text-color-secondary, #747c86);
 }
 
 .item-text {
   font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-color, #3c424a);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1171,14 +1510,34 @@ onMounted(() => {
 }
 
 .ctx-item {
-  padding: 6px 8px;
-  background: var(--fill-quaternary, #fafafa);
-  border-radius: 4px;
+  padding: 10px 12px;
+  background: var(--component-background-light, #f8f9fa);
+  border-left: 2px solid hsl(var(--primary) / 45%);
+  border-radius: 0 6px 6px 0;
+}
+
+.ctx-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ctx-index {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ctx-score {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-color-secondary, #8a9199);
+  font-variant-numeric: tabular-nums;
 }
 
 .ctx-text {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 12px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1193,6 +1552,25 @@ onMounted(() => {
   .item-graph,
   .item-model {
     grid-column: span 6;
+  }
+
+  .detail-meta {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .detail-avgs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .item-detail,
+  .detail-avgs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

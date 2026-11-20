@@ -30,9 +30,19 @@ function resolveFullPath(parentPath: string, path?: string): string {
 }
 
 /**
+ * 路由记录（component 可缺）：中间层目录不给 component，由 vue-router 的 RouterView
+ * 跳过无组件的层级，直接子页面渲染进顶级 BasicLayout 的内容区
+ */
+type MenuRoute = Omit<RouteRecordStringComponent, 'component'> & {
+  component?: string;
+};
+
+/**
  * 将后端菜单树转换为 vben 路由表
  * - 过滤按钮节点（menu_type=3，权限点不参与路由）
- * - 目录（menu_type=1）使用 BasicLayout 布局
+ * - 目录（menu_type=1）只有顶级才挂 BasicLayout：accessible.ts 仅对顶级路由剔除
+ *   component，中间层目录也挂上就会在布局里再渲染一套页头/菜单，子菜单页与菜单栏之间
+ *   会多出整屏空白
  * - 菜单（menu_type=2）component 形如 views/wemirr/xxx/index.vue
  * - 子菜单 path 为相对值时自动拼接父级目录 path
  */
@@ -41,31 +51,34 @@ export function transformMenusToRoutes(
   parentPath = '',
 ): RouteRecordStringComponent[] {
   if (!Array.isArray(menus)) return [];
-  const routes: RouteRecordStringComponent[] = [];
+  const routes: MenuRoute[] = [];
   for (const menu of menus) {
     if (menu.menu_type === 3) continue;
     // 完整路径：优先取菜单 path（相对值拼父级），否则回退 /菜单名
     const fullPath = resolveFullPath(parentPath, menu.path) || `/${menu.menu_name}`;
-    const route: RouteRecordStringComponent = {
+    // 页面用自带组件；目录只在顶级兜底 BasicLayout，中间层不给组件以免多套一层布局
+    let component: string | undefined;
+    if (menu.menu_type === 2) {
+      component = menu.component || undefined;
+    } else if (menu.menu_type === 1 && !parentPath) {
+      component = 'BasicLayout';
+    }
+    const route: MenuRoute = {
       name: `Menu${menu.menu_id}`,
       path: fullPath,
-      component: 'BasicLayout',
+      ...(component ? { component } : {}),
       meta: {
         title: menu.menu_name,
         order: menu.sort,
         ...(menu.icon ? { icon: menu.icon } : {}),
       },
     };
-    if (menu.menu_type === 2 && menu.component) {
-      // 页面组件：形如 views/wemirr/xxx/index.vue
-      route.component = menu.component;
-    }
     if (menu.children?.length) {
       route.children = transformMenusToRoutes(menu.children, fullPath);
     }
     routes.push(route);
   }
-  return routes;
+  return routes as RouteRecordStringComponent[];
 }
 
 /**

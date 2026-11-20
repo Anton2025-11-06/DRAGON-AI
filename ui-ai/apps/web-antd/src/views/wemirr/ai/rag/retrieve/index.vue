@@ -890,60 +890,60 @@ onBeforeUnmount(() => {
     />
 
     <Card :bordered="false" class="param-card mb-2">
-      <!-- 主搜索行：输入框 + 动作按钮一排到头。检索入口放在最顶上（问一句话是这页的第一
-           动作），选了图片库时图搜图上传挂同一行右端，参数区怎么展开收起都不会把它推跑 -->
+      <!-- 主搜索区将输入与主动作合成一个整体，次要动作独立成组，避免按钮散落 -->
       <div class="search-row">
-        <Input
-          v-model:value="query"
-          class="search-input"
-          size="large"
-          placeholder="输入查询内容，回车即检索…"
-          @press-enter="doSearch"
-        >
-          <template #prefix><SearchOutlined /></template>
-        </Input>
-        <Button
-          size="large"
-          type="primary"
-          :loading="loading || answering"
-          @click="doSearch"
-        >
-          {{ chatModelId ? '检索并问答' : '检索' }}
-        </Button>
-        <Button size="large" @click="reset">清空</Button>
-        <!-- 图搜图：选了图片库才出现，上传后回显缩略图，点缩略图旁「移除」可撤掉 -->
-        <template v-if="hasImageKb">
-          <span class="search-sep"></span>
-          <Upload
-            :before-upload="onUploadImage"
-            :show-upload-list="false"
-            accept="image/*"
+        <div class="search-main">
+          <Input
+            v-model:value="query"
+            class="search-input"
+            size="large"
+            placeholder="输入问题或关键词，回车检索…"
+            @press-enter="doSearch"
           >
-            <Button size="large" :loading="uploading">
-              <template #icon><PictureOutlined /></template>
-              上传查询图片（图搜图）
-            </Button>
-          </Upload>
-          <template v-if="imageUrl">
-            <img :src="imageUrl" alt="query" class="query-thumb" />
-            <Button size="small" type="link" @click="imageUrl = ''">
-              移除
-            </Button>
+            <template #prefix><SearchOutlined /></template>
+          </Input>
+          <Button
+            class="search-submit"
+            size="large"
+            type="primary"
+            :loading="loading || answering"
+            @click="doSearch"
+          >
+            {{ chatModelId ? '检索并问答' : '开始检索' }}
+          </Button>
+        </div>
+
+        <div class="search-actions">
+          <template v-if="hasImageKb">
+            <Upload
+              :before-upload="onUploadImage"
+              :show-upload-list="false"
+              accept="image/*"
+            >
+              <Button size="large" :loading="uploading">
+                <template #icon><PictureOutlined /></template>
+                图搜图
+              </Button>
+            </Upload>
+            <template v-if="imageUrl">
+              <img :src="imageUrl" alt="查询图片" class="query-thumb" />
+              <Button size="small" type="link" @click="imageUrl = ''">
+                移除
+              </Button>
+            </template>
           </template>
-        </template>
-        <!-- 参数区折叠开关：搜内容是这页的高频动作，参数只在调优时才要看——一收起来
-             检索结果立刻上移一屏。警告行（graphWithoutChat）不跟着藏：它拦的是动作
-             本身，收起参数也该看得见 -->
-        <Button
-          class="params-toggle"
-          size="large"
-          type="text"
-          @click="paramsExpanded = !paramsExpanded"
-        >
-          {{ paramsExpanded ? '收起参数' : '展开参数' }}
-          <UpOutlined v-if="paramsExpanded" />
-          <DownOutlined v-else />
-        </Button>
+          <Button size="large" type="text" @click="reset">清空</Button>
+          <Button
+            class="params-toggle"
+            size="large"
+            type="text"
+            @click="paramsExpanded = !paramsExpanded"
+          >
+            {{ paramsExpanded ? '收起设置' : '检索设置' }}
+            <UpOutlined v-if="paramsExpanded" />
+            <DownOutlined v-else />
+          </Button>
+        </div>
       </div>
 
       <!-- 参数区：12 列栅格统一列距行距。原先两行 Space 的自然折行让「标签 + 控件」各自为政，
@@ -1115,12 +1115,14 @@ onBeforeUnmount(() => {
     <div class="result-wrap">
       <Card :bordered="false" class="result-card">
         <Spin :spinning="loading">
-          <Alert
-            v-if="result"
-            type="info"
-            class="mb-2"
-            :message="`模式 ${modeText(result.mode)} · 命中 ${result.total} 条 · 耗时 ${result.tookMs}ms`"
-          />
+          <div v-if="result" class="result-summary">
+            <span class="summary-title">检索结果</span>
+            <span>{{ modeText(result.mode) }}</span>
+            <i></i>
+            <span>命中 {{ result.total }} 条</span>
+            <i></i>
+            <span>耗时 {{ result.tookMs }} ms</span>
+          </div>
           <Alert
             v-for="(w, i) in result?.warnings || []"
             :key="i"
@@ -1130,7 +1132,11 @@ onBeforeUnmount(() => {
             show-icon
           />
 
-          <Tabs v-if="result" v-model:active-key="activeTab">
+          <Tabs
+            v-if="result"
+            v-model:active-key="activeTab"
+            class="result-tabs"
+          >
             <TabPane key="text" :tab="`文本命中 (${textHits.length})`">
               <div v-if="textHits.length > 0" class="hit-group">
                 <div v-for="(h, i) in textHits" :key="`t${i}`" class="text-hit">
@@ -1379,9 +1385,16 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* 搜索那一块钉在顶上：flex: none 免得被结果区挤矮 */
+/* 搜索区固定在页面顶部，结果区独立滚动 */
 .param-card {
   flex: none;
+  border: 1px solid var(--border-color, #e8ebf0);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 3%);
+}
+
+.param-card :deep(.ant-card-body) {
+  padding: 16px;
 }
 
 .result-card {
@@ -1390,61 +1403,148 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  border: 1px solid var(--border-color, #e8ebf0);
+  border-radius: 12px;
 }
 
-/* 卡体才是真正的滚动容器（min-height: 0 同左：flex 项默认不收缩） */
+/* 页签不放在滚动容器内：卡体固定，只有 tab 内容区滚动，任何结果长度下都保持可见 */
 :deep(.result-card .ant-card-body) {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  padding: 0 16px 16px;
+  overflow: hidden;
 }
 
-/* 命中多了先滚过顶部那两条提示：标签页（文本/图片/音视频/图谱命中）钉在
-   滚动区顶上，不然切个模态还得先滚回去 */
-:deep(.result-card .ant-tabs-nav) {
-  position: sticky;
-  top: 0;
-  z-index: 3;
+:deep(.result-card .ant-spin-nested-loading),
+:deep(.result-card .ant-spin-container) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.result-summary {
+  display: flex;
+  flex: none;
+  gap: 10px;
+  align-items: center;
+  min-height: 46px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #7a8088);
+  border-bottom: 1px solid var(--border-color, #edf0f2);
+}
+
+.result-summary .summary-title {
+  margin-right: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color, #292d33);
+}
+
+.result-summary b {
+  color: hsl(var(--primary));
+}
+
+.result-summary i {
+  width: 1px;
+  height: 12px;
+  background: var(--border-color, #dfe3e8);
+}
+
+:deep(.result-card .result-tabs) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+:deep(.result-card .result-tabs > .ant-tabs-nav) {
+  flex: none;
+  margin: 0;
   background: var(--component-background, #fff);
 }
 
-/* ===== 搜索栏（重构）===== */
-/* 主搜索行：输入框优先占满、动作按钮按内容收缩；窄窗口时整行折行而不是把输入框压扁 */
+:deep(.result-card .result-tabs > .ant-tabs-content-holder) {
+  flex: 1;
+  min-height: 0;
+  padding-top: 14px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+:deep(
+  .result-card .result-tabs > .ant-tabs-content-holder > .ant-tabs-content
+) {
+  height: auto;
+}
+
 .search-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
   align-items: center;
 }
 
-.search-row .search-input {
-  flex: 1 1 320px;
+.search-main {
+  display: flex;
+  flex: 1 1 420px;
+  gap: 6px;
+  align-items: center;
   min-width: 0;
+  padding: 4px;
+  background: var(--component-background-light, #f6f7f9);
+  border: 1px solid var(--border-color, #dfe3e8);
+  border-radius: 10px;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 
-/* 参数折叠开关推到行尾：与动作按钮之间空开，读作「整块参数区的开关」而不是又一个
-   动作按钮；窄屏折行时它单独一行也靠右，不会卡在中间 */
+.search-main:focus-within {
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 8%);
+}
+
+.search-main :deep(.ant-input-affix-wrapper) {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.search-submit {
+  flex: none;
+  min-width: 96px;
+  border-radius: 7px;
+}
+
+.search-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
 .params-toggle {
-  flex: none;
-  margin-left: auto;
-  color: var(--text-color-secondary, #888);
+  color: var(--text-color-secondary, #707780);
 }
 
-/* 主按钮组与图搜图上传之间的一道细分隔：不加的话两串按钮连成一片，分不出主次 */
-.search-sep {
-  flex: none;
-  width: 1px;
-  height: 22px;
-  margin: 0 4px;
-  background: var(--border-color, #e5e7eb);
-}
-
-/* 参数区：12 列栅格统一列距行距，每格「标签 + 控件」同一基线 */
+/* 高级参数收进统一的浅色底板，与主搜索动作形成清晰层级 */
 .param-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 12px;
+  padding: 12px;
+  margin-top: 14px;
+  background: var(--component-background-light, #f8f9fb);
+  border: 1px solid var(--border-color, #eef0f3);
+  border-radius: 9px;
 }
 
 .param-item {
@@ -1662,94 +1762,73 @@ onBeforeUnmount(() => {
 }
 
 .text-hit {
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  background: var(--component-background-light, #fafafa);
-  border: 1px solid var(--border-color, #eee);
-  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e7eaf0);
+  border-radius: 9px;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 
-/* 命中行的每个字段一枚彩色胶囊：知识库/文件名/分块号/三个分数得一眼扫完，全挤成一行
-   纯文本时找「向量分数」要从行首读到行中，各定一色之后色本身就是定位符。
-   立体感靠「上浅下深的渐变 + 同色描边 + 一层薄投影」，不做实底深字：整片命中行都变成
-   色块会把正文压下去。 */
+.text-hit:hover {
+  border-color: hsl(var(--primary) / 35%);
+  box-shadow: 0 3px 12px rgb(15 23 42 / 5%);
+}
+
+/* 元信息统一使用中性色，仅靠字号、字重与间距区分层级，不再逐字段着色 */
 .hit-fields {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 5px 14px;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 9px;
   font-size: 12px;
-  color: #555;
+  color: var(--text-color-secondary, #7b818a);
 }
 
 .hf {
   max-width: 100%;
-  padding: 1px 9px;
-  line-height: 18px;
+  line-height: 20px;
   overflow-wrap: anywhere;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  box-shadow:
-    0 1px 2px rgb(15 23 42 / 12%),
-    inset 0 1px 0 rgb(255 255 255 / 60%);
 }
 
 .hf-kb {
-  color: #0958d9;
-  background: linear-gradient(180deg, #fff, #e6f4ff);
-  border-color: #91caff;
+  padding: 0 8px;
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 7%);
+  border-radius: 4px;
 }
 
 .hf-doc {
-  color: #08979c;
-  background: linear-gradient(180deg, #fff, #e6fffb);
-  border-color: #87e8de;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-color, #30343b);
 }
 
-.hf-chunk {
-  color: #722ed1;
-  background: linear-gradient(180deg, #fff, #f9f0ff);
-  border-color: #d3adf7;
+.hf-score,
+.hf-vector,
+.hf-keyword {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-color, #4e5969);
 }
 
 .hf-score {
-  color: #cf1322;
-  background: linear-gradient(180deg, #fff, #fff1f0);
-  border-color: #ffa39e;
+  font-weight: 600;
 }
 
-.hf-vector {
-  color: #2f54eb;
-  background: linear-gradient(180deg, #fff, #f0f5ff);
-  border-color: #adc6ff;
-}
-
-.hf-keyword {
-  color: #c41d7f;
-  background: linear-gradient(180deg, #fff, #fff0f6);
-  border-color: #ffadd2;
-}
-
-.hf-path {
-  color: #389e0d;
-  background: linear-gradient(180deg, #fff, #f6ffed);
-  border-color: #b7eb8f;
-}
-
-.hf-entity {
-  color: #d46b08;
-  background: linear-gradient(180deg, #fff, #fff7e6);
-  border-color: #ffd591;
-}
-
-/* 页码/工作表/时长这几项只是补充出处，不该跟六个主字段抢色 */
+.hf-chunk,
+.hf-path,
+.hf-entity,
 .hf-page,
 .hf-sheet,
 .hf-duration {
-  color: #595959;
-  background: linear-gradient(180deg, #fff, #f0f0f0);
-  border-color: #d9d9d9;
+  color: var(--text-color-secondary, #8a9098);
+}
+
+.hit-fields :deep(.ant-btn) {
+  margin-left: auto;
 }
 
 .hit-path {

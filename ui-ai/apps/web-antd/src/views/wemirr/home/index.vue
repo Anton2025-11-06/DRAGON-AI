@@ -1,4 +1,6 @@
 <script lang="ts">
+import type { ComposerChip } from './composer';
+
 import {
   computed,
   defineAsyncComponent,
@@ -8,6 +10,7 @@ import {
   onUnmounted,
   reactive,
   ref,
+  watch,
 } from 'vue';
 
 import { useAccessStore } from '@vben/stores';
@@ -36,6 +39,7 @@ import {
   ReloadOutlined,
   RightOutlined,
   RobotOutlined,
+  SearchOutlined,
   SendOutlined,
   StopOutlined,
   ToolOutlined,
@@ -45,6 +49,7 @@ import { message } from 'ant-design-vue';
 import { getTraceId } from '#/api/request';
 
 import MarkdownRenderer from '../ai/workflow/components/debug/MarkdownRenderer.vue';
+import ComposerEditor from './ComposerEditor.vue';
 import * as api from './api';
 
 /** 时间线片段：assistant 消息按到达顺序拆成思考/工具/文本三类块，各自可折叠 */
@@ -213,6 +218,25 @@ interface MountedItem {
   source: 'kb' | 'mcp' | 'skill' | 'tool';
 }
 
+/** 芯片身份：资源类型 + id（不同类资源 id 会重号，不能只按 id 认） */
+const chipKey = (chip: ComposerChip) => `${chip.source}:${chip.key}`;
+
+/**
+ * 富输入框对外能力。框内 DOM 由组件自己管（contenteditable 里要插元素芯片），
+ * 父组件只通过这些方法读写正文与芯片，不直接碰 contenteditable。
+ */
+interface ComposerHandle {
+  clear: () => void;
+  focus: () => void;
+  getChips: () => ComposerChip[];
+  getHtml: () => string;
+  getText: () => string;
+  insertChips: (chips: ComposerChip[]) => void;
+  saveCaret: () => void;
+  setHtml: (html: string) => ComposerChip[];
+  syncChips: (chips: ComposerChip[]) => void;
+}
+
 /** 每轮发送配置快照：排队期间再改 composer，也不影响已经入队的问题。 */
 interface TurnSnapshot {
   attachments: api.HarnessAttachment[];
@@ -252,6 +276,7 @@ export default defineComponent({
     CloseOutlined,
     CloudDownloadOutlined,
     CloudUploadOutlined,
+    ComposerEditor,
     DatabaseOutlined,
     DeleteOutlined,
     DoubleLeftOutlined,
@@ -268,6 +293,7 @@ export default defineComponent({
     ReloadOutlined,
     RightOutlined,
     RobotOutlined,
+    SearchOutlined,
     // 预览库（docx/excel/pptx 解析器 + codemirror）有几 MB，只在真点开文件时才拉
     SandboxPreviewModal: defineAsyncComponent(
       () => import('./SandboxPreviewModal.vue'),
@@ -311,6 +337,12 @@ export default defineComponent({
         orchAgent?: api.HarnessOrchAgent | null;
       }
     >();
+    /**
+     * 会话级输入框草稿（文字 + 芯片穿插的原样结构）：正文与已选资源现在同处一个
+     * 框内，拆不成两份状态分开存，所以整份结构按会话缓存，切回来原样还原。
+     * 只在本页内存里往返、不落任何存储，还原时子组件还要过一道白名单清洗。
+     */
+    const sessionDrafts = new Map<number, string>();
     /** turnId → 该轮订阅：一个在跑的轮各占一条流，与"当前在看哪个会话"无关 */
     const turnStreams = new Map<
       string,
@@ -429,16 +461,19 @@ export default defineComponent({
       source: CommandSource;
     }
 
-    const composerRef = ref<{ focus: () => void } | null>(null);
+    const composerRef = ref<ComposerHandle | null>(null);
+    /** 面板里的名称搜索框：面板一开就抢焦点，方向键/空格都由它接 */
+    const commandSearchRef = ref<HTMLInputElement | null>(null);
     const commandOpen = ref(false);
     const commandLoading = ref(false);
-    const commandColumn = ref<'category' | 'items'>('category');
+    /** 横向 Tab 上选中的分类（←→ 换它） */
     const commandCategoryIndex = ref(0);
+    /** 当前分类列表里的高亮行（↑↓ 换它），下标针对过滤后的条目 */
     const commandItemIndex = ref(0);
+    /** 名称搜索词：切分类不清词，方便同一个词横着几类一起找 */
+    const commandQuery = ref('');
     const commandAgentKey = ref('');
     const commandSelectedMounts = ref<MountedItem[]>([]);
-    /** 触发字符在正文中的位置：确认选择后移除，Esc 则保留为普通文本。 */
-    const commandTriggerPosition = ref<null | number>(null);
 
     function resourceIcon(source: CommandSource): string {
       return {
@@ -487,8 +522,59 @@ export default defineComponent({
       ];
     });
 
+    /** 当前 Tab 选中的分类 */
+    const commandActiveCategory = computed<CommandCategory | undefined>(() => {
+      const category = commandCategories.value[commandCategoryIndex.value];
+      return category ?? commandCategories.value[0];
+    });
+
+    /** 当前分类按名称/描述过滤后的条目：列表渲染与键盘导航都以它为准 */
+    const commandActiveItems = computed<CommandResource[]>(() => {
+      const keyword = commandQuery.value.trim().toLowerCase();
+      const items = commandActiveCategory.value?.items || [];
+      if (!keyword) return items;
+      return items.filter((item) =>
+        `${item.name} ${item.description || ''}`
+          .toLowerCase()
+          .includes(keyword),
+      );
+    });
+
+    // 搜索词一变、分类一换，高亮行就得回到首条，否则下标会落在过滤后的列表外
+    watch([commandQuery, commandCategoryIndex], () => {
+      commandItemIndex.value = 0;
+    });
+
     function focusComposer() {
       nextTick(() => composerRef.value?.focus());
+    }
+
+    function focusCommandSearch() {
+      nextTick(() => commandSearchRef.value?.focus());
+    }
+
+    /** 已选智能体 + 已挂载资源 → 输入框里应有的芯片（智能体也是一枚芯片，不再单列一行） */
+    function resourceChips(
+      agent: api.HarnessOrchAgent | null = orchAgent.value,
+      mounts: MountedItem[] = mountedItems.value,
+    ): ComposerChip[] {
+      const chips: ComposerChip[] = [];
+      if (agent) {
+        chips.push({
+          key: agentKeyOf(agent),
+          name: agent.name,
+          source: 'agent',
+        });
+      }
+      mounts.forEach((item) =>
+        chips.push({ key: item.key, name: item.name, source: item.source }),
+      );
+      return chips;
+    }
+
+    /** 把框内芯片收到与 composer 状态一致：多退少补，保证两边不打架 */
+    function syncComposerChips() {
+      composerRef.value?.syncChips(resourceChips());
     }
 
     async function openCommandPalette() {
@@ -498,10 +584,12 @@ export default defineComponent({
       commandAgentKey.value = orchAgent.value ? agentKeyOf(orchAgent.value) : '';
       commandCategoryIndex.value = 0;
       commandItemIndex.value = 0;
-      commandColumn.value = 'category';
+      commandQuery.value = '';
       commandOpen.value = true;
       commandLoading.value = true;
-      focusComposer();
+      // 搜索框会抢走光标，先把插入位置记下来：确认时芯片要插回句子中间
+      composerRef.value?.saveCaret();
+      focusCommandSearch();
       try {
         const [, agentRes] = await Promise.all([
           ensurePickerOptions(),
@@ -517,18 +605,7 @@ export default defineComponent({
 
     function closeCommandPalette() {
       commandOpen.value = false;
-      commandTriggerPosition.value = null;
       focusComposer();
-    }
-
-    function removeCommandTrigger() {
-      const position = commandTriggerPosition.value;
-      commandTriggerPosition.value = null;
-      if (position === null) return;
-      const trigger = inputValue.value[position];
-      if (trigger !== '/' && trigger !== '@') return;
-      inputValue.value =
-        inputValue.value.slice(0, position) + inputValue.value.slice(position + 1);
     }
 
     function confirmCommandPalette() {
@@ -537,20 +614,28 @@ export default defineComponent({
         agentOptions.value.find(
           (agent) => agentKeyOf(agent) === commandAgentKey.value,
         ) || null;
-      mountedItems.value = commandSelectedMounts.value.map((item) => ({
+      const nextMounts = commandSelectedMounts.value.map((item) => ({
         ...item,
       }));
+      const before = new Set(resourceChips().map((chip) => chipKey(chip)));
+      // 新勾选的插回光标处（就是刚才打 / 的位置），不堆到末尾去
+      const added = resourceChips(nextAgent, nextMounts).filter(
+        (chip) => !before.has(chipKey(chip)),
+      );
+      composerRef.value?.insertChips(added);
       orchAgent.value = nextAgent;
+      mountedItems.value = nextMounts;
+      // 面板里取消勾选的，芯片也从框里揭掉
+      syncComposerChips();
       if (nextAgent && agentKeyOf(nextAgent) !== previousKey) modelId.value = 0;
       commandOpen.value = false;
-      removeCommandTrigger();
       focusComposer();
     }
 
     function focusCommandCategory(index: number) {
       commandCategoryIndex.value = index;
       commandItemIndex.value = 0;
-      commandColumn.value = 'category';
+      focusCommandSearch();
     }
 
     function isCommandItemSelected(item: CommandResource): boolean {
@@ -561,12 +646,7 @@ export default defineComponent({
       );
     }
 
-    function toggleCommandItem(categoryIndex: number, itemIndex: number) {
-      commandCategoryIndex.value = categoryIndex;
-      commandItemIndex.value = itemIndex;
-      commandColumn.value = 'items';
-      const item = commandCategories.value[categoryIndex]?.items[itemIndex];
-      if (!item) return;
+    function toggleCommandItem(item: CommandResource) {
       if (item.agent) {
         commandAgentKey.value =
           commandAgentKey.value === item.key ? '' : item.key;
@@ -581,6 +661,47 @@ export default defineComponent({
       else commandSelectedMounts.value.splice(index, 1);
     }
 
+    /** 鼠标点条目：高亮行跟着移过去再勾选，与键盘是同一套焦点语义 */
+    function pickCommandItem(itemIndex: number, item: CommandResource) {
+      commandItemIndex.value = itemIndex;
+      toggleCommandItem(item);
+      focusCommandSearch();
+    }
+
+    /** 高亮行跟着滚，不然搜出几十条时键盘选到视区外看不见 */
+    function scrollCommandItemIntoView() {
+      nextTick(() => {
+        document
+          .querySelector('.hermes-command-list .hermes-command-item.active')
+          ?.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
+    function moveCommandItem(delta: number) {
+      const count = commandActiveItems.value.length;
+      if (count === 0) return;
+      commandItemIndex.value = Math.max(
+        0,
+        Math.min(count - 1, commandItemIndex.value + delta),
+      );
+      scrollCommandItemIntoView();
+    }
+
+    function moveCommandCategory(delta: number) {
+      const count = commandCategories.value.length;
+      if (count === 0) return;
+      commandCategoryIndex.value = Math.max(
+        0,
+        Math.min(count - 1, commandCategoryIndex.value + delta),
+      );
+      commandItemIndex.value = 0;
+      nextTick(() => {
+        document
+          .querySelector('.hermes-command-tabs .hermes-command-tab.active')
+          ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    }
+
     function selectedCommandCount(source: CommandSource): number {
       if (source === 'agent') return commandAgentKey.value ? 1 : 0;
       return commandSelectedMounts.value.filter(
@@ -588,83 +709,71 @@ export default defineComponent({
       ).length;
     }
 
+    /** 面板键盘口径：←→ 换分类，↑↓ 换条目，空格勾选，回车完成，Esc 退出 */
+    function onCommandSearchKeydown(e: KeyboardEvent) {
+      if (e.isComposing) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveCommandItem(e.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        moveCommandCategory(e.key === 'ArrowRight' ? 1 : -1);
+        return;
+      }
+      if (e.key === ' ') {
+        // 资源名几乎不带空格，空格让给「勾选」；搜不进去空格不是损失
+        e.preventDefault();
+        const item = commandActiveItems.value[commandItemIndex.value];
+        if (item) toggleCommandItem(item);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        confirmCommandPalette();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCommandPalette();
+      }
+    }
+
+    /** 芯片在框里被退格或点叉删掉：状态跟着减，芯片本身已经不在 DOM 里了 */
+    function onChipRemoved(chip: ComposerChip) {
+      if (chip.source === 'agent') {
+        if (orchAgent.value && agentKeyOf(orchAgent.value) === chip.key) {
+          orchAgent.value = null;
+        }
+        return;
+      }
+      removeMounted({
+        key: chip.key,
+        name: chip.name,
+        source: chip.source as MountedItem['source'],
+      });
+    }
+
     function onComposerKeydown(e: KeyboardEvent) {
       if (e.isComposing) return;
-      if (commandOpen.value) {
-        const category = commandCategories.value[commandCategoryIndex.value];
-        const itemCount = category?.items.length || 0;
-        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-          e.preventDefault();
-          const delta = e.key === 'ArrowDown' ? 1 : -1;
-          if (commandColumn.value === 'category') {
-            commandCategoryIndex.value = Math.max(
-              0,
-              Math.min(
-                commandCategories.value.length - 1,
-                commandCategoryIndex.value + delta,
-              ),
-            );
-            commandItemIndex.value = 0;
-          } else if (itemCount > 0) {
-            commandItemIndex.value = Math.max(
-              0,
-              Math.min(itemCount - 1, commandItemIndex.value + delta),
-            );
-          }
-          return;
-        }
-        if (e.key === 'ArrowRight') {
-          e.preventDefault();
-          if (itemCount > 0) {
-            commandColumn.value = 'items';
-            commandItemIndex.value = Math.min(
-              commandItemIndex.value,
-              itemCount - 1,
-            );
-          }
-          return;
-        }
-        if (e.key === 'ArrowLeft') {
-          e.preventDefault();
-          commandColumn.value = 'category';
-          return;
-        }
-        if (e.key === ' ') {
-          e.preventDefault();
-          if (commandColumn.value === 'category') {
-            if (itemCount > 0) commandColumn.value = 'items';
-          } else {
-            toggleCommandItem(
-              commandCategoryIndex.value,
-              commandItemIndex.value,
-            );
-          }
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          confirmCommandPalette();
-          return;
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeCommandPalette();
-          return;
-        }
-      }
       if (
         (e.key === '/' || e.key === '@') &&
         !e.altKey &&
         !e.ctrlKey &&
         !e.metaKey
       ) {
-        commandTriggerPosition.value = (
-          e.target as HTMLTextAreaElement
-        ).selectionStart;
+        // 触发字符不落正文：确认时芯片就插在这个位置，取消也不用回删
+        e.preventDefault();
         openCommandPalette();
         return;
       }
       onComposerEnter(e);
+    }
+
+    /** 富输入框每次改动都把序列化后的正文同步过来（芯片按 @名称 算进正文） */
+    function onComposerText(text: string) {
+      inputValue.value = text;
     }
 
     // ==================== 沙箱 ====================
@@ -741,6 +850,7 @@ export default defineComponent({
           mounts: currentMounts(),
           orchAgent: orchAgent.value,
         });
+        sessionDrafts.set(previousId, composerRef.value?.getHtml() ?? '');
       }
       sessionId.value = s.id;
       // 已加载过、或还有活动流的会话直接复用缓冲（后台流一直在往里写），不重载：
@@ -755,9 +865,44 @@ export default defineComponent({
       modelId.value = meta?.modelId || 0;
       mountedItems.value = mountsToItems(meta?.mounts || {});
       orchAgent.value = meta?.orchAgent || null;
+      applyComposerDraft(s.id);
       scrollToBottom();
       // 后台会话只保留队列；切回来时若已空闲，从队首继续。
       scheduleQuestionQueue(s.id);
+    }
+
+    /**
+     * 还原某会话的输入框：有草稿就连文字带芯片原样还原（芯片位置以草稿为准），
+     * 没草稿则清空后把该会话上轮的挂载铺成芯片，保证「框内芯片 == composer 状态」。
+     */
+    function applyComposerDraft(sid: number) {
+      const draft = sessionDrafts.get(sid) ?? '';
+      if (draft) {
+        const chips = composerRef.value?.setHtml(draft) || [];
+        mountedItems.value = chips
+          .filter((chip) => chip.source !== 'agent')
+          .map((chip) => ({
+            key: chip.key,
+            name: chip.name,
+            source: chip.source as MountedItem['source'],
+          }));
+        const agentChip = chips.find((chip) => chip.source === 'agent');
+        if (!agentChip) {
+          orchAgent.value = null;
+        } else if (
+          !orchAgent.value ||
+          agentKeyOf(orchAgent.value) !== agentChip.key
+        ) {
+          // 芯片在、但智能体对象要靠候选列表才能还原（授权被收回就当没选）
+          orchAgent.value =
+            agentOptions.value.find(
+              (agent) => agentKeyOf(agent) === agentChip.key,
+            ) || null;
+        }
+      } else {
+        composerRef.value?.clear();
+      }
+      syncComposerChips();
     }
 
     /** 四口挂载候选拉齐（挂载回显要按 id 匹配名称；use 口径=自建∪授权） */
@@ -968,14 +1113,18 @@ export default defineComponent({
           mounts: currentMounts(),
           orchAgent: orchAgent.value,
         });
+        sessionDrafts.set(sessionId.value, composerRef.value?.getHtml() ?? '');
       }
       sessionId.value = 0;
       sessionStore[0] = [];
       loadedSessions.delete(0);
       composerMeta.delete(0);
+      sessionDrafts.delete(0);
       modelId.value = 0;
       mountedItems.value = [];
       orchAgent.value = null;
+      // 框内同时有正文与芯片，光清 inputValue 不够，得把 contenteditable 一并抹干净
+      composerRef.value?.clear();
       inputValue.value = '';
     }
 
@@ -992,6 +1141,7 @@ export default defineComponent({
         queuePumpPending.delete(id);
         loadedSessions.delete(id);
         composerMeta.delete(id);
+        sessionDrafts.delete(id);
         // 删的是当前会话才回到新建草稿；删侧栏里的历史项不打断当前对话
         if (sessionId.value === id) newSession();
         await loadSessions(true);
@@ -1058,13 +1208,23 @@ export default defineComponent({
           mounts: currentMounts(),
           orchAgent: orchAgent.value ? { ...orchAgent.value } : null,
         });
-        inputValue.value = '';
         chatAttachments.value = [];
+        resetComposerText();
         return;
       }
-      inputValue.value = '';
       chatAttachments.value = []; // 发送即清草稿附件
+      resetComposerText();
       await postTurn(messageText, displayText, atts);
+    }
+
+    /**
+     * 发完收口：正文与芯片清空，但已选资源留给下一轮（芯片重新铺在空框开头）。
+     * 不能让挂载默默生效而框里看不到——那又是一份“看不见但已勾上”的状态。
+     */
+    function resetComposerText() {
+      inputValue.value = '';
+      composerRef.value?.clear();
+      syncComposerChips();
     }
 
     function removeQueuedQuestion(id: string) {
@@ -2007,18 +2167,25 @@ export default defineComponent({
       onQueueDrop,
       composerRef,
       onComposerKeydown,
+      onComposerText,
+      onChipRemoved,
       commandOpen,
       commandLoading,
-      commandColumn,
+      commandSearchRef,
+      commandQuery,
       commandCategoryIndex,
       commandItemIndex,
       commandCategories,
+      commandActiveCategory,
+      commandActiveItems,
       resourceIcon,
       openCommandPalette,
       closeCommandPalette,
       confirmCommandPalette,
       focusCommandCategory,
+      onCommandSearchKeydown,
       isCommandItemSelected,
+      pickCommandItem,
       toggleCommandItem,
       selectedCommandCount,
       toggleAskOption,
@@ -2440,17 +2607,17 @@ export default defineComponent({
 
       <!-- 输入区：资源、正文与发送操作集中在一张对话卡片内 -->
       <footer class="hermes-input" :class="{ 'is-command-open': commandOpen }">
+        <!-- 分类横向并排：选中一类只展开那一类的列表，不再把五类堆叠在一起顶掉消息区 -->
         <div
           v-if="commandOpen"
           class="hermes-command-panel"
           role="dialog"
-          aria-label="选择智能体与资源"
-          @mousedown.prevent
+          aria-label="添加智能体与资源"
         >
           <header class="hermes-command-header">
             <div>
               <strong>添加智能体与资源</strong>
-              <span>方向键导航，空格勾选</span>
+              <span>勾选后以图标插进正文，跟文字写在同一段里</span>
             </div>
             <div class="hermes-command-header-right">
               <kbd>/</kbd><kbd>@</kbd>
@@ -2467,64 +2634,93 @@ export default defineComponent({
           <div v-if="commandLoading" class="hermes-command-loading">
             <a-spin size="small" /> 正在加载可用资源…
           </div>
-          <div v-else class="hermes-command-categories">
-            <section
-              v-for="(category, categoryIndex) in commandCategories"
-              :key="category.source"
-              class="hermes-command-row"
+          <template v-else>
+            <nav
+              class="hermes-command-tabs"
+              aria-label="资源分类"
+              @mousedown.prevent
             >
               <button
+                v-for="(category, categoryIndex) in commandCategories"
+                :key="category.source"
                 type="button"
                 tabindex="-1"
-                class="hermes-command-category"
-                :class="{
-                  active:
-                    commandColumn === 'category' &&
-                    commandCategoryIndex === categoryIndex,
-                  entered:
-                    commandColumn === 'items' &&
-                    commandCategoryIndex === categoryIndex,
-                }"
+                class="hermes-command-tab"
+                :class="{ active: commandCategoryIndex === categoryIndex }"
                 @click="focusCommandCategory(categoryIndex)"
               >
                 <component :is="category.icon" />
-                <span class="hermes-command-category-label">{{ category.label }}</span>
+                <span>{{ category.label }}</span>
                 <small v-if="selectedCommandCount(category.source)">
                   {{ selectedCommandCount(category.source) }}
                 </small>
-                <RightOutlined class="hermes-command-enter" />
               </button>
-              <div class="hermes-command-items">
-                <button
-                  v-for="(item, itemIndex) in category.items"
-                  :key="`${item.source}:${item.key}`"
-                  type="button"
-                  tabindex="-1"
-                  class="hermes-command-item"
-                  :class="{
-                    active:
-                      commandColumn === 'items' &&
-                      commandCategoryIndex === categoryIndex &&
-                      commandItemIndex === itemIndex,
-                    selected: isCommandItemSelected(item),
-                  }"
-                  :aria-pressed="isCommandItemSelected(item)"
-                  @click="toggleCommandItem(categoryIndex, itemIndex)"
-                >
-                  <CheckCircleOutlined v-if="isCommandItemSelected(item)" />
-                  <span>{{ item.name }}</span>
-                </button>
-                <span
-                  v-if="category.items.length === 0"
-                  class="hermes-command-empty"
-                >
-                  暂无可用资源
-                </span>
+            </nav>
+            <div class="hermes-command-search">
+              <SearchOutlined class="hermes-command-search-icon" />
+              <input
+                ref="commandSearchRef"
+                v-model="commandQuery"
+                class="hermes-command-search-input"
+                type="text"
+                :placeholder="`搜索${commandActiveCategory?.label || '资源'}名称`"
+                aria-label="按名称搜索资源"
+                @keydown="onCommandSearchKeydown"
+              />
+              <button
+                v-if="commandQuery"
+                type="button"
+                tabindex="-1"
+                aria-label="清空搜索"
+                @click="commandQuery = ''"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+            <div class="hermes-command-list" @mousedown.prevent>
+              <button
+                v-for="(item, itemIndex) in commandActiveItems"
+                :key="`${item.source}:${item.key}`"
+                type="button"
+                tabindex="-1"
+                class="hermes-command-item"
+                :class="{
+                  active: commandItemIndex === itemIndex,
+                  selected: isCommandItemSelected(item),
+                }"
+                :aria-pressed="isCommandItemSelected(item)"
+                @click="pickCommandItem(itemIndex, item)"
+              >
+                <component
+                  :is="resourceIcon(item.source)"
+                  class="hermes-command-item-icon"
+                />
+                <span class="hermes-command-item-name">{{ item.name }}</span>
+                <small v-if="item.description" class="hermes-command-item-desc">
+                  {{ item.description }}
+                </small>
+                <CheckOutlined
+                  v-if="isCommandItemSelected(item)"
+                  class="hermes-command-item-checked"
+                />
+              </button>
+              <div
+                v-if="commandActiveItems.length === 0"
+                class="hermes-command-empty"
+              >
+                {{
+                  commandQuery.trim()
+                    ? '没有匹配的资源，换个词试试'
+                    : '暂无可用资源（需本人创建或被授权使用）'
+                }}
               </div>
-            </section>
-          </div>
+            </div>
+          </template>
           <footer class="hermes-command-footer">
-            <span><kbd>↑</kbd><kbd>↓</kbd> 移动 <kbd>←</kbd><kbd>→</kbd> 进入子行 <kbd>Space</kbd> 勾选</span>
+            <span>
+              <kbd>←</kbd><kbd>→</kbd> 切分类 <kbd>↑</kbd><kbd>↓</kbd> 选条目
+              <kbd>Space</kbd> 勾选
+            </span>
             <a-button
               type="primary"
               size="small"
@@ -2537,42 +2733,6 @@ export default defineComponent({
         </div>
 
         <div class="hermes-editor">
-          <div
-            v-if="orchAgent || mountedItems.length > 0"
-            class="hermes-selection-chips"
-            aria-label="已选智能体与资源"
-          >
-            <span
-              v-if="orchAgent"
-              class="hermes-selection-chip is-agent"
-              :title="`${agentModeLabel(orchAgent.mode)} · ${orchAgent.name}`"
-            >
-              <RobotOutlined />
-              <span class="hermes-selection-name">{{ orchAgent.name }}</span>
-              <small>{{ agentModeLabel(orchAgent.mode) }}</small>
-              <button type="button" aria-label="移除智能体" @click="clearAgent">
-                <CloseOutlined />
-              </button>
-            </span>
-            <span
-              v-for="item in mountedItems"
-              :key="`${item.source}:${item.key}`"
-              class="hermes-selection-chip"
-              :class="`is-${item.source}`"
-              :title="item.name"
-            >
-              <component :is="resourceIcon(item.source)" />
-              <span class="hermes-selection-name">{{ item.name }}</span>
-              <button
-                type="button"
-                :aria-label="`移除${item.name}`"
-                @click="removeMounted(item)"
-              >
-                <CloseOutlined />
-              </button>
-            </span>
-          </div>
-
           <!-- 待发送附件：逐个上传进度条 + 百分比，可单个移除 -->
           <div v-if="chatAttachments.length > 0" class="hermes-attach-list">
             <div
@@ -2609,17 +2769,17 @@ export default defineComponent({
             </div>
           </div>
 
-          <a-textarea
+          <!-- 资源芯片与正文穿插在同一行：图标不再单独占顶部一行去顶消息区 -->
+          <ComposerEditor
             ref="composerRef"
-            v-model:value="inputValue"
-            class="hermes-composer-textarea"
-            :auto-size="{ minRows: 3, maxRows: 8 }"
             :placeholder="
               busy || sending
                 ? '随时继续提问，Enter 加入排队（Shift+Enter 换行）…'
-                : '描述你的问题，输入 / 或 @ 添加智能体与资源（Shift+Enter 换行）…'
+                : '描述你的问题，输入 / 或 @ 把智能体与资源插进正文（Shift+Enter 换行）…'
             "
             aria-label="探索问题输入框"
+            @update:text="onComposerText"
+            @remove="onChipRemoved"
             @keydown="onComposerKeydown"
           />
         </div>
@@ -2653,6 +2813,7 @@ export default defineComponent({
                 orchAgent && !modelId ? '智能体自带配置模型' : '选择模型'
               "
               allow-clear
+              placement="topLeft"
               :value="modelId || undefined"
               @change="changeModel"
             />
@@ -3595,31 +3756,136 @@ export default defineComponent({
       color: var(--text-color-3, #8a9099);
     }
 
-    .hermes-command-categories {
-      max-height: 330px;
-      padding: 6px 8px;
-      overflow-y: auto;
-    }
+    // 分类横向并排；←→ 就是在这一排上跳
+    .hermes-command-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px 12px 0;
+      overflow-x: auto;
 
-    .hermes-command-row {
-      display: grid;
-      grid-template-columns: 116px minmax(0, 1fr);
-      gap: 8px;
-      align-items: start;
-      padding: 5px 0;
+      .hermes-command-tab {
+        display: inline-flex;
+        flex: 0 0 auto;
+        gap: 6px;
+        align-items: center;
+        min-height: 32px;
+        padding: 5px 11px;
+        font-size: 13px;
+        color: var(--text-color-2, #4e5969);
+        white-space: nowrap;
+        cursor: pointer;
+        background: var(--hover-bg-color, #f6f8fb);
+        border: 1px solid transparent;
+        border-radius: 9px;
 
-      & + .hermes-command-row {
-        border-top: 1px solid var(--border-color, #f0f2f5);
+        > .anticon {
+          color: var(--text-color-3, #8a9099);
+        }
+
+        small {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 17px;
+          height: 17px;
+          font-size: 11px;
+          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 10%);
+          border-radius: 9px;
+        }
+
+        &:hover {
+          color: hsl(var(--primary));
+        }
+
+        &.active {
+          font-weight: 500;
+          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 8%);
+          border-color: hsl(var(--primary) / 22%);
+
+          > .anticon {
+            color: hsl(var(--primary));
+          }
+        }
       }
     }
 
-    .hermes-command-category {
+    .hermes-command-search {
       display: flex;
       gap: 7px;
       align-items: center;
+      margin: 10px 12px 0;
+      padding: 0 10px;
+      background: var(--hover-bg-color, #f6f8fb);
+      border: 1px solid var(--border-color, #e5e8ee);
+      border-radius: 9px;
+
+      &:focus-within {
+        background: var(--component-background, #fff);
+        border-color: hsl(var(--primary) / 45%);
+      }
+
+      > .hermes-command-search-icon {
+        font-size: 13px;
+        color: var(--text-color-3, #9aa0aa);
+      }
+
+      .hermes-command-search-input {
+        flex: 1;
+        min-width: 0;
+        height: 32px;
+        font-size: 13px;
+        color: var(--text-color-1, #1f2329);
+        background: transparent;
+        border: 0;
+        outline: none;
+
+        &::placeholder {
+          color: var(--text-color-3, #a0a6b0);
+        }
+      }
+
+      > button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        color: var(--text-color-3, #9aa0aa);
+        cursor: pointer;
+        background: transparent;
+        border: 0;
+        border-radius: 5px;
+
+        .anticon {
+          font-size: 10px;
+        }
+
+        &:hover {
+          color: var(--text-color-1, #1f2329);
+        }
+      }
+    }
+
+    // 只出当前分类的条目：一条一行，名称与用途同排读完
+    .hermes-command-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 232px;
+      padding: 8px 8px 10px;
+      overflow-y: auto;
+    }
+
+    .hermes-command-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
       width: 100%;
-      min-height: 36px;
-      padding: 7px 9px;
+      min-height: 34px;
+      padding: 6px 9px;
       font-size: 13px;
       color: var(--text-color-2, #4e5969);
       text-align: left;
@@ -3628,89 +3894,53 @@ export default defineComponent({
       border: 1px solid transparent;
       border-radius: 9px;
 
-      > .anticon:first-child {
+      .hermes-command-item-icon {
+        flex-shrink: 0;
         color: hsl(var(--primary));
       }
 
-      .hermes-command-category-label {
-        flex: 1;
-        white-space: nowrap;
-      }
-
-      small {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 18px;
-        height: 18px;
-        color: hsl(var(--primary));
-        background: hsl(var(--primary) / 9%);
-        border-radius: 9px;
-      }
-
-      .hermes-command-enter {
-        font-size: 10px;
-        color: var(--text-color-3, #a0a6b0);
-      }
-
-      &.entered {
-        background: var(--hover-bg-color, #f5f7fa);
-      }
-
-      &.active {
-        color: hsl(var(--primary));
-        background: hsl(var(--primary) / 8%);
-        border-color: hsl(var(--primary) / 20%);
-      }
-    }
-
-    .hermes-command-items {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      align-items: center;
-      max-height: 92px;
-      padding: 2px 0;
-      overflow-y: auto;
-    }
-
-    .hermes-command-item {
-      display: inline-flex;
-      gap: 5px;
-      align-items: center;
-      max-width: 100%;
-      min-height: 32px;
-      padding: 5px 9px;
-      font-size: 12px;
-      color: var(--text-color-2, #4e5969);
-      cursor: pointer;
-      background: var(--component-background, #fff);
-      border: 1px solid var(--border-color, #e5e8ee);
-      border-radius: 8px;
-
-      span {
+      .hermes-command-item-name {
+        flex: 0 1 auto;
         overflow: hidden;
+        font-weight: 500;
+        color: var(--text-color-1, #1f2329);
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
-      &.selected {
+      .hermes-command-item-desc {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        font-size: 11px;
+        color: var(--text-color-3, #9aa0aa);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .hermes-command-item-checked {
+        flex-shrink: 0;
+        font-size: 12px;
         color: hsl(var(--primary));
+      }
+
+      &.selected {
         background: hsl(var(--primary) / 7%);
-        border-color: hsl(var(--primary) / 25%);
+        border-color: hsl(var(--primary) / 22%);
       }
 
       &.active {
-        border-color: hsl(var(--primary));
+        border-color: hsl(var(--primary) / 55%);
         outline: 2px solid hsl(var(--primary) / 13%);
         outline-offset: 1px;
       }
     }
 
     .hermes-command-empty {
-      padding: 7px 2px;
+      padding: 18px 4px;
       font-size: 12px;
       color: var(--text-color-3, #9aa0aa);
+      text-align: center;
     }
 
     .hermes-command-footer {
@@ -3743,91 +3973,6 @@ export default defineComponent({
 
     .hermes-editor {
       padding: 12px 2px 4px;
-    }
-
-    .hermes-selection-chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-bottom: 9px;
-    }
-
-    .hermes-selection-chip {
-      display: inline-flex;
-      gap: 6px;
-      align-items: center;
-      max-width: 230px;
-      min-height: 30px;
-      padding: 3px 5px 3px 9px;
-      font-size: 12px;
-      color: var(--text-color-2, #3c4254);
-      background: var(--hover-bg-color, #f5f7fa);
-      border: 1px solid var(--border-color, #e5e8ef);
-      border-radius: 8px;
-
-      > .anticon {
-        flex-shrink: 0;
-        color: hsl(var(--primary));
-      }
-
-      &.is-agent {
-        color: #5b4db2;
-        background: rgb(112 89 184 / 7%);
-        border-color: rgb(112 89 184 / 18%);
-
-        > .anticon {
-          color: #7059b8;
-        }
-      }
-
-      &.is-mcp > .anticon {
-        color: #c2410c;
-      }
-
-      &.is-tool > .anticon {
-        color: #15803d;
-      }
-
-      &.is-kb > .anticon {
-        color: #0f766e;
-      }
-
-      .hermes-selection-name {
-        overflow: hidden;
-        font-weight: 500;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      small {
-        flex-shrink: 0;
-        font-size: 10px;
-        color: var(--text-color-3, #8a9099);
-      }
-
-      > button {
-        display: inline-flex;
-        flex-shrink: 0;
-        align-items: center;
-        justify-content: center;
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        color: var(--text-color-3, #8a9099);
-        cursor: pointer;
-        background: transparent;
-        border: 0;
-        border-radius: 5px;
-
-        .anticon {
-          font-size: 10px;
-        }
-
-        &:hover {
-          color: var(--text-color-1, #1f2329);
-          background: rgb(15 23 42 / 6%);
-        }
-      }
     }
 
     // 待发送附件列表：每项一行（回形针 + 文件名/进度条 + 删除）
@@ -3877,21 +4022,6 @@ export default defineComponent({
         .hermes-attach-del {
           flex-shrink: 0;
         }
-      }
-    }
-
-    :deep(textarea.ant-input) {
-      min-height: 76px;
-      padding: 4px 2px 8px;
-      font-size: 14px;
-      line-height: 1.7;
-      resize: none;
-      background: transparent;
-      border: none;
-      box-shadow: none;
-
-      &::placeholder {
-        color: var(--text-color-3, #a0a6b0);
       }
     }
 
@@ -4012,10 +4142,6 @@ export default defineComponent({
       margin-left: 10px;
       padding-right: 10px;
       padding-left: 10px;
-
-      .hermes-command-row {
-        grid-template-columns: 96px minmax(0, 1fr);
-      }
 
       .hermes-command-footer > span {
         display: none;

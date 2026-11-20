@@ -4,6 +4,8 @@
  */
 import type { WorkflowPageResp } from '#/api/ai-workflow/types';
 
+import { computed } from 'vue';
+
 import { useAccess } from '@vben/access';
 
 import {
@@ -58,16 +60,31 @@ function getStatusConfig(status: string) {
   return statusConfig[status] || { color: 'default', text: status };
 }
 
+/** 卡片只留一行元信息，年份省到月日时分（完整时间戳在执行详情里仍有） */
 function formatTime(time: string) {
   if (!time) return '-';
   return new Date(time).toLocaleString('zh-CN', {
-    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
   });
 }
+
+/**
+ * 节点数/版本/创建人/更新时间拼成一整行文本：分成多个 span 在窄卡上会被挤到
+ * 换行（一行变两行又把卡片高度顶回去），拼成字符串才能用 ellipsis 收尾。
+ */
+const metaText = computed(() =>
+  [
+    `${props.item.nodeCount || 0} 个节点`,
+    `v${props.item.currentVersion || 1}`,
+    props.item.creatorName ? `创建人：${props.item.creatorName}` : '',
+    formatTime(props.item.updateTime),
+  ]
+    .filter(Boolean)
+    .join(' · '),
+);
 </script>
 
 <template>
@@ -81,33 +98,19 @@ function formatTime(time: string) {
       <div class="card-icon">
         <ApartmentOutlined />
       </div>
-      <div class="card-title-wrapper">
-        <h3 class="card-title">{{ item.name }}</h3>
-        <Tag :color="getStatusConfig(item.status).color">
-          {{ getStatusConfig(item.status).text }}
-        </Tag>
-      </div>
+      <h3 class="card-title" :title="item.name">{{ item.name }}</h3>
+      <Tag class="card-status" :color="getStatusConfig(item.status).color">
+        {{ getStatusConfig(item.status).text }}
+      </Tag>
     </div>
 
-    <div class="card-body">
-      <p class="card-desc">{{ item.description || '暂无描述' }}</p>
-      <div class="card-meta">
-        <span class="meta-item">
-          <ApartmentOutlined />
-          {{ item.nodeCount || 0 }} 个节点
-        </span>
-        <span class="meta-item"> v{{ item.currentVersion || 1 }} </span>
-        <span v-if="item.creatorName" class="meta-item">
-          创建人：{{ item.creatorName }}
-        </span>
-      </div>
-    </div>
+    <p class="card-desc" :title="item.description || '暂无描述'">
+      {{ item.description || '暂无描述' }}
+    </p>
 
     <div class="card-footer">
-      <div class="footer-line">
-        <span class="update-time">{{ formatTime(item.updateTime) }}</span>
-      </div>
-      <div class="footer-line card-actions">
+      <div class="card-meta" :title="metaText">{{ metaText }}</div>
+      <div class="card-actions">
         <Tooltip v-if="can('workflow:workflow:edit', 'edit')" title="编辑">
           <a-button
             data-testid="workflow-card-edit"
@@ -127,7 +130,6 @@ function formatTime(time: string) {
             @click="emit('chat', item)"
           >
             <template #icon><PlusOutlined /></template>
-            去对话
           </a-button>
         </Tooltip>
         <!-- 发布已迁移至工作流编辑页（保存按钮右侧），列表页不再提供发布入口 -->
@@ -208,14 +210,18 @@ function formatTime(time: string) {
 </template>
 
 <style lang="less" scoped>
+// 紧凑卡片：头部一行（图标+名称+状态）、描述一行、底行（元信息 + 操作图标），
+// 单卡高度约 250px 降到 90px 上下，一屏能多看几倍实例
 .workflow-card {
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
   background: var(--layout-header-bg-color, #fff);
   border: 1px solid var(--border-color, rgb(15 23 42 / 6%));
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgb(15 23 42 / 4%);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 4%);
   transition:
     transform 0.18s ease,
     box-shadow 0.18s ease,
@@ -223,104 +229,95 @@ function formatTime(time: string) {
 
   &:hover {
     border-color: #c7c9f8;
-    box-shadow: 0 14px 32px rgb(79 70 229 / 10%);
-    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgb(79 70 229 / 10%);
+    transform: translateY(-1px);
   }
 
   .card-header {
     display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    margin-bottom: 12px;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
 
     .card-icon {
       display: flex;
       flex-shrink: 0;
       align-items: center;
       justify-content: center;
-      width: 40px;
-      height: 40px;
-      font-size: 20px;
+      width: 26px;
+      height: 26px;
+      font-size: 14px;
       color: #4f46e5;
-      background: linear-gradient(145deg, rgb(79 70 229 / 12%), rgb(124 58 237 / 14%));
-      border-radius: 12px;
+      background: linear-gradient(
+        145deg,
+        rgb(79 70 229 / 12%),
+        rgb(124 58 237 / 14%)
+      );
+      border-radius: 8px;
     }
 
-    .card-title-wrapper {
-      display: flex;
+    .card-title {
       flex: 1;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
       min-width: 0;
+      margin: 0;
+      overflow: hidden;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 20px;
+      color: var(--text-color-1, #1f2329);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-      .card-title {
-        margin: 0;
-        overflow: hidden;
-        font-size: 16px;
-        font-weight: 600;
-        color: var(--text-color-1, #1f2329);
-        letter-spacing: -0.01em;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
+    // 状态标签不参与收缩，否则窄卡上会被标题压成两行
+    .card-status {
+      flex-shrink: 0;
+      margin-inline-end: 0;
+      padding: 0 5px;
+      font-size: 11px;
+      line-height: 16px;
     }
   }
 
-  .card-body {
-    flex: 1;
-    margin-bottom: 12px;
-
-    .card-desc {
-      display: -webkit-box;
-      margin: 0 0 8px;
-      overflow: hidden;
-      font-size: 13px;
-      line-height: 1.5;
-      color: #666;
-      text-overflow: ellipsis;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-    }
-
-    .card-meta {
-      display: flex;
-      gap: 16px;
-      font-size: 12px;
-      color: #999;
-
-      .meta-item {
-        display: flex;
-        gap: 4px;
-        align-items: center;
-      }
-    }
+  .card-desc {
+    margin: 0;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 18px;
+    color: #666;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .card-footer {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    align-items: flex-start;
-    padding-top: 12px;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+    padding-top: 6px;
     border-top: 1px solid #f0f0f0;
 
-    // 时间独占一行靠左，操作按钮放在时间的下一行靠左
-    .footer-line {
-      display: flex;
-      width: 100%;
-      align-items: center;
-      justify-content: flex-start;
-    }
-
-    .update-time {
-      font-size: 12px;
+    .card-meta {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      font-size: 11px;
+      line-height: 18px;
       color: #999;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
+    // 操作区改纯图标（与知识库列表同一口径）并收窄内边距，避免挤掉元信息
     .card-actions {
-      gap: 2px;
-      flex-wrap: wrap;
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+
+      :deep(.ant-btn) {
+        padding: 0 3px;
+        font-size: 13px;
+      }
     }
   }
 }

@@ -1,4 +1,6 @@
 <script lang="ts" setup>
+import type { DocProgressResp, DocumentResp, KnowledgeBaseResp } from './api';
+
 /**
  * 文档面板：三类知识库共用一张表格（SPEC §11.1-4）
  *
@@ -67,8 +69,8 @@ import {
   DOC_STATUS_COLORS,
   DOC_STATUS_LABELS,
   DocPageList,
-  GetDocsProgressBatch,
   GetDocOriginal,
+  GetDocsProgressBatch,
   KB_TYPE_AUDIO_VIDEO,
   KB_TYPE_DOC,
   KB_TYPE_IMAGE,
@@ -77,16 +79,11 @@ import {
   RenameDoc,
   RetryDocs,
 } from './api';
-import type {
-  DocProgressResp,
-  DocumentResp,
-  KnowledgeBaseResp,
-} from './api';
 import ChunkDrawer from './ChunkDrawer.vue';
 import DocContentModal from './DocContentModal.vue';
 import UploadModal from './UploadModal.vue';
 
-const props = defineProps<{ kb: null | KnowledgeBaseResp }>();
+const props = defineProps<{ kb: KnowledgeBaseResp | null }>();
 
 const loading = ref(false);
 const docs = ref<DocumentResp[]>([]);
@@ -134,10 +131,10 @@ const contentOpen = ref(false);
 const contentDocId = ref<null | number>(null);
 const contentTitle = ref('');
 const chunkOpen = ref(false);
-const chunkDoc = ref<null | DocumentResp>(null);
+const chunkDoc = ref<DocumentResp | null>(null);
 const renameOpen = ref(false);
 const renameValue = ref('');
-const renameTarget = ref<null | DocumentResp>(null);
+const renameTarget = ref<DocumentResp | null>(null);
 // 构建向量 / 构建图谱的二次确认弹框（需求 10）：点按钮只开弹框，点确定才真发请求
 const vectorOpen = ref(false);
 const vectorReparse = ref(false);
@@ -238,8 +235,8 @@ async function load(keepSelection = false) {
     if (!keepSelection) selectedIds.value = [];
     // 分段进度条不只在「跑动中」才需要：已成/已败的文档也要把「哪几个阶段、绿了几段」画出来
     await refreshProgress();
-  } catch (e: any) {
-    message.error(e?.message || '加载文档失败');
+  } catch (error: any) {
+    message.error(error?.message || '加载文档失败');
   } finally {
     loading.value = false;
   }
@@ -303,8 +300,8 @@ async function openOriginal(d: DocumentResp) {
     const res = await GetDocOriginal(d.id);
     if (!res?.url) return message.warning('这个文档没有可访问的原件地址');
     window.open(res.url, '_blank', 'noopener');
-  } catch (e: any) {
-    message.error(e?.message || '获取原文件失败');
+  } catch (error: any) {
+    message.error(error?.message || '获取原文件失败');
   }
 }
 function openChunks(d: DocumentResp) {
@@ -372,7 +369,9 @@ async function confirmBuildVectors() {
   });
   const purged = (res as any)?.purged ?? 0;
   message.success(
-    `已投递 ${res.accepted} 个构建向量任务` + (purged ? `，清理旧向量 ${purged} 条` : ''),
+    `已投递 ${res.accepted} 个构建向量任务${
+      purged ? `，清理旧向量 ${purged} 条` : ''
+    }`,
   );
   vectorOpen.value = false;
   load(true);
@@ -397,8 +396,9 @@ async function confirmBuildGraph() {
     resume: graphResume.value,
   });
   message.success(
-    `已投递 ${res.accepted} 个构建图谱任务` +
-      (res.skipped ? `，跳过 ${res.skipped} 个` : ''),
+    `已投递 ${res.accepted} 个构建图谱任务${
+      res.skipped ? `，跳过 ${res.skipped} 个` : ''
+    }`,
   );
   graphOpen.value = false;
   load(true);
@@ -422,7 +422,8 @@ function graphStages(d: DocumentResp): StageFlag[] {
 function vectorText(d: DocumentResp) {
   const p = progressMap.value[d.id];
   if (d.status === 'PROCESSED') return '已完成';
-  if (d.status === 'FAILED') return d.errorMsg ? `失败：${String(d.errorMsg).slice(0, 30)}` : '失败';
+  if (d.status === 'FAILED')
+    return d.errorMsg ? `失败：${String(d.errorMsg).slice(0, 30)}` : '失败';
   if (!p) return d.statusLabel || DOC_STATUS_LABELS[d.status || ''] || '';
   const label = p.stageLabel || p.stage || '';
   return `${label} ${p.done ?? 0}/${p.total ?? 0} (${p.percent ?? 0}%)`;
@@ -469,21 +470,19 @@ const tableColumns = computed<any[]>(() => {
       dataIndex: 'title',
       key: 'title',
       title: isDoc.value ? '文档' : '资源名称',
-      // 名称列定宽：不给宽度时它吃掉 scroll.x 的剩余空间，长文件名直接折行，
-      // 同一列的行高被撑成一忽儿两三种高度；定宽后配合 .doc-name 截断成单行
-      width: 240,
+      width: 220,
     },
     {
       dataIndex: 'fileSize',
       key: 'fileSize',
       title: '大小',
-      width: isAv.value ? 170 : 110,
+      width: isAv.value ? 150 : 96,
     },
     {
       dataIndex: 'status',
       key: 'status',
       title: isDoc.value ? '向量化进度' : '解析状态',
-      width: 240,
+      width: 196,
     },
   ];
   if (isDoc.value) {
@@ -492,13 +491,13 @@ const tableColumns = computed<any[]>(() => {
         dataIndex: 'chunkCount',
         key: 'chunkCount',
         title: '切片',
-        width: 80,
+        width: 68,
       },
       {
         dataIndex: 'graphState',
         key: 'graphState',
         title: '图谱进度',
-        width: 220,
+        width: 184,
       },
     );
   } else {
@@ -506,22 +505,21 @@ const tableColumns = computed<any[]>(() => {
       dataIndex: 'creatorName',
       key: 'creatorName',
       title: '创建人',
-      width: 110,
+      width: 100,
     });
   }
-  // 行操作已是纯图标：doc 型四个、媒体型最多三个，格子按图标位数给宽
   cols.push(
     {
       dataIndex: 'createTime',
       key: 'createTime',
       title: '创建时间',
-      width: 160,
+      width: 150,
     },
     {
       dataIndex: 'action',
       key: 'action',
       title: '操作',
-      width: isDoc.value ? 150 : 120,
+      width: isDoc.value ? 136 : 112,
       fixed: 'right',
     },
   );
@@ -538,7 +536,8 @@ const tablePagination = computed(() => ({
   showTotal: (total: number) => `共 ${total} 条`,
 }));
 
-const scrollX = computed(() => (isDoc.value ? 1240 : 1020));
+// 紧凑列宽让首屏优先展示名称、进度与操作；窄屏仍可横向滚动查看完整字段
+const scrollX = computed(() => (isDoc.value ? 1090 : 940));
 
 const rowSelection = computed<any>(() => ({
   selectedRowKeys: selectedIds.value,
@@ -659,7 +658,9 @@ const rowSelection = computed<any>(() => ({
                 >
                   {{ docName(record as DocumentResp) }}
                 </a>
-                <span v-else class="doc-name">{{ docName(record as DocumentResp) }}</span>
+                <span v-else class="doc-name">{{
+                  docName(record as DocumentResp)
+                }}</span>
               </Tooltip>
             </div>
           </template>
@@ -672,9 +673,15 @@ const rowSelection = computed<any>(() => ({
           <template v-else-if="column.key === 'status'">
             <div class="progress-cell">
               <Tag :color="DOC_STATUS_COLORS[record.status] || 'default'">
-                {{ record.statusLabel || DOC_STATUS_LABELS[record.status] || record.status }}
+                {{
+                  record.statusLabel ||
+                  DOC_STATUS_LABELS[record.status] ||
+                  record.status
+                }}
               </Tag>
-              <span class="progress-text">{{ vectorText(record as DocumentResp) }}</span>
+              <span class="progress-text">{{
+                vectorText(record as DocumentResp)
+              }}</span>
             </div>
             <!-- 按阶段数分段：已完成的段绿、未完成的段蓝，一眼看出卡在第三步还是第五步 -->
             <div class="stage-bar">
@@ -690,7 +697,9 @@ const rowSelection = computed<any>(() => ({
           <template v-else-if="column.key === 'graphState'">
             <div class="progress-cell">
               <Tag :color="KG_STATE_COLORS[record.graphState] || 'default'">
-                {{ record.graphStateLabel || KG_STATE_LABELS[record.graphState] }}
+                {{
+                  record.graphStateLabel || KG_STATE_LABELS[record.graphState]
+                }}
               </Tag>
               <!-- 格宽只有 220px：失败原因先就地截断展示，悬停看全文（没消息时 tooltip 不出） -->
               <Tooltip :title="graphMessageOf(record as DocumentResp)">
@@ -730,10 +739,7 @@ const rowSelection = computed<any>(() => ({
               </Tooltip>
               <!-- 媒体型没有「解析后内容」与「切片」这两个概念，两个位只对 doc 型出现；
                    内容位按整库的 content 权限显隐（见 canContentRow），不再用行 view 兜底 -->
-              <Tooltip
-                v-if="isDoc && canContentRow()"
-                title="查看解析后内容"
-              >
+              <Tooltip v-if="isDoc && canContentRow()" title="查看解析后内容">
                 <Button
                   type="text"
                   size="small"
@@ -804,11 +810,7 @@ const rowSelection = computed<any>(() => ({
     />
     <ChunkDrawer v-model:open="chunkOpen" :doc="chunkDoc" />
 
-    <Modal
-      v-model:open="renameOpen"
-      title="修改文档标题"
-      @ok="doRename"
-    >
+    <Modal v-model:open="renameOpen" title="修改文档标题" @ok="doRename">
       <Input v-model:value="renameValue" placeholder="请输入新标题" />
     </Modal>
 
@@ -824,9 +826,12 @@ const rowSelection = computed<any>(() => ({
     >
       <p>
         将对已勾选的 {{ selectedIds.length }} 个文档：
-        <strong>先删除它们已有的向量数据</strong>，再按当前分块配置重新分块与向量化。
+        <strong>先删除它们已有的向量数据</strong>
+        ，再按当前分块配置重新分块与向量化。
       </p>
-      <p class="modal-warn">旧向量删掉后不可恢复，重跑期间这些文档可能检索不到。</p>
+      <p class="modal-warn">
+        旧向量删掉后不可恢复，重跑期间这些文档可能检索不到。
+      </p>
       <Checkbox v-model:checked="vectorReparse">
         连文档解析一起重跑（默认复用上一次解析产物，只重做分块与向量）
       </Checkbox>
@@ -842,9 +847,12 @@ const rowSelection = computed<any>(() => ({
     >
       <p>
         将对已勾选的 {{ selectedIds.length }} 个文档：
-        <strong>先删除它们已有的图谱数据（实体与关系）</strong>，再重新抽取并写入图谱。
+        <strong>先删除它们已有的图谱数据（实体与关系）</strong>
+        ，再重新抽取并写入图谱。
       </p>
-      <p class="modal-warn">未开图谱、没配抽取模型或还没解析完成的文档会被后端跳过，回执里会报数量。</p>
+      <p class="modal-warn">
+        未开图谱、没配抽取模型或还没解析完成的文档会被后端跳过，回执里会报数量。
+      </p>
       <Checkbox v-model:checked="graphResume">
         断点续抽（上一轮已抽成功的分块直接复用，只补失败那一批往后的）
       </Checkbox>
@@ -900,20 +908,24 @@ const rowSelection = computed<any>(() => ({
   white-space: nowrap;
 }
 
-/* 分段进度条（需求 11）：宽度按阶段数均分，已完成绿、未完成蓝 */
+/* 进度列保留阶段辨识度，但限制轨道宽度，避免挤压名称与操作列 */
 .progress-cell {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   align-items: center;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
+}
+
+.progress-cell :deep(.ant-tag) {
+  margin-inline-end: 0;
 }
 
 .progress-text {
   flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
   font-size: 12px;
   color: var(--text-color-secondary, #888);
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -922,12 +934,14 @@ const rowSelection = computed<any>(() => ({
   display: flex;
   gap: 2px;
   align-items: center;
+  width: 112px;
+  max-width: 100%;
 }
 
 .stage-seg {
   flex: 1;
-  height: 6px;
-  background: #1890ff;
+  height: 4px;
+  background: #91caff;
   border-radius: 2px;
 }
 

@@ -199,6 +199,25 @@ function normalizeArray(value: unknown): string[] {
   return [];
 }
 
+/** 卡片上的标签列表（v-if 与 v-for 共用，避免无标签时白占一行高度） */
+function skillTags(item: SkillPageResp) {
+  return normalizeArray(item.tags);
+}
+
+/**
+ * 文件名/资源数/创建人拼成一整行：分成多个 span 在窄卡上会被挤到换行
+ * （一行变两行又把卡片高度顶回去），拼成字符串才能用 ellipsis 收尾。
+ */
+function skillMetaText(item: SkillPageResp) {
+  return [
+    item.skillFile || 'SKILL.md',
+    `${item.resourceCount || 0} 个资源`,
+    item.creatorName ? `创建人：${item.creatorName}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 function normalizeRecord(value: unknown): Record<string, string> {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return Object.fromEntries(
@@ -579,31 +598,41 @@ onMounted(() => {
               </div>
               <div class="skill-card-content">
                 <div class="skill-card-title-row">
-                  <h3 class="skill-card-title">{{ item.name }}</h3>
-                  <Tag :color="item.status ? 'success' : 'default'">
+                  <h3 class="skill-card-title" :title="item.name">
+                    {{ item.name }}
+                  </h3>
+                  <Tag
+                    class="skill-status-tag"
+                    :color="item.status ? 'success' : 'default'"
+                  >
                     {{ item.status ? '启用' : '禁用' }}
                   </Tag>
                 </div>
-                <div class="skill-card-path">
+                <div
+                  class="skill-card-path"
+                  :title="item.skillPath || `skills/${item.code}`"
+                >
                   {{ item.skillPath || `skills/${item.code}` }}
                 </div>
-                <p class="skill-card-desc">
+                <p
+                  class="skill-card-desc"
+                  :title="item.description || '暂无描述'"
+                >
                   {{ item.description || '暂无描述' }}
                 </p>
               </div>
             </div>
 
-            <div class="skill-card-meta">
-              <span>{{ item.skillFile || 'SKILL.md' }}</span>
-              <span>{{ item.resourceCount || 0 }} 个资源</span>
-              <span v-if="item.creatorName">
-                创建人：{{ item.creatorName }}
-              </span>
+            <div class="skill-card-meta" :title="skillMetaText(item)">
+              {{ skillMetaText(item) }}
             </div>
 
-            <div class="skill-card-tags">
+            <div
+              v-if="item.category || skillTags(item).length > 0"
+              class="skill-card-tags"
+            >
               <Tag v-if="item.category">{{ item.category }}</Tag>
-              <Tag v-for="tag in normalizeArray(item.tags)" :key="tag">
+              <Tag v-for="tag in skillTags(item)" :key="tag">
                 {{ tag }}
               </Tag>
             </div>
@@ -895,21 +924,24 @@ onMounted(() => {
   height: 100%;
 }
 
+// 紧凑卡片：图标、描述、元信息全部压成单行，去掉 min-height 撑高，一屏能多看几倍技能
 .skill-card-grid {
   display: grid;
   flex: 1;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
   align-content: flex-start;
-  padding: 16px;
+  min-height: 0;
+  padding: 12px;
   overflow-y: auto;
 }
 
 .skill-folder-card {
   display: flex;
   flex-direction: column;
-  min-height: 220px;
-  padding: 16px;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
   background: #fff;
   border: 1px solid #edf0f5;
   border-radius: 8px;
@@ -919,101 +951,132 @@ onMounted(() => {
 
   &:hover {
     border-color: #1677ff;
-    box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
+    box-shadow: 0 4px 12px rgb(15 23 42 / 8%);
   }
 }
 
 .skill-card-main {
   display: flex;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
   cursor: pointer;
 }
 
 .skill-card-icon {
   display: flex;
-  flex: 0 0 44px;
+  flex: 0 0 26px;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  font-size: 24px;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
   color: #1677ff;
   background: #e8f1ff;
   border-radius: 8px;
 }
 
 .skill-card-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
 .skill-card-title-row {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
   min-width: 0;
 }
 
 .skill-card-title {
-  max-width: 180px;
+  flex: 1;
+  min-width: 0;
   margin: 0;
   overflow: hidden;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+// 状态标签不参与收缩，否则窄卡上会被标题压成两行
+.skill-status-tag {
+  flex-shrink: 0;
+  margin-inline-end: 0;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .skill-card-path {
   overflow: hidden;
   font-family:
     ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 16px;
   color: #667085;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .skill-card-desc {
-  display: -webkit-box;
-  margin: 8px 0 0;
+  margin: 0;
   overflow: hidden;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 18px;
   color: #4b5563;
   text-overflow: ellipsis;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
 }
 
 .skill-card-meta {
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  margin-top: 16px;
-  font-size: 12px;
-  color: #667085;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: #999;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+// 标签超出宽度直接裁掉，不允许换行把卡片顶高（完整内容靠悬浮卡片看）
 .skill-card-tags {
   display: flex;
-  flex-wrap: wrap;
   gap: 4px;
-  min-height: 28px;
-  margin-top: 12px;
+  overflow: hidden;
+
+  :deep(.ant-tag) {
+    flex-shrink: 0;
+    margin-inline-end: 0;
+    padding: 0 5px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
 }
 
 .skill-card-footer {
   display: flex;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  padding-top: 12px;
   margin-top: auto;
+  padding-top: 6px;
   border-top: 1px solid #f0f0f0;
 }
 
+// 操作区靠纯图标 + 收窄内边距塞进 footer 一行，不给它抢走宽度
 .skill-card-actions {
   display: flex;
-  gap: 4px;
+  flex: 0 0 auto;
+  align-items: center;
+
+  :deep(.ant-btn) {
+    padding: 0 3px;
+    font-size: 13px;
+  }
 }
 
 .skill-empty {

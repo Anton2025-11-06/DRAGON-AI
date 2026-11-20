@@ -384,7 +384,8 @@ function handleTemplateSaved() {
   .card-list-wrapper {
     flex: 1;
     order: 3;
-    padding: 8px 16px 16px;
+    min-height: 0;
+    padding: 8px 12px 12px;
     overflow: auto;
   }
 
@@ -396,11 +397,11 @@ function handleTemplateSaved() {
   }
 }
 
-// 卡片网格布局
+// 卡片网格布局：列宽与间距收到和紧凑卡片相配，窄屏靠 auto-fill 自然回落列数
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 24px;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
 }
 
 // 空状态样式
@@ -422,7 +423,11 @@ function handleTemplateSaved() {
     margin-bottom: 18px;
     font-size: 30px;
     color: #4f46e5;
-    background: linear-gradient(145deg, rgb(79 70 229 / 12%), rgb(124 58 237 / 14%));
+    background: linear-gradient(
+      145deg,
+      rgb(79 70 229 / 12%),
+      rgb(124 58 237 / 14%)
+    );
     border-radius: 22px;
   }
 

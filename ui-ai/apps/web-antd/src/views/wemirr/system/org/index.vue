@@ -3,6 +3,7 @@ import { ref } from 'vue';
 
 import { Page } from '@vben/common-ui';
 
+import { ApartmentOutlined, ProfileOutlined } from '@ant-design/icons-vue';
 import { Card, notification } from 'ant-design-vue';
 
 import { useVbenForm } from '#/adapter/form';
@@ -119,11 +120,20 @@ function handleAdd(node: any) {
 
 <template>
   <Page
-    content-class="flex flex-row gap-2"
-    description="通过部门架构，能够清晰地划分部门职责和个人岗位职责，减少工作重叠和责任不清的情况，提升工作效率。"
+    content-class="dept-page-content"
+    description="维护组织层级、部门排序与启用状态。"
     title="部门管理"
   >
-    <Card class="w-2/5" title="部门列表">
+    <Card class="dept-tree-card" :bordered="false">
+      <template #title>
+        <span class="dept-card-title">
+          <ApartmentOutlined />
+          组织架构
+        </span>
+      </template>
+      <template #extra>
+        <span class="card-caption">选择节点查看详情</span>
+      </template>
       <DeptTree
         ref="deptTreeRef"
         v-model:select-dept-id="selectDeptId"
@@ -131,13 +141,117 @@ function handleAdd(node: any) {
         @select="handleSelect"
       />
     </Card>
-    <Card class="w-full" title="详情">
-      <BaseForm />
+
+    <Card class="dept-detail-card" :bordered="false">
+      <template #title>
+        <span class="dept-card-title">
+          <ProfileOutlined />
+          部门详情
+        </span>
+      </template>
+      <div class="detail-intro">
+        <h3>部门信息</h3>
+        <p>从左侧选择部门进行编辑，或点击节点旁的新增按钮创建下级部门。</p>
+      </div>
+      <div class="dept-form-body">
+        <BaseForm />
+      </div>
     </Card>
   </Page>
 </template>
+
 <style lang="less" scoped>
-:deep(.p-4) {
-  padding: 8px !important;
+:deep(.dept-page-content) {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+}
+
+.dept-tree-card {
+  flex: 0 0 360px;
+  min-width: 0;
+}
+
+.dept-detail-card {
+  flex: 1;
+  min-width: 0;
+}
+
+.dept-tree-card,
+.dept-detail-card {
+  overflow: hidden;
+  border: 1px solid var(--border-color, #e8ebf0);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 3%);
+
+  :deep(.ant-card-head) {
+    min-height: 54px;
+    padding: 0 18px;
+    border-bottom-color: var(--border-color, #edf0f2);
+  }
+
+  :deep(.ant-card-body) {
+    padding: 18px;
+  }
+}
+
+.dept-card-title {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
+
+  :deep(.anticon) {
+    color: hsl(var(--primary));
+  }
+}
+
+.card-caption {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-color-secondary, #999);
+}
+
+.detail-intro {
+  padding-bottom: 16px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-color, #edf0f2);
+
+  h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 5px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-color-secondary, #8a9199);
+  }
+}
+
+.dept-form-body {
+  max-width: 680px;
+
+  :deep(.ant-form-item) {
+    margin-bottom: 20px;
+  }
+
+  :deep(.ant-form-item-label > label) {
+    font-weight: 500;
+  }
+}
+
+@media (max-width: 900px) {
+  :deep(.dept-page-content) {
+    flex-direction: column;
+    padding: 8px;
+  }
+
+  .dept-tree-card {
+    flex-basis: auto;
+  }
 }
 </style>

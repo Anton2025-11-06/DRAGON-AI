@@ -1,10 +1,5 @@
 <script lang="ts" setup>
-import type {
-  KbSaveReq,
-  KbType,
-  KgEntityTypeItem,
-  RuntimeConfig,
-} from './api';
+import type { KbSaveReq, KbType, KgEntityTypeItem, RuntimeConfig } from './api';
 
 /**
  * 知识库创建 / 编辑弹窗。
@@ -686,559 +681,570 @@ async function handleSubmit() {
   <Modal
     :open="open"
     :confirm-loading="submitting"
-    :width="960"
+    :width="1080"
     :title="isEdit ? '编辑知识库' : '新建知识库'"
+    class="kb-form-modal"
     @update:open="emit('update:open', $event)"
     @ok="handleSubmit"
   >
-    <Form layout="vertical">
-      <Tabs v-model:active-key="activeTab">
+    <Form layout="vertical" class="kb-form">
+      <Tabs v-model:active-key="activeTab" class="form-tabs">
         <!-- ==================== 基础信息 ==================== -->
         <TabPane key="basic" tab="基础信息">
-          <FormItem label="知识库类型" required>
-            <RadioGroup
-              v-model:value="form.kbType"
-              :disabled="isEdit"
-              button-style="solid"
-            >
-              <Radio
-                v-for="t in KB_TYPES_ALL"
-                :key="t"
-                :value="t"
-                :disabled="isEdit && t !== form.kbType"
-              >
-                {{ KB_TYPE_LABELS[t] }}
-              </Radio>
-            </RadioGroup>
-            <div v-if="isEdit" class="hint">类型创建后不可修改</div>
-          </FormItem>
-
-          <FormItem label="名称" required>
-            <Input
-              v-model:value="form.name"
-              :maxlength="128"
-              placeholder="请输入知识库名称"
-            />
-          </FormItem>
-
-          <FormItem label="描述" required>
-            <Textarea
-              v-model:value="form.description"
-              :rows="2"
-              :maxlength="500"
-              placeholder="必填，说明这个库的内容与适用问题（深度探索智能体据此决定是否调用该知识库）"
-            />
-          </FormItem>
-
-          <FormItem label="向量模型" required>
-            <Select
-              v-model:value="form.embedModelId"
-              :options="embedOptions"
-              :disabled="isEdit"
-              placeholder="选择向量模型"
-              show-search
-              :filter-option="(i: string, o: any) => o.label.includes(i)"
-            />
-            <div class="hint">
-              {{
-                isDoc
-                  ? '文本向量或多模态向量皆可'
-                  : '图片/音视频库必须多模态向量'
-              }}{{ isEdit ? '；创建后锁定，换模型请新建库' : '' }}
-            </div>
-          </FormItem>
-
-          <FormItem label="向量维度">
-            <Space :size="8">
-              <span class="dim-value">{{ vectorDim }} 维</span>
-              <Tag color="blue">固定，不可修改</Tag>
-            </Space>
-            <div class="hint">
-              ES 索引的维度建库即锁定为
-              {{ vectorDim }} 维，换维度等于换向量空间、历史切片全部作废，
-              因此页面不给修改入口；选了非
-              {{ vectorDim }} 维的模型，后端建库时直接拒
-            </div>
-          </FormItem>
-
-          <!-- 需求 4：音视频型的「媒体理解模型」已删（描述改由视频理解 + 音频转文字两位分别产出）；
-               需求 6：知识图谱不在解析五行里，它是库级能力，留在基础信息 -->
-          <FormItem v-if="isDoc">
-            <template #label>
-              知识图谱
-              <Tooltip :title="PARSE_TIPS.enable_graph">
-                <QuestionCircleOutlined class="help-icon" />
-              </Tooltip>
-            </template>
-            <Switch v-model:checked="form.enableGraph" />
-          </FormItem>
-
-          <FormItem
-            v-if="isDoc && form.enableGraph"
-            label="图谱抽取模型"
-            required
-          >
-            <Select
-              v-model:value="form.extractModelId"
-              :options="extractOptions"
-              placeholder="选择抽取实体与关系的模型"
-              show-search
-              :filter-option="(i: string, o: any) => o.label.includes(i)"
-            />
-          </FormItem>
-
-          <FormItem v-if="isDoc && form.enableGraph">
-            <template #label>
-              自定义实体范围
-              <Tooltip
-                title="开了就只按你列的实体类型抽取，模型越界输出的实体会被直接丢弃；不开则用系统默认类型（人物/组织/地点…）。已建好的图谱要按新范围生效，需在文档列表重新构建图谱。"
-              >
-                <QuestionCircleOutlined class="help-icon" />
-              </Tooltip>
-            </template>
-            <Switch v-model:checked="customEntityEnabled" />
-            <div class="hint">
-              关掉则按系统默认的实体类型集抽取。
-            </div>
-
-            <div v-if="customEntityEnabled" class="entity-type-editor">
-              <div
-                v-for="(row, idx) in entityTypes"
-                :key="idx"
-                class="entity-type-row"
-              >
-                <Input
-                  v-model:value="row.name"
-                  :maxlength="50"
-                  placeholder="实体名称（必填）"
-                  style="width: 170px"
-                />
-                <Input
-                  v-model:value="row.description"
-                  :maxlength="500"
-                  placeholder="实体描述（选填，帮模型正确归类）"
-                  style="flex: 1"
-                />
-                <Button type="link" danger @click="removeEntityTypeRow(idx)">
-                  删除
-                </Button>
+          <div class="tab-scroll">
+            <section class="form-section">
+              <div class="section-heading">
+                <div>
+                  <div class="section-title">基础资料</div>
+                  <div class="section-description">
+                    明确知识库内容与向量空间，帮助智能体准确选择该知识库
+                  </div>
+                </div>
               </div>
-              <Button
-                size="small"
-                :disabled="entityTypes.length >= ENTITY_TYPE_MAX"
-                @click="addEntityTypeRow"
-              >
-                + 添加实体类型
-              </Button>
-              <div class="hint">
-                最多 {{ ENTITY_TYPE_MAX }} 个；名称需不重复且非空，越界抽取会被后端过滤兜底。
+
+              <div class="basic-grid">
+                <FormItem label="知识库类型" required class="span-2">
+                  <RadioGroup
+                    v-model:value="form.kbType"
+                    :disabled="isEdit"
+                    button-style="solid"
+                    class="type-radio"
+                  >
+                    <Radio
+                      v-for="t in KB_TYPES_ALL"
+                      :key="t"
+                      :value="t"
+                      :disabled="isEdit && t !== form.kbType"
+                    >
+                      {{ KB_TYPE_LABELS[t] }}
+                    </Radio>
+                  </RadioGroup>
+                  <span v-if="isEdit" class="inline-hint">创建后不可修改</span>
+                </FormItem>
+
+                <FormItem label="知识库名称" required>
+                  <Input
+                    v-model:value="form.name"
+                    :maxlength="128"
+                    placeholder="请输入知识库名称"
+                  />
+                </FormItem>
+
+                <FormItem label="向量模型" required>
+                  <Select
+                    v-model:value="form.embedModelId"
+                    :options="embedOptions"
+                    :disabled="isEdit"
+                    placeholder="选择向量模型"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                  <div class="hint">
+                    {{ isDoc ? '支持文本或多模态向量' : '需选择多模态向量模型'
+                    }}{{ isEdit ? '，创建后锁定' : '' }}
+                  </div>
+                </FormItem>
+
+                <FormItem label="知识库描述" required class="span-2">
+                  <Textarea
+                    v-model:value="form.description"
+                    :rows="2"
+                    :maxlength="500"
+                    show-count
+                    placeholder="说明知识内容、适用范围和典型问题"
+                  />
+                </FormItem>
+
+                <FormItem class="dimension-item">
+                  <template #label>
+                    向量维度
+                    <Tooltip
+                      title="向量维度在建库时写入 ES 索引并锁定，必须与向量模型一致；更换维度需要新建知识库。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <div class="dimension-value">
+                    <strong>{{ vectorDim }}</strong>
+                    <span>维</span>
+                    <Tag>建库后锁定</Tag>
+                  </div>
+                </FormItem>
               </div>
-            </div>
-          </FormItem>
+            </section>
+
+            <section v-if="isDoc" class="form-section graph-section">
+              <div class="section-heading compact">
+                <div>
+                  <div class="section-title">
+                    知识图谱
+                    <Tooltip :title="PARSE_TIPS.enable_graph">
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </div>
+                  <div class="section-description">
+                    从文档中抽取实体与关系，为图谱增强检索提供数据
+                  </div>
+                </div>
+                <Switch v-model:checked="form.enableGraph" />
+              </div>
+
+              <div v-if="form.enableGraph" class="graph-config">
+                <FormItem label="图谱抽取模型" required>
+                  <Select
+                    v-model:value="form.extractModelId"
+                    :options="extractOptions"
+                    placeholder="选择抽取实体与关系的模型"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                </FormItem>
+
+                <div class="entity-setting-head">
+                  <span>
+                    自定义实体范围
+                    <Tooltip
+                      title="开启后仅按下方类型抽取；关闭则使用系统默认类型。修改范围后需重新构建已有文档的图谱。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </span>
+                  <Switch v-model:checked="customEntityEnabled" />
+                </div>
+
+                <div v-if="customEntityEnabled" class="entity-type-editor">
+                  <div
+                    v-for="(row, idx) in entityTypes"
+                    :key="idx"
+                    class="entity-type-row"
+                  >
+                    <Input
+                      v-model:value="row.name"
+                      :maxlength="50"
+                      placeholder="实体名称（必填）"
+                      class="entity-name-input"
+                    />
+                    <Input
+                      v-model:value="row.description"
+                      :maxlength="500"
+                      placeholder="实体描述（选填）"
+                    />
+                    <Button
+                      type="text"
+                      danger
+                      @click="removeEntityTypeRow(idx)"
+                    >
+                      删除
+                    </Button>
+                  </div>
+                  <div class="entity-editor-footer">
+                    <Button
+                      size="small"
+                      :disabled="entityTypes.length >= ENTITY_TYPE_MAX"
+                      @click="addEntityTypeRow"
+                    >
+                      + 添加实体类型
+                    </Button>
+                    <span class="hint">最多 {{ ENTITY_TYPE_MAX }} 个</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
         </TabPane>
 
-        <!-- ==================== 解析配置（需求 6：五行排版） ==================== -->
+        <!-- ==================== 解析配置 ==================== -->
         <TabPane key="parse" tab="解析配置">
-          <!-- 第一行：解析引擎、单分块最大长度、重叠长度、图片表格上下文填充 -->
-          <Row v-if="isDoc" :gutter="16">
-            <Col :span="5">
-              <FormItem label="解析引擎">
-                <Select
-                  v-model:value="form.parserEngine"
-                  :options="engineSelectOptions"
-                />
-              </FormItem>
-            </Col>
-            <Col :span="5">
-              <FormItem label="单分块最大长度">
-                <InputNumber
-                  v-model:value="ensureChunk().chunk_size"
-                  :min="50"
-                  :max="runtime?.maxChunkChars || 20000"
-                  style="width: 100%"
-                />
-              </FormItem>
-            </Col>
-            <Col :span="4">
-              <FormItem>
-                <template #label>
-                  重叠长度
-                  <Tooltip
-                    title="相邻两块重复的字符数：上一块末尾这一段在下一块里再出现一次，避开一句话被切成两块后谁都搜不全。只对「固定长度 / 自定义分隔符」两种策略生效，取 0 就是不重叠。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <InputNumber
-                  v-model:value="ensureChunk().chunk_overlap"
-                  :min="0"
-                  :max="runtime?.maxChunkChars || 20000"
-                  style="width: 100%"
-                />
-              </FormItem>
-            </Col>
-            <Col :span="10">
-              <FormItem>
-                <template #label>
-                  图片表格上下文填充
-                  <Tooltip
-                    title="图片块与表格块本身几乎没有可读文字（一张图就是一行地址、一张表就是一堆分隔符），单独拿去向量化基本搜不到。打开后按这里设的字数把它在正文里的前一段 / 后一段拼进向量文本（展示的正文不变），图与表就能跟着四周的「如下图所示…」「下表是…」被召回。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Space :size="6" align="center">
-                  <Switch
-                    v-model:checked="ensureChunk().context_augment.enabled"
-                  />
-                  <template v-if="ensureChunk().context_augment?.enabled">
-                    <span class="mini-label">前</span>
-                    <InputNumber
-                      v-model:value="ensureChunk().context_augment.before"
-                      :min="0"
-                      style="width: 72px"
-                    />
-                    <span class="mini-label">后</span>
-                    <InputNumber
-                      v-model:value="ensureChunk().context_augment.after"
-                      :min="0"
-                      style="width: 72px"
-                    />
-                  </template>
-                </Space>
-              </FormItem>
-            </Col>
-          </Row>
-
-          <!-- 第二行：分块策略 + 策略的动态展示 -->
-          <template v-if="isDoc">
-            <Row :gutter="16">
-              <Col :span="6">
-                <FormItem label="分块策略">
+          <div class="tab-scroll">
+            <!-- 第一行：解析引擎、单分块最大长度、重叠长度、图片表格上下文填充 -->
+            <Row v-if="isDoc" :gutter="16">
+              <Col :span="5">
+                <FormItem label="解析引擎">
                   <Select
-                    v-model:value="chunkStrategy"
-                    :options="strategySelectOptions"
+                    v-model:value="form.parserEngine"
+                    :options="engineSelectOptions"
                   />
                 </FormItem>
               </Col>
-              <Col v-if="chunkStrategy === 'title'" :span="4">
-                <FormItem label="标题层级（1~3）">
+              <Col :span="5">
+                <FormItem label="单分块最大长度">
                   <InputNumber
-                    v-model:value="ensureChunk().title_level"
-                    :min="1"
-                    :max="3"
+                    v-model:value="ensureChunk().chunk_size"
+                    :min="50"
+                    :max="runtime?.maxChunkChars || 20000"
                     style="width: 100%"
                   />
                 </FormItem>
               </Col>
-              <Col v-if="chunkStrategy === 'semantic'" :span="6">
-                <FormItem
-                  label="语义相似度断开阈值"
-                  tooltip="相邻两句的向量相似度低于这个值就在此断开；调低块更大、调高切得更碎"
-                >
-                  <Slider
-                    v-model:value="ensureChunk().semantic_threshold"
-                    :max="1"
+              <Col :span="4">
+                <FormItem>
+                  <template #label>
+                    重叠长度
+                    <Tooltip
+                      title="相邻两块重复的字符数：上一块末尾这一段在下一块里再出现一次，避开一句话被切成两块后谁都搜不全。只对「固定长度 / 自定义分隔符」两种策略生效，取 0 就是不重叠。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <InputNumber
+                    v-model:value="ensureChunk().chunk_overlap"
                     :min="0"
-                    :step="0.05"
-                  />
-                </FormItem>
-              </Col>
-              <Col v-if="chunkStrategy === 'regex'" :span="8">
-                <FormItem label="正则表达式">
-                  <Input
-                    v-model:value="ensureChunk().regex_pattern"
-                    placeholder="例如：第[一二三四五六七八九十]+章"
-                  />
-                </FormItem>
-              </Col>
-              <Col v-if="chunkStrategy === 'delimiter'" :span="10">
-                <FormItem label="分隔符列表（按优先级）">
-                  <Select
-                    v-model:value="separatorValue"
-                    mode="tags"
-                    placeholder="输入后回车添加分隔符"
+                    :max="runtime?.maxChunkChars || 20000"
                     style="width: 100%"
-                    @change="onSeparatorsChange"
                   />
                 </FormItem>
               </Col>
-              <Col v-if="chunkStrategy === 'excel'" :span="5">
-                <FormItem label="每块强制附带表头">
-                  <Switch v-model:checked="ensureChunk().keep_table_header" />
+              <Col :span="10">
+                <FormItem>
+                  <template #label>
+                    图片表格上下文填充
+                    <Tooltip
+                      title="图片块与表格块本身几乎没有可读文字（一张图就是一行地址、一张表就是一堆分隔符），单独拿去向量化基本搜不到。打开后按这里设的字数把它在正文里的前一段 / 后一段拼进向量文本（展示的正文不变），图与表就能跟着四周的「如下图所示…」「下表是…」被召回。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <Space :size="6" align="center">
+                    <Switch
+                      v-model:checked="ensureChunk().context_augment.enabled"
+                    />
+                    <template v-if="ensureChunk().context_augment?.enabled">
+                      <span class="mini-label">前</span>
+                      <InputNumber
+                        v-model:value="ensureChunk().context_augment.before"
+                        :min="0"
+                        style="width: 72px"
+                      />
+                      <span class="mini-label">后</span>
+                      <InputNumber
+                        v-model:value="ensureChunk().context_augment.after"
+                        :min="0"
+                        style="width: 72px"
+                      />
+                    </template>
+                  </Space>
                 </FormItem>
               </Col>
             </Row>
-            <div class="strategy-meta">
-              <span>{{ strategyMeta.desc }}</span>
-              <span class="meta-scene">适合：{{ strategyMeta.scene }}</span>
+
+            <!-- 第二行：分块策略 + 策略的动态展示 -->
+            <template v-if="isDoc">
+              <Row :gutter="16">
+                <Col :span="6">
+                  <FormItem label="分块策略">
+                    <Select
+                      v-model:value="chunkStrategy"
+                      :options="strategySelectOptions"
+                    />
+                  </FormItem>
+                </Col>
+                <Col v-if="chunkStrategy === 'title'" :span="4">
+                  <FormItem label="标题层级（1~3）">
+                    <InputNumber
+                      v-model:value="ensureChunk().title_level"
+                      :min="1"
+                      :max="3"
+                      style="width: 100%"
+                    />
+                  </FormItem>
+                </Col>
+                <Col v-if="chunkStrategy === 'semantic'" :span="6">
+                  <FormItem
+                    label="语义相似度断开阈值"
+                    tooltip="相邻两句的向量相似度低于这个值就在此断开；调低块更大、调高切得更碎"
+                  >
+                    <Slider
+                      v-model:value="ensureChunk().semantic_threshold"
+                      :max="1"
+                      :min="0"
+                      :step="0.05"
+                    />
+                  </FormItem>
+                </Col>
+                <Col v-if="chunkStrategy === 'regex'" :span="8">
+                  <FormItem label="正则表达式">
+                    <Input
+                      v-model:value="ensureChunk().regex_pattern"
+                      placeholder="例如：第[一二三四五六七八九十]+章"
+                    />
+                  </FormItem>
+                </Col>
+                <Col v-if="chunkStrategy === 'delimiter'" :span="10">
+                  <FormItem label="分隔符列表（按优先级）">
+                    <Select
+                      v-model:value="separatorValue"
+                      mode="tags"
+                      placeholder="输入后回车添加分隔符"
+                      style="width: 100%"
+                      @change="onSeparatorsChange"
+                    />
+                  </FormItem>
+                </Col>
+                <Col v-if="chunkStrategy === 'excel'" :span="5">
+                  <FormItem label="每块强制附带表头">
+                    <Switch v-model:checked="ensureChunk().keep_table_header" />
+                  </FormItem>
+                </Col>
+              </Row>
+              <div class="strategy-meta">
+                <span>{{ strategyMeta.desc }}</span>
+                <span class="meta-scene">适合：{{ strategyMeta.scene }}</span>
+              </div>
+
+              <!-- 第三行：预处理开关，每一个都带 ? 说明 -->
+              <div class="group-title">预处理</div>
+              <Row :gutter="12">
+                <Col :span="5">
+                  <FormItem>
+                    <template #label>
+                      标题面包屑前缀
+                      <Tooltip :title="PARSE_TIPS.title_path">
+                        <QuestionCircleOutlined class="help-icon" />
+                      </Tooltip>
+                    </template>
+                    <Switch v-model:checked="ensureChunk().title_path" />
+                  </FormItem>
+                </Col>
+                <Col :span="4">
+                  <FormItem>
+                    <template #label>
+                      移除目录
+                      <Tooltip :title="PARSE_TIPS.remove_toc">
+                        <QuestionCircleOutlined class="help-icon" />
+                      </Tooltip>
+                    </template>
+                    <Switch v-model:checked="ensureParse().remove_toc" />
+                  </FormItem>
+                </Col>
+                <Col :span="4">
+                  <FormItem>
+                    <template #label>
+                      移除页眉页脚
+                      <Tooltip :title="PARSE_TIPS.remove_header_footer">
+                        <QuestionCircleOutlined class="help-icon" />
+                      </Tooltip>
+                    </template>
+                    <Switch
+                      v-model:checked="ensureParse().remove_header_footer"
+                    />
+                  </FormItem>
+                </Col>
+                <Col :span="6">
+                  <FormItem>
+                    <template #label>
+                      表格转 Markdown
+                      <Tooltip :title="PARSE_TIPS.table_as_text">
+                        <QuestionCircleOutlined class="help-icon" />
+                      </Tooltip>
+                    </template>
+                    <Switch v-model:checked="ensureParse().table_as_text" />
+                  </FormItem>
+                </Col>
+                <Col :span="5">
+                  <FormItem>
+                    <template #label>
+                      保留分页标记
+                      <Tooltip :title="PARSE_TIPS.keep_page_break">
+                        <QuestionCircleOutlined class="help-icon" />
+                      </Tooltip>
+                    </template>
+                    <Switch v-model:checked="ensureParse().keep_page_break" />
+                  </FormItem>
+                </Col>
+              </Row>
+            </template>
+
+            <!-- 第四行：模型位（图片理解与 OCR 二选一、音频转文字、视频理解） -->
+            <div class="group-title">解析模型</div>
+            <Row :gutter="16">
+              <Col v-if="isDoc || isImage" :span="6">
+                <FormItem :required="isImage">
+                  <template #label>
+                    图片理解模型
+                    <Tooltip
+                      title="与 OCR 二选一（选了这个，OCR 那栏自动置灰）。它同时服务三件事：给文档内嵌图片提描述、给上传的图片文件转写成正文、给图片库的「多模态描述增强」生成综合描述。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <Select
+                    v-model:value="form.imageModelId"
+                    :disabled="imageDisabled"
+                    :options="imageOptions"
+                    allow-clear
+                    placeholder="图片理解（image_understand）"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                </FormItem>
+              </Col>
+              <Col v-if="isDoc || isImage" :span="6">
+                <FormItem :required="isImage">
+                  <template #label>
+                    OCR 模型
+                    <Tooltip
+                      title="与图片理解二选一（选了这个，图片理解那栏自动置灰）：只把图里的文字读出来当描述，读不出图在讲什么。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <Select
+                    v-model:value="ensureParse().ocr_model_id"
+                    :disabled="ocrDisabled"
+                    :options="ocrOptions"
+                    allow-clear
+                    placeholder="OCR（与图片理解二选一）"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                </FormItem>
+              </Col>
+              <Col v-if="isDoc || isAv" :span="6">
+                <FormItem :required="isAv">
+                  <template #label>
+                    音频转文字模型
+                    <Tooltip
+                      title="上传音频文件时把整条转写成正文，也是音视频库「多模态描述增强」里音频那一路的依赖项。没有它，音频只能按文件名搜到。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <Select
+                    v-model:value="ensureParse().audio_model_id"
+                    :options="audioOptions"
+                    allow-clear
+                    placeholder="音频转文字（audio_to_text）"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                </FormItem>
+              </Col>
+              <Col v-if="isDoc || isAv" :span="6">
+                <FormItem :required="isAv">
+                  <template #label>
+                    视频理解模型
+                    <Tooltip
+                      title="上传视频文件时把画面描述成正文，也是音视频库「多模态描述增强」里视频那一路的依赖项。没有它，视频只能按文件名搜到。"
+                    >
+                      <QuestionCircleOutlined class="help-icon" />
+                    </Tooltip>
+                  </template>
+                  <Select
+                    v-model:value="ensureParse().video_model_id"
+                    :options="videoOptions"
+                    allow-clear
+                    placeholder="视频理解（video_understand）"
+                    show-search
+                    :filter-option="(i: string, o: any) => o.label.includes(i)"
+                  />
+                </FormItem>
+              </Col>
+            </Row>
+            <!-- 互斥的两种现状给一句人话：置灰是静默的，不解释会有人以为是模型不可用 -->
+            <div
+              v-if="(isDoc || isImage) && imageChosen && ocrChosen"
+              class="hint"
+            >
+              这个库里图片理解和 OCR 都存着选择：实际只走图片理解，OCR
+              那份不生效， 建议清空其中一个再保存。
+            </div>
+            <div
+              v-else-if="(isDoc || isImage) && (imageDisabled || ocrDisabled)"
+              class="hint"
+            >
+              图片理解与 OCR 只能二选一，已选{{
+                imageChosen ? '图片理解' : 'OCR'
+              }}，另一栏已置灰；要换成另一个，先把当前这栏清空。
+            </div>
+            <!-- 媒体库的必填口径（需求 5）：图片是二者择一，音视频是两个都要 -->
+            <div v-if="isImage" class="hint">
+              图片知识库这一位必填（图片理解或 OCR
+              二选一）：图片文件的正文全靠它转写，没配就只能按文件名命中。
+            </div>
+            <div v-else-if="isAv" class="hint">
+              音视频知识库两个都必填：音频靠转文字、视频靠画面理解，缺一个对应那一类文件
+              就是上传即解析失败（而不是退化成只能按文件名搜）。
             </div>
 
-            <!-- 第三行：预处理开关，每一个都带 ? 说明 -->
-            <div class="group-title">预处理</div>
-            <Row :gutter="12">
-              <Col :span="5">
+            <!-- 第五行：增强开关（按第四行配了什么模型条件显示；打开不给提示词输入框） -->
+            <div class="group-title">解析增强</div>
+            <Row :gutter="16">
+              <Col v-if="isDoc && hasImageDesc" :span="6">
                 <FormItem>
                   <template #label>
-                    标题面包屑前缀
-                    <Tooltip :title="PARSE_TIPS.title_path">
+                    图片解析增强
+                    <Tooltip :title="PARSE_TIPS.image_understand">
                       <QuestionCircleOutlined class="help-icon" />
                     </Tooltip>
                   </template>
-                  <Switch v-model:checked="ensureChunk().title_path" />
+                  <Switch v-model:checked="ensureParse().image_understand" />
                 </FormItem>
               </Col>
-              <Col :span="4">
+              <Col v-if="isDoc && hasAudioModel" :span="6">
                 <FormItem>
                   <template #label>
-                    移除目录
-                    <Tooltip :title="PARSE_TIPS.remove_toc">
+                    音频解析增强
+                    <Tooltip :title="PARSE_TIPS.audio_understand">
                       <QuestionCircleOutlined class="help-icon" />
                     </Tooltip>
                   </template>
-                  <Switch v-model:checked="ensureParse().remove_toc" />
+                  <Switch v-model:checked="ensureParse().audio_understand" />
                 </FormItem>
               </Col>
-              <Col :span="4">
+              <Col v-if="isDoc && hasVideoModel" :span="6">
                 <FormItem>
                   <template #label>
-                    移除页眉页脚
-                    <Tooltip :title="PARSE_TIPS.remove_header_footer">
+                    视频解析增强
+                    <Tooltip :title="PARSE_TIPS.video_understand">
                       <QuestionCircleOutlined class="help-icon" />
                     </Tooltip>
                   </template>
-                  <Switch
-                    v-model:checked="ensureParse().remove_header_footer"
-                  />
+                  <Switch v-model:checked="ensureParse().video_understand" />
                 </FormItem>
               </Col>
-              <Col :span="6">
+              <Col v-if="!isDoc" :span="6">
                 <FormItem>
                   <template #label>
-                    表格转 Markdown
-                    <Tooltip :title="PARSE_TIPS.table_as_text">
+                    多模态描述增强
+                    <Tooltip :title="PARSE_TIPS.media_desc_enhance">
                       <QuestionCircleOutlined class="help-icon" />
                     </Tooltip>
                   </template>
-                  <Switch v-model:checked="ensureParse().table_as_text" />
-                </FormItem>
-              </Col>
-              <Col :span="5">
-                <FormItem>
-                  <template #label>
-                    保留分页标记
-                    <Tooltip :title="PARSE_TIPS.keep_page_break">
-                      <QuestionCircleOutlined class="help-icon" />
-                    </Tooltip>
-                  </template>
-                  <Switch v-model:checked="ensureParse().keep_page_break" />
+                  <Switch v-model:checked="ensureParse().media_desc_enhance" />
                 </FormItem>
               </Col>
             </Row>
-          </template>
-
-          <!-- 第四行：模型位（图片理解与 OCR 二选一、音频转文字、视频理解） -->
-          <div class="group-title">解析模型</div>
-          <Row :gutter="16">
-            <Col v-if="isDoc || isImage" :span="6">
-              <FormItem :required="isImage">
-                <template #label>
-                  图片理解模型
-                  <Tooltip
-                    title="与 OCR 二选一（选了这个，OCR 那栏自动置灰）。它同时服务三件事：给文档内嵌图片提描述、给上传的图片文件转写成正文、给图片库的「多模态描述增强」生成综合描述。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Select
-                  v-model:value="form.imageModelId"
-                  :disabled="imageDisabled"
-                  :options="imageOptions"
-                  allow-clear
-                  placeholder="图片理解（image_understand）"
-                  show-search
-                  :filter-option="(i: string, o: any) => o.label.includes(i)"
-                />
-              </FormItem>
-            </Col>
-            <Col v-if="isDoc || isImage" :span="6">
-              <FormItem :required="isImage">
-                <template #label>
-                  OCR 模型
-                  <Tooltip
-                    title="与图片理解二选一（选了这个，图片理解那栏自动置灰）：只把图里的文字读出来当描述，读不出图在讲什么。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Select
-                  v-model:value="ensureParse().ocr_model_id"
-                  :disabled="ocrDisabled"
-                  :options="ocrOptions"
-                  allow-clear
-                  placeholder="OCR（与图片理解二选一）"
-                  show-search
-                  :filter-option="(i: string, o: any) => o.label.includes(i)"
-                />
-              </FormItem>
-            </Col>
-            <Col v-if="isDoc || isAv" :span="6">
-              <FormItem :required="isAv">
-                <template #label>
-                  音频转文字模型
-                  <Tooltip
-                    title="上传音频文件时把整条转写成正文，也是音视频库「多模态描述增强」里音频那一路的依赖项。没有它，音频只能按文件名搜到。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Select
-                  v-model:value="ensureParse().audio_model_id"
-                  :options="audioOptions"
-                  allow-clear
-                  placeholder="音频转文字（audio_to_text）"
-                  show-search
-                  :filter-option="(i: string, o: any) => o.label.includes(i)"
-                />
-              </FormItem>
-            </Col>
-            <Col v-if="isDoc || isAv" :span="6">
-              <FormItem :required="isAv">
-                <template #label>
-                  视频理解模型
-                  <Tooltip
-                    title="上传视频文件时把画面描述成正文，也是音视频库「多模态描述增强」里视频那一路的依赖项。没有它，视频只能按文件名搜到。"
-                  >
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Select
-                  v-model:value="ensureParse().video_model_id"
-                  :options="videoOptions"
-                  allow-clear
-                  placeholder="视频理解（video_understand）"
-                  show-search
-                  :filter-option="(i: string, o: any) => o.label.includes(i)"
-                />
-              </FormItem>
-            </Col>
-          </Row>
-          <!-- 互斥的两种现状给一句人话：置灰是静默的，不解释会有人以为是模型不可用 -->
-          <div
-            v-if="(isDoc || isImage) && imageChosen && ocrChosen"
-            class="hint"
-          >
-            这个库里图片理解和 OCR 都存着选择：实际只走图片理解，OCR
-            那份不生效， 建议清空其中一个再保存。
-          </div>
-          <div
-            v-else-if="(isDoc || isImage) && (imageDisabled || ocrDisabled)"
-            class="hint"
-          >
-            图片理解与 OCR 只能二选一，已选{{
-              imageChosen ? '图片理解' : 'OCR'
-            }}，另一栏已置灰；要换成另一个，先把当前这栏清空。
-          </div>
-          <!-- 媒体库的必填口径（需求 5）：图片是二者择一，音视频是两个都要 -->
-          <div v-if="isImage" class="hint">
-            图片知识库这一位必填（图片理解或 OCR
-            二选一）：图片文件的正文全靠它转写，没配就只能按文件名命中。
-          </div>
-          <div v-else-if="isAv" class="hint">
-            音视频知识库两个都必填：音频靠转文字、视频靠画面理解，缺一个对应那一类文件
-            就是上传即解析失败（而不是退化成只能按文件名搜）。
-          </div>
-
-          <!-- 第五行：增强开关（按第四行配了什么模型条件显示；打开不给提示词输入框） -->
-          <div class="group-title">解析增强</div>
-          <Row :gutter="16">
-            <Col v-if="isDoc && hasImageDesc" :span="6">
-              <FormItem>
-                <template #label>
-                  图片解析增强
-                  <Tooltip :title="PARSE_TIPS.image_understand">
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Switch v-model:checked="ensureParse().image_understand" />
-              </FormItem>
-            </Col>
-            <Col v-if="isDoc && hasAudioModel" :span="6">
-              <FormItem>
-                <template #label>
-                  音频解析增强
-                  <Tooltip :title="PARSE_TIPS.audio_understand">
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Switch v-model:checked="ensureParse().audio_understand" />
-              </FormItem>
-            </Col>
-            <Col v-if="isDoc && hasVideoModel" :span="6">
-              <FormItem>
-                <template #label>
-                  视频解析增强
-                  <Tooltip :title="PARSE_TIPS.video_understand">
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Switch v-model:checked="ensureParse().video_understand" />
-              </FormItem>
-            </Col>
-            <Col v-if="!isDoc" :span="6">
-              <FormItem>
-                <template #label>
-                  多模态描述增强
-                  <Tooltip :title="PARSE_TIPS.media_desc_enhance">
-                    <QuestionCircleOutlined class="help-icon" />
-                  </Tooltip>
-                </template>
-                <Switch v-model:checked="ensureParse().media_desc_enhance" />
-              </FormItem>
-            </Col>
-          </Row>
-          <div
-            v-if="isDoc && !hasImageDesc && !hasAudioModel && !hasVideoModel"
-            class="hint"
-          >
-            上面配了对应的模型，这里才会出现相应开关：没有可调用的模型时不给开关，
-            免得一勾看起来生效了实际什么也没变。描述提示词由后端内置，不开放配置。
-          </div>
-          <div v-else-if="!isDoc" class="hint">
-            不论开关开闭，关键词那一路都能按文件名命中（媒体切片的正文里永远带着文件名）；
-            开了才会再调一次模型把综合描述拼在文件名后面，向量也落在这段合成文本上。
-            描述提示词由后端内置，不开放配置。可上传的后缀：图片
-            {{ mediaExtText('image') || '—' }}、音频
-            {{ mediaExtText('audio') || '—' }}、视频
-            {{ mediaExtText('video') || '—' }}。
-          </div>
-
-          <!-- 引擎能力边界（清单取后端 engineFormats，前端不抄一份） -->
-          <template v-if="isDoc">
-            <div class="hint">
-              能取到哪些内嵌媒体由引擎决定：内嵌音频/视频只有 native
-              取得到字节（docx/pptx 媒体部件）；图片两个引擎都能拿到（native
-              抽内嵌部件，minerU 用它自己导出的图片）。走 minerU
-              时内嵌音频/视频取不到字节，正文里也就不会出现它们的地址。
-              当前可上传的媒体后缀：图片
+            <div
+              v-if="isDoc && !hasImageDesc && !hasAudioModel && !hasVideoModel"
+              class="hint"
+            >
+              上面配了对应的模型，这里才会出现相应开关：没有可调用的模型时不给开关，
+              免得一勾看起来生效了实际什么也没变。描述提示词由后端内置，不开放配置。
+            </div>
+            <div v-else-if="!isDoc" class="hint">
+              不论开关开闭，关键词那一路都能按文件名命中（媒体切片的正文里永远带着文件名）；
+              开了才会再调一次模型把综合描述拼在文件名后面，向量也落在这段合成文本上。
+              描述提示词由后端内置，不开放配置。可上传的后缀：图片
               {{ mediaExtText('image') || '—' }}、音频
               {{ mediaExtText('audio') || '—' }}、视频
-              {{
-                mediaExtText('video') || '—'
-              }}，没选对应模型的媒体文件会解析失败
-              （文档格式不受影响），转写结果与文件名一起分块入库。
+              {{ mediaExtText('video') || '—' }}。
             </div>
 
-            <div class="group-title">解析引擎覆盖的文档格式</div>
-            <div v-for="one in engineCoverage" :key="one.engine" class="hint">
-              {{ one.label }}：{{ one.formats.join(' / ') || '无' }}
-            </div>
-            <div class="hint">
-              上列是各引擎真读得动的文档格式（老版 Office 的 .doc/.ppt
-              两个引擎都读不动，需先另存为 docx/pptx）。auto
-              不单列：它按文档复杂度在引擎间路由，能吃的就是并集。
-            </div>
-          </template>
+            <!-- 引擎能力边界收敛成一段可扫描的摘要，详细格式保留在同一组内 -->
+            <template v-if="isDoc">
+              <div class="group-title">格式与能力边界</div>
+              <div class="format-coverage">
+                <span v-for="one in engineCoverage" :key="one.engine">
+                  <b>{{ one.label }}</b>
+                  {{ one.formats.join(' / ') || '无' }}
+                </span>
+              </div>
+              <div class="hint capability-hint">
+                内嵌音频 / 视频仅 native 支持提取；旧版 .doc / .ppt 请先转换为
+                .docx / .pptx。auto 会按文档复杂度自动选择引擎。
+              </div>
+            </template>
+          </div>
         </TabPane>
       </Tabs>
     </Form>
@@ -1246,27 +1252,150 @@ async function handleSubmit() {
 </template>
 
 <style scoped>
-.group-title {
-  margin: 4px 0 8px;
+.tab-scroll {
+  max-height: calc(100vh - 260px);
+  padding: 2px 6px 8px 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.form-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: 16px;
+}
+
+.kb-form :deep(.ant-form-item) {
+  margin-bottom: 14px;
+}
+
+.kb-form :deep(.ant-form-item-label) {
+  padding-bottom: 5px;
+}
+
+.kb-form :deep(.ant-form-item-label > label) {
   font-size: 13px;
+  font-weight: 500;
+}
+
+.basic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 20px;
+}
+
+.span-2 {
+  grid-column: span 2;
+}
+
+.form-section {
+  padding: 18px 20px 6px;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e8ebf0);
+  border-radius: 10px;
+}
+
+.form-section + .form-section {
+  margin-top: 14px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.section-heading.compact {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.section-title {
+  font-size: 15px;
   font-weight: 600;
-  color: var(--text-color-secondary, #666);
+  line-height: 22px;
+  color: var(--text-color, #1f2329);
+}
+
+.section-description {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-color-secondary, #8a8f99);
+}
+
+.type-radio {
+  padding: 3px;
+  background: var(--component-background-light, #f5f6f8);
+  border-radius: 7px;
+}
+
+.inline-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #999);
+}
+
+.dimension-value {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  height: 32px;
+}
+
+.dimension-value strong {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-color, #1f2329);
+}
+
+.dimension-value > span {
+  margin-right: 4px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #888);
+}
+
+.graph-section {
+  padding-bottom: 16px;
+}
+
+.graph-config {
+  padding-top: 16px;
+  margin-top: 14px;
+  border-top: 1px dashed var(--border-color, #e5e7eb);
+}
+
+.entity-setting-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 13px;
+  background: var(--component-background-light, #f7f8fa);
+  border-radius: 7px;
+}
+
+.group-title {
+  padding-left: 10px;
+  margin: 18px 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--text-color, #30343b);
+  border-left: 3px solid hsl(var(--primary));
 }
 
 .hint {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--text-color-secondary, #999);
-}
-
-.dim-value {
-  font-size: 15px;
-  font-weight: 600;
+  line-height: 1.6;
+  color: var(--text-color-secondary, #8c8c8c);
 }
 
 .help-icon {
   margin-left: 4px;
-  color: #8c8c8c;
+  color: var(--text-color-secondary, #9aa0a6);
+  cursor: help;
 }
 
 .mini-label {
@@ -1274,21 +1403,29 @@ async function handleSubmit() {
   color: var(--text-color-secondary, #888);
 }
 
-/* 策略说明跟在下拉后头：不写清楚用户只能靠名字猜，猜错了要整库重跑 */
 .strategy-meta {
-  margin: -4px 0 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  padding: 8px 10px;
+  margin: -2px 0 4px;
   font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-color-secondary, #999);
+  line-height: 1.6;
+  color: var(--text-color-secondary, #777);
+  background: var(--component-background-light, #f7f8fa);
+  border-radius: 6px;
 }
 
 .strategy-meta .meta-scene {
-  margin-left: 8px;
+  color: var(--text-color-secondary, #999);
 }
 
-/* 自定义实体范围：一行一个类型（名称 + 描述 + 删除），行间距留给输入框 */
 .entity-type-editor {
-  margin-top: 8px;
+  padding: 12px;
+  margin-top: 10px;
+  background: var(--component-background-light, #fafbfc);
+  border: 1px solid var(--border-color, #edf0f2);
+  border-radius: 8px;
 }
 
 .entity-type-row {
@@ -1296,5 +1433,62 @@ async function handleSubmit() {
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.entity-name-input {
+  flex: 0 0 180px;
+}
+
+.entity-editor-footer {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.entity-editor-footer .hint {
+  margin-top: 0;
+}
+
+.format-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  background: var(--component-background-light, #f7f8fa);
+  border-radius: 6px;
+}
+
+.format-coverage b {
+  margin-right: 6px;
+  font-weight: 500;
+}
+
+.capability-hint {
+  margin-bottom: 4px;
+}
+
+@media (max-width: 760px) {
+  .basic-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .span-2 {
+    grid-column: span 1;
+  }
+
+  .form-section {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .entity-type-row {
+    flex-wrap: wrap;
+  }
+
+  .entity-name-input {
+    flex: 1 1 160px;
+  }
 }
 </style>

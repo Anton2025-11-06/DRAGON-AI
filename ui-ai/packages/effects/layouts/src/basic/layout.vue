@@ -22,8 +22,6 @@ import { VbenBackTop, VbenLogo } from '@vben-core/shadcn-ui';
 
 import { Breadcrumb, CheckUpdates, Preferences } from '../widgets';
 import { LayoutContent, LayoutContentSpinner } from './content';
-import { Copyright } from './copyright';
-import { LayoutFooter } from './footer';
 import { LayoutHeader } from './header';
 import {
   LayoutExtraMenu,
@@ -207,7 +205,7 @@ const headerSlots = computed(() => {
     :content-padding-left="preferences.app.contentPaddingLeft"
     :content-padding-right="preferences.app.contentPaddingRight"
     :content-padding-top="preferences.app.contentPaddingTop"
-    :footer-enable="preferences.footer.enable"
+    :footer-enable="false"
     :footer-fixed="preferences.footer.fixed"
     :footer-height="preferences.footer.height"
     :header-height="preferences.header.height"
@@ -379,15 +377,10 @@ const headerSlots = computed(() => {
       <LayoutContentSpinner />
     </template>
 
-    <!-- 页脚 -->
-    <template v-if="preferences.footer.enable" #footer>
-      <LayoutFooter>
-        <Copyright
-          v-if="preferences.copyright.enable"
-          v-bind="preferences.copyright"
-        />
-      </LayoutFooter>
-    </template>
+    <!-- 页脚刻意写死不渲染（不用 preferences.footer.enable）：整条 LayoutFooter 会占掉
+         32px，所有内容区都没法铺平到视口底部；而偏好缓存优先级高于代码默认值，
+         靠开关无法约掉老浏览器里已经存下的 footer.enable: true。
+         版权文案已全部删除，仓库入口改到登录页展示。 -->
 
     <template #extra>
       <slot name="extra"></slot>

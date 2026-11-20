@@ -31,11 +31,14 @@ export const overridesPreferences = defineOverridesPreferences({
     source: '',
   },
   copyright: {
+    // 仓库入口改到登录页展示（见 views/_core/authentication/login.vue）：
+    // 页脚占了 32px，所有页面都没法铺平到视口底部
     companyName: 'AI中台',
     companySiteLink: '',
+    enable: false,
   },
   footer: {
-    enable: true,
+    enable: false,
   },
   theme: {
     mode: 'auto',
