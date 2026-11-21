@@ -39,7 +39,7 @@ export default function crud(
         delRequest: async ({ row }: DelReq) => await api.DelObj(row.user_id),
       },
       rowHandle: {
-        width: 240,
+        width: 270,
         // 固定右侧
         fixed: 'right',
         buttons: {

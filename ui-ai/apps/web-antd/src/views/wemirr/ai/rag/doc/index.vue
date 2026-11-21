@@ -43,12 +43,11 @@ function onSelectKb(kb: KnowledgeBaseResp | null) {
 .page-container {
   display: flex;
   flex-direction: column;
-  /* 定高不能用 height:100%：布局链的根是 min-h-full（不是 h-full），<main> 的高度由内容
-     决定，列表一长过视口整条百分比高度链就塌陷、改由整页滚动 —— 两栏的内部滚动条
-     永远不出现，多出的条目直接被裁掉。这里用视口高减去头部容器与页脚（框架已以 CSS
-     变量写在 :root 上），拿到不依赖自测量的确定高度。 */
-  height: calc(
-    100vh - var(--vben-header-height, 90px) - var(--vben-footer-height, 32px)
+  /* 使用布局实际测得的主内容区高度，避免重复扣除未显示的页脚而在底部留白。
+     两栏在固定内容高度内各自滚动，数据量不再影响页面底边。 */
+  height: var(
+    --vben-content-height,
+    calc(100vh - var(--vben-header-height, 90px))
   );
   padding: 16px;
   overflow: hidden;

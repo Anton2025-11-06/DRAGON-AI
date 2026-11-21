@@ -283,7 +283,9 @@ class ArqMonitorService:
             # 1. 队列本体(ZSET)单独扫一遍:只扫健康 key 会让「堆了几百篇但 worker 全挂」
             # 的现场显示成空白页,而那恰好是最该看到的堆积。
             # 队列被取空时 Redis 自己删 key,所以扫到的都是真有待执行任务的。
-            async for key in arq.scan_iter(match=f"{base_queue}:{SPLIT_NAME}*", count=500):
+            # 切片号必须是数字([0-9]*),否则 split_* 会连带扫到 STRING 类型的切片数配置
+            # key({base_queue}:split_number),对它 zcard 直接 WRONGTYPE 报错。
+            async for key in arq.scan_iter(match=f"{base_queue}:{SPLIT_NAME}[0-9]*", count=500):
                 key = key.decode("utf-8") if isinstance(key, bytes) else key
                 depths[key] = await arq.zcard(key)
             # 2. worker 节点(健康 key)

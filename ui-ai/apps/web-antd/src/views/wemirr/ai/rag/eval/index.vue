@@ -500,16 +500,10 @@ onMounted(() => {
       message="没有「知识评测」的菜单权限（ai:kb:eval），本页不可用。"
     />
 
-    <!-- 主区域唯一的卡：评测历史（全部配置已收进「创建评测」弹窗）。头部不再单独占一
-         行标题：工具区（创建 + 筛选 + 查询/重置/刷新）直接放 #title 槽靠左对齐，多出来的
-         那一行高度让给表格 -->
+    <!-- 筛选与操作合并为一行：条件靠左，创建评测固定在右侧。 -->
     <Card :bordered="false" class="eval-history-card">
       <template #title>
         <Space :size="8" wrap>
-          <Button type="primary" @click="createOpen = true">
-            <template #icon><PlusOutlined /></template>
-            创建评测
-          </Button>
           <Select
             v-model:value="runFilter.kbId"
             :options="kbSelectOptions"
@@ -534,6 +528,12 @@ onMounted(() => {
             刷新
           </Button>
         </Space>
+      </template>
+      <template #extra>
+        <Button type="primary" @click="createOpen = true">
+          <template #icon><PlusOutlined /></template>
+          创建评测
+        </Button>
       </template>
 
       <Table
@@ -1070,13 +1070,15 @@ onMounted(() => {
   }
 }
 
-/* 整页不滚：高度锁在视口里（140px 是布局顶栏 + 页签 + 内边距的占位，与 chat 页同一口径），
-   配置收进弹窗后主区只剩历史卡；表体高度由上面 .ant-table-body 的覆盖规则吃满剩余空间，
-   底部不再留一条用不上的白边。 */
+/* 跟随框架实际测得的主内容区高度，历史卡始终铺到主区底部；
+   表格在卡片内滚动，不再用固定的视口扣减量估算可用空间。 */
 .page-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 140px);
+  height: var(
+    --vben-content-height,
+    calc(100vh - var(--vben-header-height, 90px))
+  );
   padding: 8px;
   overflow: hidden;
 }
@@ -1093,15 +1095,34 @@ onMounted(() => {
 }
 
 .eval-history-card :deep(.ant-card-body) {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
-/* 覆盖 scroll.y 生成的内联 max-height（内联优先级高，必须 !important） */
+/* 表格各层吃满卡片剩余高度，分页固定在最下方；数据少时也不再只显示一小截表体。 */
+.eval-history-card :deep(.ant-table-wrapper),
+.eval-history-card :deep(.ant-spin-nested-loading),
+.eval-history-card :deep(.ant-spin-container),
+.eval-history-card :deep(.ant-table),
+.eval-history-card :deep(.ant-table-container) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 覆盖 scroll.y 生成的内联 max-height，由 flex 给表体分配真实剩余空间。 */
 .eval-history-card :deep(.ant-table-body) {
-  max-height: calc(100vh - 320px) !important;
-  min-height: 260px;
+  flex: 1 1 auto;
+  max-height: none !important;
+  min-height: 0;
+}
+
+.eval-history-card :deep(.ant-pagination) {
+  flex: none;
 }
 
 /* 「创建评测」弹窗体：问答对可能一填几十行，封一个高度上限让弹窗内部自己滚，

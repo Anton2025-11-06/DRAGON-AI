@@ -120,6 +120,7 @@ function handleAdd(node: any) {
 
 <template>
   <Page
+    auto-content-height
     content-class="dept-page-content"
     description="维护组织层级、部门排序与启用状态。"
     title="部门管理"
@@ -162,13 +163,20 @@ function handleAdd(node: any) {
 
 <style lang="less" scoped>
 :deep(.dept-page-content) {
+  /* Page 的内联自动高度依赖该变量；未初始化时用真实视口高度兜底，
+     再减去 Page 自己测得的标题栏高度，保证底边与主内容区一致。 */
+  --vben-content-height: calc(
+    100vh - var(--vben-header-height, 90px)
+  );
+
   display: flex;
   gap: 16px;
+  align-items: stretch;
   padding: 16px;
 }
 
 .dept-tree-card {
-  flex: 0 0 360px;
+  flex: 0 0 340px;
   min-width: 0;
 }
 
@@ -179,68 +187,114 @@ function handleAdd(node: any) {
 
 .dept-tree-card,
 .dept-detail-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border-color, #e8ebf0);
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgb(15 23 42 / 3%);
+  border: 1px solid var(--border-color, #e5eaf0);
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgb(15 23 42 / 4%);
 
   :deep(.ant-card-head) {
-    min-height: 54px;
+    flex: none;
+    min-height: 52px;
     padding: 0 18px;
+    background: var(--component-background-light, #fafbfc);
     border-bottom-color: var(--border-color, #edf0f2);
   }
 
   :deep(.ant-card-body) {
+    flex: 1;
+    min-height: 0;
     padding: 18px;
+  }
+}
+
+.dept-tree-card :deep(.ant-card-body) {
+  overflow: hidden;
+}
+
+.dept-detail-card {
+  :deep(.ant-card-body) {
+    padding: 22px 28px;
+    overflow-y: auto;
   }
 }
 
 .dept-card-title {
   display: inline-flex;
-  gap: 8px;
+  gap: 9px;
   align-items: center;
   font-size: 14px;
   font-weight: 600;
 
   :deep(.anticon) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
     color: hsl(var(--primary));
+    background: hsl(var(--primary) / 9%);
+    border-radius: 7px;
   }
 }
 
 .card-caption {
   font-size: 12px;
   font-weight: 400;
-  color: var(--text-color-secondary, #999);
+  color: var(--text-color-secondary, #8a9199);
 }
 
 .detail-intro {
-  padding-bottom: 16px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--border-color, #edf0f2);
+  width: 100%;
+  max-width: 760px;
+  padding: 14px 16px;
+  margin: 0 auto 24px;
+  background: hsl(var(--primary) / 4%);
+  border: 1px solid hsl(var(--primary) / 9%);
+  border-left: 3px solid hsl(var(--primary));
+  border-radius: 8px;
 
   h3 {
     margin: 0;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
+    line-height: 22px;
   }
 
   p {
-    margin: 5px 0 0;
+    margin: 4px 0 0;
     font-size: 12px;
     line-height: 1.6;
-    color: var(--text-color-secondary, #8a9199);
+    color: var(--text-color-secondary, #747d89);
   }
 }
 
 .dept-form-body {
-  max-width: 680px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
 
   :deep(.ant-form-item) {
-    margin-bottom: 20px;
+    margin-bottom: 22px;
   }
 
   :deep(.ant-form-item-label > label) {
     font-weight: 500;
+  }
+
+  :deep(.ant-input),
+  :deep(.ant-input-number),
+  :deep(.ant-input-affix-wrapper) {
+    border-radius: 6px;
+  }
+
+  :deep(.ant-form-item-control-input-content) {
+    > .ant-btn {
+      min-width: 76px;
+      margin-left: 10px;
+    }
   }
 }
 
@@ -252,6 +306,12 @@ function handleAdd(node: any) {
 
   .dept-tree-card {
     flex-basis: auto;
+  }
+
+  .dept-detail-card {
+    :deep(.ant-card-body) {
+      padding: 16px;
+    }
   }
 }
 </style>

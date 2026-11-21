@@ -19,6 +19,8 @@
  *    后端没下发 groups 时退成本地兜底的两组（页面操作 / 可见与引用），不丢项。
  * 5. 不适用的动作码（如图片/音视频知识库的切片管理、构建图谱）置灰不给勾但不隐藏：
  *    隐藏会在整表提交时被当成「取消勾选」默默撤掉已有的授权。调用方按资源形态传进来。
+ * 6. 部门主体走 /acl/dept-tree 的组织树选择器（共享缓存在 composables/useAclDeptTree），
+ *    不拉 /acl/grantees 的平铺列表：部门天然有层级，平铺列看不清组织结构，同名邻近部门容易选错。
  */
 import type {
   AclGrantItem,
@@ -48,6 +50,16 @@ import {
   aclActionTip,
   resolveAclGroups,
 } from '../acl-action-meta';
+
+import {
+  aclDeptTree,
+  aclDeptTreeError,
+  aclDeptTreeIdSet,
+  aclDeptTreeLoading,
+  buildDeptTreeForRow,
+  ensureAclDeptTree,
+  filterAclDeptNode,
+} from '../composables/useAclDeptTree';
 
 interface Props {
   open: boolean;
@@ -172,7 +184,25 @@ function onTypeChange(row: GrantRow) {
   row.granteeId = undefined;
   row.deptIncludeSub = 0;
   row.options = [];
+  // 部门走组织树，不拉 /acl/grantees 的平铺列表；树共享一份，多行、多弹窗不会重复拉
+  if (row.granteeType === GRANTEE_TYPE.DEPT) {
+    ensureAclDeptTree();
+    return;
+  }
   loadOptions(row);
+}
+
+/**
+ * 当前行的部门树：已删/已不存在于服务端回包的历史行补一个 disabled 的占位节点，
+ * 避免回显成裸 id（具体实现见 composables/useAclDeptTree#buildDeptTreeForRow）。
+ */
+function deptTreeFor(row: GrantRow) {
+  return buildDeptTreeForRow(
+    aclDeptTree.value,
+    aclDeptTreeIdSet.value,
+    row.granteeId,
+    row.options[0]?.label,
+  );
 }
 
 /**
@@ -238,6 +268,11 @@ async function loadAll() {
     rows.value = toRows(grants?.items ?? []);
     if (rows.value.length === 0) {
       rows.value = [newRow()];
+    }
+    // 已有部门行时预拉组织树：不预拉的话首屏展开后部门位置只能看到裸 id，
+    // 很迟才能看到名字（a-tree-select 自己不会触发拉取）
+    if (rows.value.some((r) => r.granteeType === GRANTEE_TYPE.DEPT)) {
+      ensureAclDeptTree();
     }
   } catch (error: any) {
     // 403/400 都进提示态：没有 share 的人本来就不该看到别人拿到过什么，
@@ -404,6 +439,26 @@ function toggleAction(row: GrantRow, code: string, checked: boolean) {
 
         <template v-else-if="column.key === 'granteeId'">
           <span v-if="!needGrantee(record.granteeType)" class="hint">所有登录用户</span>
+          <!-- 部门：组织树展示，能一眼看到层级；已停用的部门仍然在树里但置灰不给选 -->
+          <a-tree-select
+            v-else-if="record.granteeType === GRANTEE_TYPE.DEPT"
+            v-model:value="record.granteeId"
+            :disabled="!!denied"
+            :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+            :field-names="{ children: 'children', label: 'label', value: 'id' }"
+            :filter-tree-node="filterAclDeptNode"
+            :loading="aclDeptTreeLoading"
+            :not-found-content="
+              aclDeptTreeLoading ? '加载中…' : aclDeptTreeError || '暂无部门数据'
+            "
+            :tree-data="deptTreeFor(record)"
+            allow-clear
+            placeholder="选择部门"
+            show-search
+            style="width: 100%"
+            tree-default-expand-all
+            tree-line
+          />
           <a-select
             v-else
             :disabled="!!denied"

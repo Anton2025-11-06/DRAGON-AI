@@ -215,45 +215,36 @@ onMounted(load);
 <template>
   <div class="kb-wrapper">
     <Card class="kb-card" :bordered="false">
-      <template #title>
-        <div class="flex items-center">
-          <DatabaseOutlined class="mr-2 text-blue-500" />
-          知识库列表
-        </div>
-      </template>
-      <template #extra>
-        <Tooltip v-if="canAddKb" title="新增知识库">
-          <Button type="primary" size="small" @click="handleAdd">
-            <template #icon><PlusOutlined /></template>
-          </Button>
-        </Tooltip>
-      </template>
-
       <div class="kb-content">
-        <Space class="mb-3" :size="8" style="width: 100%">
+        <div class="kb-filter-row">
           <Input
             v-model:value="searchText"
             placeholder="搜索名称 / 描述"
+            class="kb-search-input"
             allow-clear
-            style="flex: 1"
+            size="small"
             @press-enter="load"
           >
             <template #prefix><SearchOutlined /></template>
           </Input>
-          <Button size="small" :disabled="!canQueryKb" @click="load">查询</Button>
-        </Space>
 
-        <!-- 需求 12：类型下拉给上提示文案，与搜索框拼成一句「搜索名称/描述，知识库类型」；
-             「全部类型」是个可选中的真选项，选中后不参与筛选 -->
-        <Tooltip title="按知识库类型筛选，选「全部类型」则不按类型筛选">
-          <Select
-            v-model:value="typeFilter"
-            :options="typeSelectOptions"
-            placeholder="知识库类型"
-            class="kb-type-select"
-            size="small"
-          />
-        </Tooltip>
+          <!-- 「全部类型」不参与筛选，切换类型后直接刷新列表 -->
+          <Tooltip title="按知识库类型筛选，选「全部类型」则不按类型筛选">
+            <Select
+              v-model:value="typeFilter"
+              :options="typeSelectOptions"
+              placeholder="知识库类型"
+              class="kb-type-select"
+              size="small"
+            />
+          </Tooltip>
+          <Button size="small" :disabled="!canQueryKb" @click="load">查询</Button>
+          <Tooltip v-if="canAddKb" title="新建知识库">
+            <Button type="primary" size="small" @click="handleAdd">
+              <template #icon><PlusOutlined /></template>
+            </Button>
+          </Tooltip>
+        </div>
 
         <div class="kb-list">
           <Spin :spinning="loading">
@@ -397,6 +388,19 @@ onMounted(load);
   overflow: hidden;
 }
 
+.kb-filter-row {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.kb-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
 /* 整列表域只占卡片剩下的那一截，库多了就在这块里上下滚（flex 项没有 min-height: 0
    会被内容顶高，滚动条根本不出现，下面的库直接被裁掉看不见） */
 .kb-list {
@@ -472,8 +476,9 @@ onMounted(load);
 }
 
 .kb-type-select {
-  width: 120px;
-  margin-bottom: 12px;
+  flex: none;
+  width: 108px;
+  margin-bottom: 0;
 }
 
 .kb-owner {

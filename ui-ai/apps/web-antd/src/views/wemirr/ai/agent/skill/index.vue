@@ -916,7 +916,10 @@ onMounted(() => {
 
 <style lang="less" scoped>
 :deep(.skill-page-content) {
-  height: calc(100vh - 120px);
+  height: var(
+    --vben-content-height,
+    calc(100vh - var(--vben-header-height, 90px))
+  );
   overflow: hidden;
 }
 
@@ -928,6 +931,7 @@ onMounted(() => {
 .skill-card-grid {
   display: grid;
   flex: 1;
+  height: 100%;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 12px;
   align-content: flex-start;

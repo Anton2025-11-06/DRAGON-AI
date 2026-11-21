@@ -76,6 +76,24 @@ export interface AclGranteeOption {
   label: string;
 }
 
+/**
+ * 部门授权主体的组织树节点（/acl/dept-tree）。
+ *
+ * 与部门管理页用的 DeptTree 刻意分开：
+ * - 只带展示需要的字段，不拉 status/sort 这种部门管理自己的概念到授权弹窗；
+ * - disabled=true 表示部门本身已停用，子部门仍会挂在它下面（层级不断），
+ *   树选择器直接根据这个字段置灰不给点。
+ */
+export interface AclDeptTreeNode {
+  children: AclDeptTreeNode[];
+  disabled: boolean;
+  id: number;
+  label: string;
+  nodeType: number;
+  parentId: number;
+  sort: number;
+}
+
 /** 在册授权里的单个动作（后端按「主体 × 动作」一行一行存） */
 export interface AclGrantActionRow {
   acl_id: number;
@@ -160,6 +178,17 @@ export function GetGranteeOptions(params: {
   limit?: number;
 }) {
   return defHttp.get<AclGranteeOption[]>(`${BASE_URL}/grantees`, { params });
+}
+
+/**
+ * 部门组织树（专供 ACL 授权弹窗的部门树选择器）。
+ *
+ * 不拉 /system/depts/tree：那份接口卡的是 system:dept:list，有部门管理菜单权的人才拉得到；
+ * 业务侧“我只能给我的库授授人”不应该被卡。后端 /acl/dept-tree 与 /acl/grantees 共享 grant
+ * 权限入口，语义上属于授权辅助数据。
+ */
+export function GetDeptTree() {
+  return defHttp.get<AclDeptTreeNode[]>(`${BASE_URL}/dept-tree`);
 }
 
 /** 某条资源的在册授权（无 share 时后端 403，弹窗据此进错误态） */

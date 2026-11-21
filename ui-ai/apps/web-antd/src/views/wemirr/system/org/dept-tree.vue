@@ -251,6 +251,10 @@ defineExpose({ loadTree });
   height: 100%;
   padding: 0;
 
+  :deep(.ant-skeleton) {
+    height: 100%;
+  }
+
   &__container {
     display: flex;
     flex-direction: column;
@@ -270,13 +274,13 @@ defineExpose({ loadTree });
     scrollbar-width: thin;
   }
 
-  &__tree {
-    :deep(.ant-tree-treenode) {
+  :deep(.dept-tree__tree) {
+    .ant-tree-treenode {
       width: 100%;
       padding: 2px 0;
     }
 
-    :deep(.ant-tree-node-content-wrapper) {
+    .ant-tree-node-content-wrapper {
       flex: 1;
       min-width: 0;
       min-height: 36px;
@@ -290,18 +294,30 @@ defineExpose({ loadTree });
         background: var(--component-background-light, #f4f6f8);
       }
 
-      &.ant-tree-node-selected {
-        color: hsl(var(--primary));
-        background: hsl(var(--primary) / 9%) !important;
+      &.ant-tree-node-selected,
+      &.ant-tree-node-selected:hover {
+        color: #fff;
+        font-weight: 600;
+        background: hsl(var(--primary)) !important;
+        box-shadow: 0 2px 8px hsl(var(--primary) / 22%);
 
         .dept-tree__highlight {
-          color: hsl(var(--primary));
-          background: hsl(var(--primary) / 10%);
+          color: #fff;
+          background: rgb(255 255 255 / 18%);
+        }
+
+        .dept-tree__action {
+          color: rgb(255 255 255 / 88%);
+
+          &:hover {
+            color: #fff;
+            background: rgb(255 255 255 / 18%);
+          }
         }
       }
     }
 
-    :deep(.ant-tree-switcher) {
+    .ant-tree-switcher {
       display: flex;
       align-items: center;
       justify-content: center;

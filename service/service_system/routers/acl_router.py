@@ -60,6 +60,20 @@ async def acl_grantees(request: Request,
         grantee_type, keyword, limit, login_user=login_user))
 
 
+@router.get("/acl/dept-tree", summary="部门授权主体组织树")
+@require_permission(*_ALL_GRANT_PERMS)
+async def acl_dept_tree(request: Request):
+    """授权弹窗部门树的专用接口，与 /system/depts/tree 分开是有原因的：
+
+    1. 权限门槛不拉齐：能进授权页不等同于能翻部门管理，直接复用 dept 列表接口
+       会把一批只能看到自己那一条资源的业务同学射到 403，弹窗里的部门树直接空。
+    2. 语义不拉齐：授权主体树需要保留停用部门（子部门仍然在组织上存在），只是
+       置为不可选；/system/depts/tree 不能为这个业务场景干污自己的口径。
+    """
+    await get_login_user(request)
+    return ApiResponse.success(data=await AclService.dept_tree())
+
+
 @router.get("/acl/grants", summary="查询某条资源的在册授权")
 @require_permission(*_ALL_GRANT_PERMS)
 async def acl_list(request: Request,

@@ -37,10 +37,18 @@
 }
 
 /* FastCrud 列表页统一铺满内容区。
-   外框用布局实际测得的内容区高（--vben-content-height），这样列表卡片底边与
-   左侧菜单栏底边对齐到视口底部，不再因数据多少而长短不一。 */
+   卡片直接吃满布局内容盒（fast-crud 的 .fs-page 本就是 position:absolute; top/bottom:0，
+   其定位祖先正是内容区那个 div.relative.h-full），这样卡片底边天生与菜单栏底边对齐
+   到视口底部。 */
 .fs-page.page-layout-card {
-  height: var(--vben-content-height, 100vh);
+  /* 关键修正：之前这里叠了一句 height: var(--vben-content-height)，与 base 的
+     top:0 + bottom:0 同时生效会使盒子「过度约束」——浏览器取 height 而忽略 bottom，
+     卡片于是只等于那个由 ResizeObserver 测得、可能偏小的 var 高度，比内容盒短一截，
+     底部空一大截（系统管理这类短列表尤其明显）。改成用 inset:0 让卡片由定位盒拉伸铺满，
+     不再依赖那个会变的测量值。 */
+  position: absolute;
+  inset: 0;
+  height: auto;
   min-height: 0;
 
   // fast-crud 默认只在 .fs-layout-card-body 一层才用 flex，上面
@@ -76,9 +84,9 @@
 
   .fs-crud-table {
     flex: 1 1 auto;
-    height: auto;
+    height: 100%;
     min-height: 0;
-    overflow: auto;
+    overflow: hidden;
   }
 }
 
@@ -134,6 +142,160 @@
 
   .ant-table-tbody > tr:last-child > td {
     border-bottom: 0;
+  }
+}
+
+/* 标准列表与用户管理共用：合并嵌套卡片的重复边距，把空间留给真正的表格。
+   搜索、操作、分页仍保留必要分隔，表格只在内部横向和纵向滚动。 */
+:is(.fs-page.page-layout-card, .sys-user-page-card) {
+  .fs-crud-container {
+    &.fs-layout-card > .box > .inner > .header,
+    &.fs-layout-card > .box > .inner > .body {
+      margin: 0;
+    }
+
+    &.fs-layout-card > .box > .inner > .header {
+      .ant-card {
+        border: 0;
+        box-shadow: none;
+      }
+
+      .ant-card-body {
+        padding: 0;
+      }
+    }
+
+    .fs-crud-search {
+      padding: 12px 16px 4px;
+    }
+
+    .fs-layout-card-body {
+      border: 0;
+      box-shadow: none;
+
+      > .ant-card-head {
+        min-height: 0;
+
+        .ant-card-head-title {
+          padding: 0;
+          overflow: visible;
+        }
+      }
+
+      .top-bar {
+        padding: 12px 16px;
+        margin: 0;
+        border-bottom: 1px solid var(--app-ui-card-border);
+      }
+
+      .fs-actionbar {
+        min-height: 0;
+        padding: 0;
+        margin: 0;
+      }
+
+      .fs-toolbar {
+        margin: 0;
+      }
+
+      > .ant-card-body {
+        padding: 0;
+      }
+
+      .fs-container .box .inner .body {
+        margin: 0;
+      }
+    }
+
+    .fs-crud-footer {
+      padding: 0;
+      margin: 0 16px;
+    }
+
+    .fs-pagination {
+      padding: 10px 0;
+    }
+  }
+}
+
+/* 分页统一靠右：FastCrud 的独立分页与普通表格分页都覆盖到，
+   总数、页码和每页条数保持在同一组，不再因页面实现不同而左右漂移。 */
+.fs-crud-container .fs-crud-footer {
+  .fs-crud-pagination {
+    justify-content: flex-end;
+  }
+
+  .fs-pagination > .ant-pagination {
+    justify-content: flex-end;
+    text-align: right;
+  }
+}
+
+.ant-table-wrapper .ant-pagination {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+/* 标准列表把操作栏并入搜索行：搜索条件居左，添加与表格工具居右。
+   操作栏脱离原卡片头并绝对定位，避免继续占用单独一行。 */
+:is(.fs-page.page-layout-card, .sys-user-page-card, .skill-page-content) {
+  .fs-crud-container {
+    position: relative;
+
+    .fs-crud-search {
+      min-height: 64px;
+      padding: 12px 320px 12px 16px;
+
+      .ant-row {
+        flex-flow: row wrap;
+      }
+
+      .ant-form-item {
+        margin-bottom: 0;
+      }
+    }
+
+    .body:has(.fs-layout-card-body) {
+      overflow: visible;
+    }
+
+    .fs-layout-card-body {
+      > .ant-card-head {
+        min-height: 0;
+
+        .top-bar {
+          position: absolute;
+          top: 0;
+          right: 16px;
+          z-index: 10;
+          display: flex;
+          gap: 12px;
+          align-items: center;
+          min-height: 64px;
+          padding: 0;
+          border-bottom: 0;
+          transform: translateY(-100%);
+        }
+      }
+    }
+
+    .fs-crud-actionbar,
+    .fs-actionbar,
+    .fs-crud-toolbar,
+    .fs-toolbar {
+      margin: 0;
+    }
+  }
+}
+
+/* 限流配置没有查询条件，操作栏保留独立行，不能悬浮到表格上。 */
+.rate-limit-page {
+  .fs-layout-card-body > .ant-card-head .top-bar {
+    position: static;
+    min-height: 56px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--app-ui-card-border);
+    transform: none;
   }
 }
 
@@ -260,6 +422,23 @@
     .fs-pagination {
       padding-right: 12px;
       padding-left: 12px;
+    }
+  }
+
+  :is(.fs-page.page-layout-card, .sys-user-page-card, .skill-page-content) {
+    .fs-crud-container {
+      .fs-crud-search {
+        padding: 12px;
+      }
+
+      .fs-layout-card-body > .ant-card-head .top-bar {
+        position: static;
+        justify-content: space-between;
+        min-height: 56px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--app-ui-card-border);
+        transform: none;
+      }
     }
   }
 

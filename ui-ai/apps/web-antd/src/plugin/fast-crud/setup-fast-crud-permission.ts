@@ -51,13 +51,6 @@ export function useCrudPermission({ permission }: any) {
             // view: { show: hasActionPermission('view') },
           },
         },
-        toolbar: {
-          buttons: {
-            export: {
-              show: hasActionPermission('export'),
-            },
-          },
-        },
       },
       extra,
     );

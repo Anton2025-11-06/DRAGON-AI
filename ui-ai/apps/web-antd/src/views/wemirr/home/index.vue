@@ -3211,7 +3211,10 @@ export default defineComponent({
 .hermes-page {
   display: flex;
   gap: 14px;
-  height: calc(100vh - 132px);
+  height: var(
+    --vben-content-height,
+    calc(100vh - var(--vben-header-height, 90px))
+  );
   padding: 16px;
 }
 

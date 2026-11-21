@@ -1223,15 +1223,14 @@ bootstrap();
 </template>
 
 <style scoped>
-/* 定高不能用 height:100%：布局链的根是 min-h-full（不是 h-full），<main> 的高度由内容
-   决定，内容一长过视口整条百分比高度链就塌陷、改由整页滚动 —— 表现就是内部滚动条
-   永远不出现、子图被顶到屏幕外。这里直接用视口高减去头部容器与页脚（两个值框架
-   已经以 CSS 变量写在 :root 上），拿到的是一个不依赖自测量的确定高度。 */
+/* 跟随框架实际测得的主内容区高度，三栏分别在剩余空间内滚动；
+   不再重复扣除未显示的页脚，避免卡片底边与菜单底边错位。 */
 .page-container {
   display: flex;
   flex-direction: column;
-  height: calc(
-    100vh - var(--vben-header-height, 90px) - var(--vben-footer-height, 32px)
+  height: var(
+    --vben-content-height,
+    calc(100vh - var(--vben-header-height, 90px))
   );
   padding: 8px;
   overflow: hidden;

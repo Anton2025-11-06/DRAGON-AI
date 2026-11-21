@@ -180,6 +180,39 @@ class AclService:
                 return [{"grantee_id": 0, "grantee_name": "全员", "label": "全员"}]
         raise ValueError(f"不支持的授权主体类型：{grantee_type}")
 
+    @staticmethod
+    async def dept_tree() -> list[dict]:
+        """部门授权主体组织树：只给 ACL 授权弹窗的树选择器用。
+
+        与 /system/depts/tree 的差异——两处刻意分开是有原因的：
+        - 权限门槛：走 grant 权限入口（能进授权页即可读），不要求 system:dept:list。
+          有授权权的人未必有翻部门管理页的权力，硬套那份接口会看到空树。
+        - 层级完整性：status=0 的部门仍出现在树里但打 disabled=true，避免子孙层级
+          断裂（父部门停用不该让子部门从组织上消失）；保存时仍按 _grantee_names 卡
+          存在性 + 启用，停用部门授不出去也命中不了，语义与其它主体一档。
+        """
+        async with mysql_client.get_session() as session:
+            rows = (await session.execute(
+                select(Dept.dept_id, Dept.parent_id, Dept.dept_name,
+                       Dept.node_type, Dept.sort, Dept.status)
+                .where(Dept.is_deleted == 0)
+                .order_by(Dept.sort.asc(), Dept.dept_id.asc()))).all()
+        # 先按 dept_id 建索引，再按 parent_id 挂父子；parent 不在索引里（含 parent_id=0
+        # 与父部门被硬删）就当根处理，不让孤儿节点从界面上消失
+        nodes: dict[int, dict] = {
+            r[0]: {"id": r[0], "parentId": r[1], "label": r[2], "nodeType": r[3],
+                   "sort": r[4], "disabled": r[5] != 1, "children": []}
+            for r in rows
+        }
+        roots: list[dict] = []
+        for node in nodes.values():
+            parent = nodes.get(node["parentId"])
+            if parent is not None:
+                parent["children"].append(node)
+            else:
+                roots.append(node)
+        return roots
+
     # ==================== 写 ====================
     @staticmethod
     async def save_grants(login_user: dict, resource_code: str, resource_id: Any,

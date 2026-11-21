@@ -51,7 +51,7 @@ export function registerFastCrud(app: App) {
       const crudBinding = crudExpose?.crudBinding;
       const opts = {
         pagination: {
-          pageSize: 10,
+          pageSize: 20,
           currentPage: 1,
           show: true,
           showSize: true,
@@ -64,6 +64,10 @@ export function registerFastCrud(app: App) {
           compact: false,
           buttons: {
             compact: { show: false },
+            // 导出当前用户可见的列表数据，公共入口始终保留
+            export: { show: true },
+            // 搜索区固定在列表顶部，不再提供“查询显示”切换按钮
+            search: { show: false },
           },
         },
         search: {
@@ -148,7 +152,7 @@ export function registerFastCrud(app: App) {
             const order =
               sort === null ? {} : { column: sort.prop, asc: sort.asc };
             const currentPage = page.currentPage ?? 1;
-            const limit = page.pageSize ?? 10;
+            const limit = page.pageSize ?? 20;
             // 本项目后端统一分页参数：page / page_size
             return {
               page: currentPage,
@@ -162,7 +166,7 @@ export function registerFastCrud(app: App) {
             const data = res?.data ?? res ?? {};
             const result: any = {
               pageSize: Number.parseInt(
-                data.page_size ?? data.size ?? 10,
+                data.page_size ?? data.size ?? 20,
               ),
               total: Number.parseInt(data.total ?? 0),
               records: data.items ?? data.records ?? [],

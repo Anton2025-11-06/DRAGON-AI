@@ -89,7 +89,7 @@ loadRoleOptions();
 
 <template>
   <Page content-class="flex flex-row gap-2" :auto-content-height="true">
-    <Card class="sys-user-page-card w-full" title="用户管理">
+    <Card class="sys-user-page-card w-full">
       <fs-crud ref="crudRef" v-bind="crudBinding" />
     </Card>
 
@@ -143,12 +143,31 @@ loadRoleOptions();
 }
 
 :deep(.sys-user-page-card) {
-  .fs-crud-container {
-    height: calc(100vh - 250px);
-  }
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 
   .ant-card-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
     padding: 8px;
+  }
+
+  .fs-crud-container {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+  }
+
+  .fs-row-handle {
+    white-space: nowrap;
+
+    .ant-btn {
+      padding-inline: 2px;
+    }
   }
 }
 </style>

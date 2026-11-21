@@ -13,7 +13,14 @@ onMounted(async () => {
 </script>
 
 <template>
-  <fs-page class="page-layout-card">
+  <fs-page class="page-layout-card rate-limit-page">
     <fs-crud ref="crudRef" v-bind="crudBinding" />
   </fs-page>
 </template>
+
+<style lang="less" scoped>
+/* 此页没有查询条件，不保留仅含“查询/重置”的空白搜索栏。 */
+:deep(.fs-search) {
+  display: none;
+}
+</style>

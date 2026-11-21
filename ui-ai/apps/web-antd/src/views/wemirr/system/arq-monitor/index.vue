@@ -214,105 +214,125 @@ const workerColumns = [
 </script>
 
 <template>
-  <Page content-class="flex flex-col gap-2" :auto-content-height="true">
+  <Page content-class="arq-monitor-page" :auto-content-height="true">
     <!-- 工具栏：流水线选择 / 切片数配置 / 自动刷新 / 手动刷新 -->
-    <Card class="w-full">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <span class="font-medium">ARQ 分片队列监控</span>
-          <!-- 选监控哪条流水线：工作流执行 worker 与知识库解析 worker 各自的队列 -->
-          <Select
-            v-model:value="pipeline"
-            :options="pipelineOptions"
-            size="small"
-            style="width: 160px"
-          />
-          <span class="text-xs text-gray-500">
-            {{ overview.redis || '' }}
-          </span>
+    <Card class="monitor-toolbar" :bordered="false">
+      <div class="toolbar-layout">
+        <div class="pipeline-panel">
+          <div class="monitor-heading">
+            <span class="monitor-title">ARQ 分片队列监控</span>
+            <span v-if="overview.redis" class="redis-address">
+              <span class="redis-dot"></span>
+              {{ overview.redis }}
+            </span>
+          </div>
+          <div class="pipeline-selector">
+            <span class="control-label">监控对象</span>
+            <!-- 工作流执行 worker 与知识库解析 worker 使用各自的数据源 -->
+            <Select
+              v-model:value="pipeline"
+              :options="pipelineOptions"
+              style="width: 200px"
+            />
+          </div>
         </div>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-gray-500">当前切片数</span>
-          <a-tag color="blue">{{ splitNumber || '-' }}</a-tag>
-          <InputNumber
-            v-model:value="editSplit"
-            :min="MIN_SPLIT"
-            :max="MAX_SPLIT"
-            :step="1"
-            size="small"
-            style="width: 90px"
-          />
-          <a-tooltip
-            :title="`写入 arq Redis（${splitKeyHint}），该流水线投递将按新切片数轮询；需同步启动对应切片号的 worker`"
-          >
-            <a-button
-              type="primary"
-              size="small"
-              :loading="savingSplit"
-              :disabled="editSplit === splitNumber"
-              @click="handleSaveSplit"
+
+        <div class="toolbar-controls">
+          <div class="split-config">
+            <span class="control-label">当前切片</span>
+            <span class="split-value">{{ splitNumber || '-' }}</span>
+            <span class="control-label">调整为</span>
+            <InputNumber
+              v-model:value="editSplit"
+              :min="MIN_SPLIT"
+              :max="MAX_SPLIT"
+              :step="1"
+              style="width: 76px"
+            />
+            <a-tooltip
+              :title="`写入 arq Redis（${splitKeyHint}），该流水线投递将按新切片数轮询；需同步启动对应切片号的 worker`"
             >
-              修改切片数
-            </a-button>
-          </a-tooltip>
-          <span class="text-xs text-gray-500">
-            自动刷新 {{ REFRESH_INTERVAL / 1000 }}s
-          </span>
-          <Switch
-            v-model:checked="autoRefresh"
-            checked-children="开"
-            un-checked-children="关"
-            size="small"
-            @change="toggleAutoRefresh"
-          />
-          <a-button type="primary" :loading="loading" @click="handleRefresh">
-            刷新
-          </a-button>
+              <a-button
+                type="primary"
+                :loading="savingSplit"
+                :disabled="editSplit === splitNumber"
+                @click="handleSaveSplit"
+              >
+                保存配置
+              </a-button>
+            </a-tooltip>
+          </div>
+
+          <div class="refresh-config">
+            <span class="control-label">自动刷新</span>
+            <Switch
+              v-model:checked="autoRefresh"
+              checked-children="开"
+              un-checked-children="关"
+              size="small"
+              @change="toggleAutoRefresh"
+            />
+            <span class="refresh-interval">{{ REFRESH_INTERVAL / 1000 }}s</span>
+            <a-button :loading="loading" @click="handleRefresh">刷新</a-button>
+          </div>
         </div>
       </div>
     </Card>
 
     <!-- 每个切片队列一张卡片：点队列名展开/折叠 worker 消费情况 -->
-    <Card v-for="q in queueList()" :key="q.queueName" class="w-full">
+    <Card
+      v-for="q in queueList()"
+      :key="q.queueName"
+      class="queue-card"
+      :bordered="false"
+    >
       <template #title>
         <div
-          class="flex cursor-pointer select-none flex-wrap items-center gap-2 text-base"
+          class="queue-heading"
+          tabindex="0"
           @click="toggleQueue(q.queueName)"
+          @keydown.enter="toggleQueue(q.queueName)"
         >
-          <span :class="arrowClass(q.queueName)">▸</span>
-          <span class="font-medium">队列 {{ q.queueName }}</span>
-          <a-tag
-            class="status-tag"
-            :color="queueHealthy(q) ? 'success' : 'error'"
+          <span class="queue-arrow" :class="arrowClass(q.queueName)">▸</span>
+          <span class="queue-name">{{ q.queueName }}</span>
+          <span
+            class="queue-status"
+            :class="queueHealthy(q) ? 'is-online' : 'is-offline'"
           >
-            {{ queueHealthy(q) ? '队列在线' : '无可用 worker' }}
-          </a-tag>
-          <a-tag class="status-tag" color="blue">
-            {{ num(q.workerCount) }} 个在线 worker
-          </a-tag>
-          <!-- 队列待执行数：来自队列 ZSET 深度，worker 全挂时也能看到堆积 -->
-          <a-tag
-            class="status-tag"
-            :color="Number(q.depth) > 0 ? 'warning' : 'default'"
-          >
-            {{ num(q.depth) }} 条待执行
-          </a-tag>
+            <span class="status-dot"></span>
+            {{ queueHealthy(q) ? '队列在线' : '无可用 Worker' }}
+          </span>
+        </div>
+      </template>
+      <template #extra>
+        <div class="queue-metrics">
+          <span class="queue-metric">
+            <span class="metric-label">在线 Worker</span>
+            <strong>{{ num(q.workerCount) }}</strong>
+          </span>
+          <span class="metric-divider"></span>
+          <span class="queue-metric">
+            <span class="metric-label">待执行</span>
+            <strong :class="{ 'has-backlog': Number(q.depth) > 0 }">
+              {{ num(q.depth) }}
+            </strong>
+          </span>
         </div>
       </template>
 
-      <div v-show="!isCollapsed(q.queueName)">
-        <div class="mb-1 mt-3 flex items-center gap-2">
-          <span class="text-sm font-medium">Worker 消费情况</span>
-          <span class="text-xs text-gray-500">
-            每个 worker 一个健康 key，退出自动删除、失联 TTL 过期后消失
+      <div v-show="!isCollapsed(q.queueName)" class="worker-section">
+        <div class="worker-section__header">
+          <span class="worker-section__title">Worker 消费情况</span>
+          <span class="worker-section__caption">
+            节点退出后自动移除，失联节点将在 TTL 过期后消失
           </span>
         </div>
         <a-table
+          class="worker-table"
           :data-source="q.workers ?? []"
           :columns="workerColumns"
           :pagination="false"
           size="small"
-          bordered
           row-key="workerId"
         >
           <template #bodyCell="{ column, record }">
@@ -338,9 +358,8 @@ const workerColumns = [
             </template>
           </template>
           <template #emptyText>
-            <span class="text-xs text-gray-500">
-              该队列暂无 worker 节点（未启动对应切片号的 worker 或 Redis
-              不可达）
+            <span class="worker-empty">
+              暂无 Worker 节点，请检查对应切片号的 Worker 或 Redis 连接
             </span>
           </template>
         </a-table>
@@ -348,27 +367,350 @@ const workerColumns = [
     </Card>
 
     <!-- 空态：Redis 不可达 / 该流水线未配 / 尚无任何队列 -->
-    <a-empty
-      v-if="queueList().length === 0"
-      class="mt-8"
-      :description="
-        overview.error ||
-        '暂无队列数据（检查该流水线的 arq Redis 连接与 worker 启动状态）'
-      "
-    />
+    <div v-if="queueList().length === 0" class="monitor-empty">
+      <a-empty
+        :description="
+          overview.error ||
+          '暂无队列数据（检查该流水线的 arq Redis 连接与 worker 启动状态）'
+        "
+      />
+    </div>
   </Page>
 </template>
 
 <style lang="less" scoped>
-:deep(.ant-card-body) {
+:deep(.arq-monitor-page) {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 12px;
 }
 
-/* 队列状态 tag 比默认(12px)大一号,与标题左对齐展示 */
-:deep(.status-tag) {
-  height: 24px;
-  padding-inline: 10px;
-  font-size: 14px;
+.monitor-toolbar,
+.queue-card,
+.monitor-empty {
+  overflow: hidden;
+  background: var(--component-background, #fff);
+  border: 1px solid var(--border-color, #e6ebf0);
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgb(15 23 42 / 3%);
+}
+
+.monitor-toolbar {
+  :deep(.ant-card-body) {
+    padding: 16px 18px;
+  }
+}
+
+.toolbar-layout,
+.toolbar-controls,
+.split-config,
+.refresh-config,
+.monitor-heading,
+.pipeline-selector {
+  display: flex;
+  align-items: center;
+}
+
+.toolbar-layout {
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.pipeline-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 250px;
+}
+
+.monitor-heading {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.monitor-title {
+  font-size: 15px;
+  font-weight: 600;
   line-height: 22px;
+  color: var(--text-color, #24292f);
+}
+
+.redis-address {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 7px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-color-secondary, #737d89);
+  background: var(--component-background-light, #f5f7fa);
+  border-radius: 4px;
+}
+
+.redis-dot,
+.status-dot {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  background: #52c41a;
+  border-radius: 50%;
+}
+
+.pipeline-selector {
+  gap: 10px;
+}
+
+.control-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-color-secondary, #7a8491);
+}
+
+.toolbar-controls {
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  justify-content: flex-end;
+}
+
+.split-config,
+.refresh-config {
+  gap: 9px;
+}
+
+.split-config {
+  padding-right: 18px;
+  border-right: 1px solid var(--border-color, #e8edf2);
+}
+
+.split-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 8%);
+  border-radius: 6px;
+}
+
+.refresh-interval {
+  margin-left: -5px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #8a939e);
+}
+
+.queue-card {
+  :deep(.ant-card-head) {
+    min-height: 58px;
+    padding: 0 18px;
+    background: var(--component-background-light, #fafbfc);
+    border-bottom-color: var(--border-color, #e9edf2);
+  }
+
+  :deep(.ant-card-head-title),
+  :deep(.ant-card-extra) {
+    padding: 12px 0;
+  }
+
+  :deep(.ant-card-body) {
+    padding: 16px 18px 18px;
+  }
+}
+
+.queue-heading {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+
+  &:focus-visible {
+    border-radius: 4px;
+    box-shadow: 0 0 0 2px hsl(var(--primary) / 20%);
+  }
+}
+
+.queue-arrow {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: hsl(var(--primary)) !important;
+}
+
+.queue-name {
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color, #2f3742);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-status {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 12px;
+
+  &.is-online {
+    color: #389e0d;
+    background: rgb(82 196 26 / 9%);
+  }
+
+  &.is-offline {
+    color: #cf1322;
+    background: rgb(255 77 79 / 8%);
+
+    .status-dot {
+      background: #ff4d4f;
+    }
+  }
+}
+
+.queue-metrics {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.queue-metric {
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+
+  strong {
+    min-width: 18px;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-color, #303642);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+
+    &.has-backlog {
+      color: #d48806;
+    }
+  }
+}
+
+.metric-label {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-color-secondary, #8a939e);
+}
+
+.metric-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border-color, #e2e7ed);
+}
+
+.worker-section__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  margin-bottom: 12px;
+}
+
+.worker-section__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-color, #343b46);
+}
+
+.worker-section__caption,
+.worker-empty {
+  font-size: 12px;
+  color: var(--text-color-secondary, #8a939e);
+}
+
+.worker-table {
+  overflow: hidden;
+  border: 1px solid var(--border-color, #e7ecf1);
+  border-radius: 8px;
+
+  :deep(.ant-table) {
+    font-size: 13px;
+  }
+
+  :deep(.ant-table-thead > tr > th) {
+    padding: 10px 12px;
+    font-weight: 600;
+    color: #525c69;
+    background: #f7f9fb;
+    border-bottom-color: var(--border-color, #e5eaf0);
+  }
+
+  :deep(.ant-table-tbody > tr > td) {
+    padding: 11px 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  :deep(.ant-table-tbody > tr:last-child > td) {
+    border-bottom: 0;
+  }
+}
+
+.monitor-empty {
+  padding: 36px 16px;
+}
+
+@media (max-width: 1280px) {
+  .toolbar-layout {
+    align-items: flex-start;
+  }
+
+  .toolbar-controls {
+    gap: 10px;
+  }
+
+  .split-config {
+    padding-right: 10px;
+  }
+}
+
+@media (max-width: 960px) {
+  .toolbar-layout {
+    flex-direction: column;
+  }
+
+  .pipeline-panel,
+  .toolbar-controls {
+    width: 100%;
+  }
+
+  .toolbar-controls {
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 640px) {
+  .split-config {
+    flex-wrap: wrap;
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .worker-section__caption {
+    width: 100%;
+  }
 }
 </style>
