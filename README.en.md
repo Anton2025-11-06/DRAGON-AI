@@ -8,6 +8,12 @@
 
 ---
 
+📺 **Platform introduction video**
+
+<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4">
+  Your previewer does not support inline playback; please <a href="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4">click here to open/download the video</a>.
+</video>
+
 ![DRAGON-AI Architecture](docs/项目总体架构.drawio.png)
 
 ## 1. Core capabilities

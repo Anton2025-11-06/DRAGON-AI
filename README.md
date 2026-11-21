@@ -8,6 +8,12 @@
 
 ---
 
+📺 **平台介绍视频**
+
+<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4">
+  当前预览器不支持内嵌播放，请<a href="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4">点此下载/打开视频</a>。
+</video>
+
 ![DRAGON-AI 总体架构](docs/项目总体架构.drawio.png)
 
 ## 一、核心能力
