@@ -8,11 +8,9 @@
 
 ---
 
-📺 **平台介绍视频**
+📺 **平台介绍视频**：[▶ 点击观看 AI 中台介绍.mp4](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4)（GitHub 上因渲染限制不会内嵌自动播放，点开在新窗口播放；本地预览器下方可直接内嵌播放）
 
-<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4">
-  当前预览器不支持内嵌播放，请<a href="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4">点此下载/打开视频</a>。
-</video>
+<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4"></video>
 
 ![DRAGON-AI 总体架构](docs/项目总体架构.drawio.png)
 

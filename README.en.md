@@ -8,11 +8,9 @@
 
 ---
 
-📺 **Platform introduction video**
+📺 **Platform introduction video**: [▶ Watch AI Platform Introduction.mp4](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4) (GitHub strips inline `<video>` rendering; the link opens the raw mp4 in a new tab; local previewers play the embedded video below directly.)
 
-<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4">
-  Your previewer does not support inline playback; please <a href="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4">click here to open/download the video</a>.
-</video>
+<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4"></video>
 
 ![DRAGON-AI Architecture](docs/项目总体架构.drawio.png)
 
