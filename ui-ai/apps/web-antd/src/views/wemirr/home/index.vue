@@ -2891,24 +2891,22 @@ export default defineComponent({
               @change="changeModel"
             />
             <span v-if="stopping" class="hermes-stopping-label">正在收尾</span>
-            <a-tooltip v-if="streaming" title="停止当前回复，排队问题将继续">
+            <a-tooltip
+              :title="streaming ? '停止当前回复' : (sending ? '加入排队' : '发送')"
+            >
               <a-button
-                class="hermes-stop"
-                aria-label="停止当前回复"
-                @click="interruptTurn"
+                :type="streaming ? 'default' : 'primary'"
+                class="hermes-send"
+                :class="{ 'is-stop': streaming }"
+                :aria-label="streaming ? '停止当前回复' : (sending ? '加入排队' : '发送')"
+                @click="streaming ? interruptTurn() : handleSend()"
               >
-                <template #icon><StopOutlined /></template>
+                <template #icon>
+                  <span v-if="streaming" class="hermes-stop-square"></span>
+                  <SendOutlined v-else />
+                </template>
               </a-button>
             </a-tooltip>
-            <a-button
-              type="primary"
-              class="hermes-send"
-              :aria-label="busy || sending ? '加入排队' : '发送'"
-              :title="busy || sending ? '加入排队' : '发送'"
-              @click="handleSend"
-            >
-              <template #icon><SendOutlined /></template>
-            </a-button>
           </div>
         </div>
       </footer>
@@ -4179,8 +4177,7 @@ export default defineComponent({
         flex-shrink: 0;
       }
 
-      .hermes-send,
-      .hermes-stop {
+      .hermes-send {
         display: inline-flex;
         flex-shrink: 0;
         align-items: center;
@@ -4188,18 +4185,30 @@ export default defineComponent({
         width: 36px;
         height: 36px;
         padding: 0;
-        border-radius: 50%;
-      }
-
-      .hermes-send {
         border: none;
+        border-radius: 50%;
         box-shadow: 0 5px 14px hsl(var(--primary) / 22%);
-      }
+        transition: all 0.2s;
 
-      .hermes-stop {
-        color: var(--text-color-2, #4e5969);
-        background: var(--hover-bg-color, #f2f4f7);
-        border: 1px solid var(--border-color, #e3e7ee);
+        &.is-stop {
+          border-radius: 8px;
+          color: #fff;
+          background: #ef4444;
+          border: none;
+          box-shadow: 0 5px 14px rgb(239 68 68 / 28%);
+
+          .hermes-stop-square {
+            display: block;
+            width: 12px;
+            height: 12px;
+            background: #fff;
+            border-radius: 2px;
+          }
+
+          &:hover {
+            background: #dc2626;
+          }
+        }
       }
 
       .hermes-stopping-label {
