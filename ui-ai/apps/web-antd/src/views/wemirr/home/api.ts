@@ -131,6 +131,7 @@ export interface HarnessFrame {
     | 'turn.completed'
     | 'turn.failed'
     | 'turn.interrupted'
+    | 'turn.nudge'
     | 'turn.started';
   turnId: string;
   ts?: number;
@@ -153,6 +154,12 @@ export interface HarnessFrame {
   pendingQuestions?: PendingQuestion[];
   /** turn.artifacts 的最终输出物清单（worker 发累积快照，前端整表替换） */
   artifacts?: HarnessArtifact[];
+  /** turn.nudge 塞给模型的完整提醒文本（已剔掉 <system-reminder> 外壳之前） */
+  text?: string;
+  /** turn.nudge 的计数：本轮第几次提醒 / 预算上限 / 清单里还剩几项未完成 */
+  nudge?: number;
+  maxNudges?: number;
+  unfinished?: number;
 }
 
 // ==================== API 接口（harness 深度探索） ====================

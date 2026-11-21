@@ -29,6 +29,7 @@ import {
   DoubleLeftOutlined,
   DoubleRightOutlined,
   EditOutlined,
+  ExclamationCircleOutlined,
   FileTextFilled,
   FolderFilled,
   HolderOutlined,
@@ -52,8 +53,18 @@ import MarkdownRenderer from '../ai/workflow/components/debug/MarkdownRenderer.v
 import ComposerEditor from './ComposerEditor.vue';
 import * as api from './api';
 
-/** 时间线片段：assistant 消息按到达顺序拆成思考/工具/文本三类块，各自可折叠 */
+/** 时间线片段：assistant 消息按到达顺序拆成思考/工具/文本/提醒四类块，各自可折叠 */
 type Segment =
+  | {
+      id: string;
+      kind: 'nudge';
+      /** 预算上限 / 本轮第几次提醒 / 清单剩余未完成项（帧缺字段则摘要不报计数） */
+      maxNudges?: number;
+      nudge?: number;
+      /** 系统塞给模型的纠正提醒正文（已剔掉外壳标签），折叠里给想看的人看 */
+      text: string;
+      unfinished?: number;
+    }
   | { kind: 'thinking'; id: string; text: string; active?: boolean }
   | { kind: 'text'; id: string; text: string }
   | {
@@ -173,6 +184,27 @@ function thinkingHint(text: string): string {
   return clip(lines.at(-1) ?? '', THINKING_HINT_MAX);
 }
 
+/** 提醒正文剔掉 <system-reminder> 外壳：那是给模型的分隔标记，不是给人看的正文 */
+function unwrapReminder(text: string): string {
+  return text.replaceAll(/<\/?system-reminder>/gu, '').trim();
+}
+
+/**
+ * 提醒行摘要：计数齐全直接报「还剩几项、第几次」，比把模型收到的那段长提醒
+ * 铺在时间线上好读；计数缺失（协议以后改了字段）才回落到正文首行。
+ */
+function nudgeHint(seg: Segment): string {
+  if (seg.kind !== 'nudge') return '';
+  if (typeof seg.unfinished === 'number') {
+    const budget =
+      typeof seg.nudge === 'number' && typeof seg.maxNudges === 'number'
+        ? `（第 ${seg.nudge}/${seg.maxNudges} 次提醒）`
+        : '';
+    return `任务清单还有 ${seg.unfinished} 项未完成，已把它推回去继续${budget}`;
+  }
+  return clip(unwrapReminder(seg.text).split('\n')[0] ?? '', TOOL_HINT_MAX);
+}
+
 /** 预览弹窗指向的文件：内容取回与渲染都在 SandboxPreviewModal 里，这里只登记「开哪个」 */
 interface PreviewTarget {
   name: string;
@@ -282,6 +314,7 @@ export default defineComponent({
     DoubleLeftOutlined,
     DoubleRightOutlined,
     EditOutlined,
+    ExclamationCircleOutlined,
     FileTextFilled,
     FolderFilled,
     HolderOutlined,
@@ -589,7 +622,6 @@ export default defineComponent({
       commandLoading.value = true;
       // 搜索框会抢走光标，先把插入位置记下来：确认时芯片要插回句子中间
       composerRef.value?.saveCaret();
-      focusCommandSearch();
       try {
         const [, agentRes] = await Promise.all([
           ensurePickerOptions(),
@@ -600,6 +632,10 @@ export default defineComponent({
         agentOptions.value = [];
       } finally {
         commandLoading.value = false;
+        // 搜索框要等 loading 结束才渲染出来，抢焦点必须放到这一步之后：
+        // 否则刚点「+资源」时输入框还不存在，focus 落空，方向键就没人接，
+        // 非得用鼠标点一下条目才恢复。
+        focusCommandSearch();
       }
     }
 
@@ -1556,6 +1592,19 @@ export default defineComponent({
       }
     }
 
+    /** 闸门纠正提醒（turn.nudge）：时间线上加一行系统提醒（仅实时流，刷新不回放） */
+    function pushNudge(msg: ChatMsg, frame: api.HarnessFrame) {
+      if (!msg.segments) msg.segments = [];
+      msg.segments.push({
+        kind: 'nudge',
+        id: nextSegId(),
+        text: unwrapReminder(frame.text || ''),
+        nudge: frame.nudge,
+        maxNudges: frame.maxNudges,
+        unfinished: frame.unfinished,
+      });
+    }
+
     /** 由落库字段合成时间线（历史行近似时序：思考 → 各工具 → 正文） */
     function legacyToSegments(row: api.HarnessMessage): Segment[] {
       const segs: Segment[] = [];
@@ -1720,6 +1769,12 @@ export default defineComponent({
           target.running = false;
           target.error = frame.error || '执行失败';
           closeTurnStream(turnId);
+          break;
+        }
+        case 'turn.nudge': {
+          // 自主性闸门压掉收尾、把它推回去继续干活：实时帧不落库也不回放，
+          // 刷新后看到的是被推之后多干出来的那些工具行
+          pushNudge(target, frame);
           break;
         }
         default:
@@ -2152,6 +2207,7 @@ export default defineComponent({
       toolLabel,
       toolArgsView,
       thinkingHint,
+      nudgeHint,
       handleSend,
       interruptTurn,
       queuedQuestions,
@@ -2371,6 +2427,23 @@ export default defineComponent({
                 <pre v-if="toolArgsView(seg)" class="hermes-seg-body">{{
                   toolArgsView(seg)
                 }}</pre>
+              </details>
+
+              <!-- 闸门提醒：系统不让它提前收尾，已把它推回去继续清单里的下一项 -->
+              <details
+                v-else-if="seg.kind === 'nudge'"
+                class="hermes-seg hermes-nudge"
+              >
+                <summary class="hermes-seg-summary">
+                  <ExclamationCircleOutlined />
+                  <span class="hermes-seg-label">系统提醒</span>
+                  <span v-if="nudgeHint(seg)" class="hermes-seg-hint">{{
+                    nudgeHint(seg)
+                  }}</span>
+                </summary>
+                <pre v-if="seg.text" class="hermes-seg-body">
+                  {{ seg.text }}
+                </pre>
               </details>
 
               <!-- 正文块：完整 markdown 渲染（标题/列表/表格/代码高亮，复用平台 MarkdownRenderer，内部已 sanitize） -->
@@ -3874,7 +3947,9 @@ export default defineComponent({
       display: flex;
       flex-direction: column;
       gap: 3px;
-      max-height: 232px;
+      // 固定高度而非 max-height：某类条目少时也不塌下去，左右切分类面板
+      // 长宽恒定，不会因为数据多少来回缩放晃眼。
+      height: 232px;
       padding: 8px 8px 10px;
       overflow-y: auto;
     }
@@ -4612,6 +4687,11 @@ export default defineComponent({
 
   .hermes-call .hermes-seg-summary {
     color: #7c3aed;
+  }
+
+  // 闸门提醒：琥珀色区别于思考（蓝）/工具（紫），它是系统行为不是模型输出
+  .hermes-nudge .hermes-seg-summary {
+    color: #d97706;
   }
 
   .hermes-seg-done {

@@ -51,7 +51,7 @@
 ### 5. 深度探索（Harness 智能体）
 - **AgentScope ReAct 自主智能体**：对话轮次投递到专属 `harness_queue` 异步消费，每轮占一条模型流 + 一个沙箱会话，与 workflow / ragflow / graphflow 完全隔离。
 - **每用户独立云沙箱 + 持久化工作区**（OpenSandbox 自托管）：`workspace_id` 幂等复用、自建镜像自带网关 venv、首建跳过分钟级引导；工作区按用户挂**持久卷**（宿主机 NAS 目录映射到容器 `/workspace`）——**沙箱被服务端按最大存活时间销毁/重建后产出物仍在**；缓存句柄陈旧时向控制面探活、非 running 则逐出重建，保证句柄确实可用。
-- **流式时间线对话**：思考 / 工具调用 / 回复按帧到达顺序交错呈现、逐段可折叠；SSE 帧协议 `turn.started / text.delta / thinking.delta / tool.started / tool.completed / turn.artifacts / turn.completed|interrupted|failed`。
+- **流式时间线对话**：思考 / 工具调用 / 回复按帧到达顺序交错呈现、逐段可折叠；SSE 帧协议 `turn.started / text.delta / thinking.delta / tool.started / tool.completed / turn.artifacts / turn.nudge / turn.completed|interrupted|failed`。
 - **人在环 AskUser**：执行中可打断向用户要参数/确认后从断点恢复，也支持手动中断，消息行终态为准、幂等收尾；AgentState 存 Redis，API 与 worker 跨进程交接。
 - **文件上传优化**：上传经后端专用 `write_file` 直写原始字节（不经 shell、不受单命令行参数上限、无 base64 分块/解码开销）；下载经 `read_file` 整份读原始字节（避开命令通道截断大 stdout）；大文件走对象存储 / OSS。
 - **最终输出物自动渲染**：智能体收尾用 `present_output` 显式登记交付物 → `turn.artifacts` 帧随消息落库 → 对话内渲染成可点击**文件卡片**，右侧工作区**多格式在线预览**（图片 / PDF / 音视频 / Markdown / 代码 / CSV / HTML / 文本）；本会话该轮首个产物到达时自动展开预览。

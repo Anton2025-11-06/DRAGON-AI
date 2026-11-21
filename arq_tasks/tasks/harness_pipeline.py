@@ -35,7 +35,7 @@ async def run_pipeline_turn(turn_id: str, login_user: dict, snapshot: dict,
     """跑一轮多 Agent 流水线编排（team/goal/sop），返回终态结果 dict。"""
     from agentscope.app.storage import RedisStorage, SessionConfig
     from agentscope.event import (
-        TextBlockDeltaEvent, ThinkingBlockDeltaEvent,
+        HintBlockEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent,
         ToolCallDeltaEvent, ToolCallEndEvent, ToolCallStartEvent,
     )
     from agentscope.message import UserMsg
@@ -43,7 +43,7 @@ async def run_pipeline_turn(turn_id: str, login_user: dict, snapshot: dict,
 
     from arq_tasks.tasks.harness import (
         _compose_user_message, _parse_present_output_args, _publish,
-        _run_with_stop_watch,
+        _publish_nudge_frame, _run_with_stop_watch,
     )
     from service.service_harness.agent import orch_pipelines
     from service.service_harness.agent.tools.mount_loader import load_mounted
@@ -137,7 +137,10 @@ async def run_pipeline_turn(turn_id: str, login_user: dict, snapshot: dict,
                         if purpose:
                             payload["purpose"] = purpose
                         await _publish(turn_id, EVT_TOOL_COMPLETED, payload)
-
+                    elif isinstance(evt, HintBlockEvent):
+                        # 闸门纠正提醒 → turn.nudge（与 _stream_reply 同一处口径，
+                        # 其余来源的 hint 不发帧）
+                        await _publish_nudge_frame(turn_id, evt)
             interrupted = await _run_with_stop_watch(turn_id, _consume_events)
             if interrupted:
                 # 用户点停止：以流水线为口发 UserInterruptEvent 闭合挂起工具调用（尽力）

@@ -46,6 +46,13 @@ EVT_TOOL_RESULT_COMPLETED = "tool.result.completed"
 # 本轮最终输出物清单帧（present_output 工具声明的交付文件，非终态帧）：
 # payload {"artifacts": [{name,path,description}]}，实时流发累积快照、前端整表替换
 EVT_TURN_ARTIFACTS = "turn.artifacts"
+# 自主性闸门（AutonomyGuard）压掉收尾、推它继续干活那一脚的提醒帧（非终态帧）：
+# payload {"text", "nudge", "maxNudges", "unfinished"}——text 是塞给模型的完整
+# 提醒文本（含 <system-reminder> 外壳，前端自己剔），计数供一行标题直接用。
+# 只活不落地：它描述的是“这一脚是怎么被推回去的”，不属于本轮产出，既不落
+# tb_harness_message 也不进 _replay_finished_turn——刷新后看到的是被推之后真的
+# 多干出来的那些工具行，而不是提醒本身。
+EVT_TURN_NUDGE = "turn.nudge"
 EVT_TURN_COMPLETED = "turn.completed"
 EVT_TURN_FAILED = "turn.failed"
 EVT_TURN_INTERRUPTED = "turn.interrupted"

@@ -47,7 +47,7 @@ from service.service_harness.models.harness_entity import (
 from service.service_harness.services.harness_pubsub import (
     EVT_TEXT_DELTA, EVT_THINKING_DELTA, EVT_TOOL_COMPLETED, EVT_TOOL_STARTED,
     EVT_TURN_ARTIFACTS, EVT_TURN_COMPLETED, EVT_TURN_FAILED, EVT_TURN_INTERRUPTED,
-    publish_turn_event,
+    EVT_TURN_NUDGE, publish_turn_event,
 )
 # 帧协议说明：终态帧（turn.completed / turn.interrupted / turn.failed）在本文件
 # 里只有一个出口——run_harness_turn 收尾处。reply_stream 循环内不发终态帧
@@ -230,6 +230,31 @@ INTERRUPT_POLL_S = 1.0
 async def _publish(turn_id: str, event_type: str, payload: dict) -> None:
     """publish 的薄封装（worker 内统一出口，便于以后挂埋点）。"""
     await publish_turn_event(turn_id, event_type, payload)
+
+
+async def _publish_nudge_frame(turn_id: str, evt) -> bool:
+    """AutonomyGuard 的纠正提醒事件 → turn.nudge 帧；其余 hint 事件返回 False。
+
+    hint 事件不只闸门在发（运行时状态注入也发）：靠 source 认这条是谁塞的，
+    不是闸门的那类是内部校准信息，不进对话流。两条流水线（单智能体 / 编排）
+    共用这一处口径，免得实时帧在两处各自长出一套判定。
+
+    本帧不落库、不进回放（理由见 harness_pubsub 的 EVT_TURN_NUDGE 注释）。
+    """
+    # 局部 import：harness_middlewares 带 agentscope，不能在模块顶层拉
+    #（本文件 import 期只靠 common_* 与纯通道模块）
+    from service.service_harness.agent.harness_middlewares import NUDGE_SOURCE
+
+    if getattr(evt, "source", None) != NUDGE_SOURCE:
+        return False
+    meta = getattr(evt, "metadata", None) or {}
+    await _publish(turn_id, EVT_TURN_NUDGE, {
+        "text": evt.hint if isinstance(evt.hint, str) else "",
+        "nudge": meta.get("nudge"),
+        "maxNudges": meta.get("max_nudges"),
+        "unfinished": meta.get("unfinished"),
+    })
+    return True
 
 
 async def _run_with_stop_watch(turn_id: str, consume, poll_s: float = INTERRUPT_POLL_S) -> bool:
@@ -554,7 +579,7 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
     # 事件转换与累积都在 worker 完成（harness_pubsub 保持纯通道，不 import
     # agentscope——API 进程不装 agentscope 也能起服务）
     from agentscope.event import (
-        TextBlockDeltaEvent, ThinkingBlockDeltaEvent,
+        HintBlockEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent,
         ToolCallDeltaEvent, ToolCallEndEvent, ToolCallStartEvent,
     )
     from agentscope.message import UserMsg
@@ -675,6 +700,10 @@ async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                         if purpose:
                             payload["purpose"] = purpose
                         await _publish(turn_id, EVT_TOOL_COMPLETED, payload)
+                    elif isinstance(evt, HintBlockEvent):
+                        # 自主性闸门推它继续干活 → turn.nudge（前端可见的一行提醒）；
+                        # 其余来源的 hint（运行时状态注入）在这一步直接落空
+                        await _publish_nudge_frame(turn_id, evt)
                     # ReplyEndEvent 不发帧（终态帧唯一出口见模块头说明）；
                     # ToolResult* / *Start 事件 M1 也不发帧，落库素材不收
 

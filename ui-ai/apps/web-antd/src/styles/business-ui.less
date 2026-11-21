@@ -36,6 +36,52 @@
   }
 }
 
+/* FastCrud 列表页统一铺满内容区。
+   外框用布局实际测得的内容区高（--vben-content-height），这样列表卡片底边与
+   左侧菜单栏底边对齐到视口底部，不再因数据多少而长短不一。 */
+.fs-page.page-layout-card {
+  height: var(--vben-content-height, 100vh);
+  min-height: 0;
+
+  // fast-crud 默认只在 .fs-layout-card-body 一层才用 flex，上面
+  // .fs-crud-container / .fs-layout-card / .box / .inner / .body 全是自适应高度的
+  // block。这一串里任何一环不给确定高度，下面的 height:100% 就找不到参照、退回
+  // 内容高度——于是数据少时整张表只撑到几条那么高，卡片底部空一大截，看起来比
+  // 整高的左侧菜单栏矮。下面把从内容区一直到表体的每一环都拉成纵向 flex + min-height:0。
+  .fs-page-content,
+  .fs-crud-container,
+  .fs-layout-card,
+  .fs-layout-card > .box,
+  .fs-layout-card > .box > .inner,
+  .fs-layout-card > .box > .inner > .body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .fs-layout-card-body,
+  .fs-layout-card-body > .ant-card-body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  // crud 三段：搜索/操作/工具栏(header)与分页(footer)固定占位，表体吃掉剩余全部高度
+  .fs-crud-header,
+  .fs-crud-footer {
+    flex: none;
+  }
+
+  .fs-crud-table {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+    overflow: auto;
+  }
+}
+
 /* FastCrud 列表：搜索、操作、表格、分页形成明确的纵向节奏。 */
 .fs-crud-container {
   min-width: 0;
