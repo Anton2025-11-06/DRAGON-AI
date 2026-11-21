@@ -121,6 +121,27 @@ async def _sandbox_is_alive(workspace) -> bool:
     return str(getattr(status, "state", "") or "").lower() == "running"
 
 
+def _make_reconnect(manager, login_user: dict, session_id, skill_paths, backend):
+    """造一个「轮内重连」回调，挂到 backend 上供 build_toolkit 装 SandboxReconnect。
+
+    长任务轮内工具命中沙箱连接错误时，该回调重新走一遍 :func:`_attach`（内部探活
+    失败会 close 逐出缓存再 get，cache miss 走 _build_and_start 新建 / resume，拿到
+    一只确实在 running 的新 workspace），再把新沙箱句柄**原地换进旧 backend**——本轮
+    所有内置工具共享的就是这只旧 backend 对象（get_backend 返回缓存实例），换其
+    ``_sandbox`` / ``_workdir`` 即对全部工具生效，无需逐个改工具引用。返回 True 表示已换。
+    """
+    async def _reconnect() -> bool:
+        fresh = await _attach(manager, login_user, session_id, skill_paths)
+        fresh_backend = fresh.get_backend()
+        backend._sandbox = getattr(fresh_backend, "_sandbox", backend._sandbox)
+        backend._workdir = getattr(fresh_backend, "_workdir", backend._workdir)
+        log.info("harness 沙箱轮内重连完成: workspace_id={}",
+                 getattr(fresh, "workspace_id", ""))
+        return True
+
+    return _reconnect
+
+
 async def _attach(manager, login_user: dict, session_id, skill_paths) -> SandboxedWorkspaceBase:
     """在给定 manager 上取（并 initialize）当前用户的 workspace，按需种入技能。"""
     user_key = str(int(login_user.get("user_id") or 0))
@@ -164,6 +185,12 @@ async def _attach(manager, login_user: dict, session_id, skill_paths) -> Sandbox
     # 是否还在；已被删则视为未种入，走删+加重新注入。回查是一次 file_exists round-trip，
     # 远比无条件 delete+add_skill 省。单个技能种入失败只跳过并记 warning，不炸整轮对话。
     backend = workspace.get_backend()
+    # 轮内连接自愈：把「重新 attach（探活+逐出+重建）后原地换回本 backend 沙箱句柄」
+    # 的能力挂到 backend 上，供 build_toolkit 给内置沙箱工具装 SandboxReconnect 中间件。
+    # 长任务轮内沙箱被服务端回收时，工具命中连接错误即调它重连一次再重试，而不必整轮崩
+    # （详见 tools/sandbox_reconnect.py）。单智能体与编排流水线都走本函数，一处覆盖两条路径。
+    backend._harness_reconnect = _make_reconnect(
+        manager, login_user, session_id, skill_paths, backend)
     skills_root = workspace._skills_dir  # 框架属性：{workdir}/skills
     partition = backend.join_path(skills_root, AGENT_ID)
     seeded: dict[str, str] = getattr(workspace, "_harness_seeded_skills", None)

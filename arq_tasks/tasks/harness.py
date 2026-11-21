@@ -564,7 +564,7 @@ def _compose_user_message(message: str, attachments: list) -> str:
 async def _stream_reply(turn_id: str, login_user: dict, snapshot: dict,
                         model, workspace, mounted, *,
                         agent_id: str = None, system_prompt: str = None,
-                        agent_name: str = None, max_iters: int = 200) -> dict:
+                        agent_name: str = None, max_iters: int = 500) -> dict:
     """恢复 state → 组装 Agent → 跑一轮 reply_stream，返回累积结果。
 
     返回 dict：{status, content, thinking, tool_calls, error}——终态判定在

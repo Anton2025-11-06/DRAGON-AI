@@ -100,19 +100,34 @@ async def build_toolkit(workspace: Any, mounted_tools: list | None = None) -> To
     # LocalBackend，Bash/Read 等就在 worker 进程（本 app 镜像）里执行——表现为
     # ls /workspace 报 No such file、却能看见 /app 源码（工具根本没进沙箱）。
     backend = workspace.get_backend()
+    # 轮内连接自愈：_attach 已把重连回调挂在 backend 上（单智能体与编排流水线同源）。
+    # 取到就给每个内置沙箱工具装一层 SandboxReconnect（放最外层，包住实际执行）：
+    # 长任务轮内沙箱被服务端回收时，工具命中连接错误即重连一次再重试，而不必整轮崩。
+    # 取不到（未走 _attach 的调用方）则退回原口径，只装 purpose 剥离中间件。
+    reconnect = getattr(backend, "_harness_reconnect", None)
+    if reconnect is not None:
+        from service.service_harness.agent.tools.sandbox_reconnect import (
+            SandboxReconnect,
+        )
+
+        def _middlewares() -> list:
+            return [SandboxReconnect(backend, reconnect), *purpose_middlewares()]
+    else:
+        def _middlewares() -> list:
+            return purpose_middlewares()
     # 内置工具：backend + purpose 剥离中间件成对出现，少一个 middlewares 就会
     # 在模型填了 purpose 时直接报 TypeError（三桥在各自 call 里丢，不经这里）
     builtins = [
         # 文件读取与检索
-        Read(backend=backend, middlewares=purpose_middlewares()),
-        Glob(backend=backend, middlewares=purpose_middlewares()),
-        Grep(backend=backend, middlewares=purpose_middlewares()),
+        Read(backend=backend, middlewares=_middlewares()),
+        Glob(backend=backend, middlewares=_middlewares()),
+        Grep(backend=backend, middlewares=_middlewares()),
         # 文件写入与就地编辑
-        Write(backend=backend, middlewares=purpose_middlewares()),
-        Edit(backend=backend, middlewares=purpose_middlewares()),
+        Write(backend=backend, middlewares=_middlewares()),
+        Edit(backend=backend, middlewares=_middlewares()),
         # 命令执行
-        Bash(backend=backend, middlewares=purpose_middlewares()),
-        PowerShell(backend=backend, middlewares=purpose_middlewares()),
+        Bash(backend=backend, middlewares=_middlewares()),
+        PowerShell(backend=backend, middlewares=_middlewares()),
         # 多步任务的计划与跟踪
         TaskCreate(middlewares=purpose_middlewares()),
         TaskUpdate(middlewares=purpose_middlewares()),
