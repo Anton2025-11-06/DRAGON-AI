@@ -38,7 +38,8 @@ from common.common_mysql.mysql import mysql_client
 from service.service_rag.models.kb_entity import RagEvalItem, RagEvalRun
 from service.service_rag.schemas.rag_schema import RetrieveReq
 from service.service_rag.services import rag_settings as settings
-from service.service_rag.services.ragas_adapter import build_embeddings, build_judge_llm
+from service.service_rag.services.ragas_adapter import (
+    build_embeddings, build_judge_llm, build_relevancy_metric)
 from service.service_rag.services.rag_model import RagModelService
 from service.service_rag.services.retrieval_service import RagRetrievalService, qa_context
 
@@ -106,16 +107,20 @@ async def _recall_and_generate(run: RagEvalRun, item: RagEvalItem, login_user: d
 
 
 async def _score_samples(samples: list[dict], judge_config, embed_config) -> list[dict]:
-    """把问答对交给 ragas 打分（同步、自起事件循环，放 to_thread 里调）。
+    """把问答对交给 ragas 打分（走 ``aevaluate``，就跑在 worker 当前这个事件循环里）。
+
+    不是「同步接口另起一个 loop」：正因为同循环，指标里的 ``await`` 才能直接复用本仓绑在
+    主循环上的 httpx 连接池（见 ragas_adapter 里同步入口为何明确拒绝），也正因为同循环，
+    指标里任何**同步**发起的模型调用都会走到 NotImplementedError 上。
 
     返回与 ``samples`` 同序的指标字典列表。ragas 导入/接口异常在这里原样抛出，
-    由调用方兜成「指标全 NULL」而不是推翻整场评测。
+    由调用方兜成「指标全 NULL」而不是推翻整场评测。单个指标自己抛的异常 ragas 不会
+    往上送（Executor 吞成 np.nan 只打一行日志），所以一项失败不连带其余四项。
     """
     from ragas import aevaluate
     from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
     from ragas.metrics import (_AnswerCorrectness, _Faithfulness,
-                               _LLMContextPrecisionWithReference, _LLMContextRecall,
-                               _ResponseRelevancy)
+                               _LLMContextPrecisionWithReference, _LLMContextRecall)
 
     built = [SingleTurnSample(user_input=s["user_input"],
                               retrieved_contexts=s["retrieved_contexts"],
@@ -123,14 +128,39 @@ async def _score_samples(samples: list[dict], judge_config, embed_config) -> lis
                               reference=s.get("reference") or "")
              for s in samples]
     dataset = EvaluationDataset(samples=built)
-    metrics = [_Faithfulness(), _ResponseRelevancy(), _LLMContextPrecisionWithReference(),
-               _LLMContextRecall(), _AnswerCorrectness()]
+    # (指标对象, 本仓指标键) 成对声明：ragas 结果 DataFrame 的列键就是 metric.name
+    # （evaluation.py：``s[m.name] = ...``），而它和本仓常量并不同名——0.4.3 里
+    # _LLMContextPrecisionWithReference 的 name 是 llm_context_precision_with_reference，
+    # 按 EVAL_METRIC_CONTEXT_PRECISION 去取列会让精确率永远拿到 None（页面永远是「—」，
+    # 日志里一个错都不报）。键从对象上读，不写死名字，ragas 改名时至少不会静默错配。
+    wanted = [(_Faithfulness(), RC.EVAL_METRIC_FAITHFULNESS),
+              # 相关性用异步改写版：ragas 原指标同步调向量，在本仓的适配层上会被拒
+              (build_relevancy_metric(), RC.EVAL_METRIC_ANSWER_RELEVANCY),
+              (_LLMContextPrecisionWithReference(), RC.EVAL_METRIC_CONTEXT_PRECISION),
+              (_LLMContextRecall(), RC.EVAL_METRIC_CONTEXT_RECALL),
+              (_AnswerCorrectness(), RC.EVAL_METRIC_ANSWER_CORRECTNESS)]
+    metrics = [m for m, _ in wanted]
     llm = build_judge_llm(0, label="裁判模型", config=judge_config)
     embeddings = build_embeddings(0, label="相似度向量模型", config=embed_config)
     result = await aevaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings)
     # to_pandas 的行序与 dataset 一致；缺列（某指标整场没算出来）按 None 处理
+    key_of = {m.name: attr for m, attr in wanted}
     records = result.to_pandas().to_dict("records")
-    return [{m: rec.get(m) for m in _METRIC_ATTRS} for rec in records]
+    if records:
+        missing = [k for k in key_of if k not in records[0]]
+        if missing:
+            # 拿不到列就不是取名对不上（ragas 改过两次名），日志里留一句实际列名，
+            # 别再让页面只剩一个说不清为什么的「—」
+            log.warning("RAGAS 结果缺少指标列 {}（实际列：{}）", missing,
+                        list(records[0].keys()))
+    out: list[dict] = []
+    for rec in records:
+        row = {attr: None for attr in _METRIC_ATTRS}
+        for ragas_name, attr in key_of.items():
+            if ragas_name in rec:
+                row[attr] = rec[ragas_name]
+        out.append(row)
+    return out
 
 
 async def execute(run_id: int) -> None:
