@@ -247,6 +247,43 @@ class RagTaskService:
         return await RagTaskService._release(RC.kb_lock_key(kb_id), token)
 
     @staticmethod
+    async def doc_running(doc_id: int, status: Optional[str] = None,
+                          graph_state: Optional[int] = None) -> Optional[str]:
+        """这篇文档是否还有没跑完的任务：是则回一句人话原因，不是回 None。
+
+        API 侧重试/构建向量投递前拿它拦一下：在途文档再投的任务会在 worker 侧被
+        ``acquire_doc`` 跳过（锁正被上一轮任务持有），接口却回了「投递成功」，
+        页面白等一个永远不会跑的任务。判定按三条口径依次取第一个命中的：
+        1. ``status`` 处于未终态（``RC.DOC_STATUS_RUNNING_ALL``）：向量流水线已排队或正在跑
+           ——排队中还没拿锁的任务只有这条盖得住；
+        2. ``graph_state`` 为构建中：图谱流水线不改文档状态，只有这一列说话；
+        3. 文档锁还在：两条流水线共用的同一把锁，是「worker 正在跑」的权威兜底
+           （状态列没来得及流转的窗口靠它补）。
+        ``status``/``graph_state`` 没给时自己补查一次行，调用方不必重复写查询；
+        Redis 不可用时第三条直接跳过——权威口径在 MySQL，不因旁路断连拦下正常投递。
+        """
+        if status is None or graph_state is None:
+            async with maybe_session(None) as s:
+                row = (await s.execute(
+                    select(Document.status, Document.graph_state).where(
+                        Document.doc_id == int(doc_id)))).one_or_none()
+            if row is None:
+                return None
+            status, graph_state = row
+        if status in RC.DOC_STATUS_RUNNING_ALL:
+            return RC.DOC_STATUS_LABELS.get(status, "任务处理中")
+        if int(graph_state or 0) == RC.KG_STATE_BUILDING:
+            return RC.KG_STATE_LABELS[RC.KG_STATE_BUILDING]
+        raw = _raw_redis()
+        if raw is not None:
+            try:
+                if await raw.exists(RC.doc_lock_key(int(doc_id))):
+                    return "已有流水线任务正在执行"
+            except Exception as e:  # noqa: BLE001  读锁失败回落到状态列口径，不拦正常投递
+                log.warning(f"读文档流水线锁失败 doc={doc_id}: {e}")
+        return None
+
+    @staticmethod
     async def _acquire(key: str, ttl: int) -> Optional[str]:
         token = secrets.token_hex(8)
         got = await _must_redis().set(key, token, nx=True, ex=ttl)

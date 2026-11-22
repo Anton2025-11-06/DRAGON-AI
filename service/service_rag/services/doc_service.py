@@ -801,6 +801,9 @@ class RagDocService:
 
         重试一律带 ``retry=True``：arq 会保留已完成任务的结果一段时间，沿用旧 job_id
         会被判成重复投递静默跳过，页面表现就是「点了重试但状态一直不动」。
+        但也正因为换新号，arq 拦不住重复投递——在途文档（向量化或图谱构建中）
+        必须在这里先拒掉：投出去只会被 worker 的 ``acquire_doc`` 跳过，回执却报成功，
+        状态还会被「重新排队」的流转拧巴回去（卡在一个不会跑的任务上）。
         """
         ids = [int(d) for d in doc_ids if d]
         if not ids:
@@ -809,6 +812,13 @@ class RagDocService:
         for doc_id in ids:
             try:
                 doc = await RagDocService.require(login_user, doc_id, ACTION_REPARSE)
+                reason = await RagTaskService.doc_running(
+                    doc_id, doc.status, doc.graph_state)
+                if reason:
+                    items.append({"docId": doc_id, "fileName": doc.doc_name,
+                                  "taskId": None, "status": doc.status,
+                                  "message": f"该文档{reason}，请等当前任务结束后再试"})
+                    continue
                 kb = await RagDocService._kb_of(doc.kb_id)
                 task_id = await RagTaskService.enqueue_document(
                     doc_id, kb.kb_type, retry=True, sidecar=sidecar,
@@ -833,6 +843,9 @@ class RagDocService:
 
         给了 chunk_config/chunk_size 就先把配置写进库里（这一步卡 edit 并推版本号），
         没给就是「配置没变、重跑一次」；``reparse=True`` 时连解析一起重跑。
+
+        投递前先拦在途文档（向量化或图谱构建中）：这一步必须在清旧向量之前——
+        否则清了向量、任务却被 worker 的互斥锁跳过，文档直接停在「无向量可检索」上。
         """
         ids = [int(d) for d in (req.doc_ids or []) if d]
         if not ids:
@@ -843,12 +856,29 @@ class RagDocService:
                 login_user, kb_id, chunk_config=req.chunk_config,
                 chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap, session=session)
             rows = (await session.execute(
-                select(Document.doc_id, Document.doc_name).where(
+                select(Document.doc_id, Document.doc_name, Document.status,
+                       Document.graph_state).where(
                     Document.kb_id == int(kb_id), Document.doc_id.in_(ids),
                     Document.is_deleted == 0))).all()
         if not rows:
             raise ValueError("所选文档都不属于该知识库或已被删除")
-        targets = [int(r[0]) for r in rows]
+
+        # 在途的逐篇拒并给原因，没在途的才进后面的清理与投递（retry 内部同口径二次核对挡竞态）
+        targets: list[int] = []
+        busy_items: list[dict] = []
+        for doc_id, doc_name, status, graph_state in rows:
+            reason = await RagTaskService.doc_running(doc_id, status, graph_state)
+            if reason:
+                busy_items.append({"docId": int(doc_id), "fileName": doc_name,
+                                   "taskId": None, "status": status,
+                                   "message": f"该文档{reason}，请等当前任务结束后再试"})
+            else:
+                targets.append(int(doc_id))
+        if not targets:
+            shown = "；".join(f"{one['fileName'] or one['docId']}：{one['message']}"
+                              for one in busy_items[:3])
+            raise ValueError("所选文档都有任务在跑，暂不能构建向量（" + shown
+                             + (f"；等 {len(busy_items)} 篇" if len(busy_items) > 3 else "") + "）")
 
         # 旧向量清零：ES 删失败就中止（带着一半旧向量重跑比不跑更难解释）
         purged = 0
@@ -867,6 +897,9 @@ class RagDocService:
 
         sidecar = RC.RAG_SIDECAR_REPARSE if req.reparse else RC.RAG_SIDECAR_REUSE
         result = await RagDocService.retry(login_user, targets, sidecar=sidecar)
+        # 在途拒掉的篇目并进回执（accepted/rejected 跟着重算）：页面逐项能看到是哪篇、为什么没投
+        result["items"] = busy_items + result["items"]
+        result["rejected"] = int(result.get("rejected") or 0) + len(busy_items)
         result["sidecar"] = sidecar
         result["purged"] = purged
         result["kbId"] = int(kb.kb_id)

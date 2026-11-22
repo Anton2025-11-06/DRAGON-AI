@@ -405,6 +405,10 @@ DOC_STATUS_TRANSITIONS = {
     DOC_STATUS_PROCESSED: [DOC_STATUS_PENDING],   # 重新解析/重新分块
     DOC_STATUS_FAILED: [DOC_STATUS_PENDING],      # 失败重试
 }
+#   未终态（排队未被取走，或 worker 正在跑）：API 侧投递前用它拦重复投递。
+#   这些状态下再投的任务会被 worker 的 acquire_doc 跳过，页面却白等一个永远不会跑的任务
+DOC_STATUS_RUNNING_ALL = [DOC_STATUS_PENDING, DOC_STATUS_PARSING,
+                          DOC_STATUS_ANALYZING, DOC_STATUS_PROCESSING]
 
 # 图谱构建态（tb_document.graph_state：文档级后置任务，与解析状态机互不干涉）
 KG_STATE_NONE = 0

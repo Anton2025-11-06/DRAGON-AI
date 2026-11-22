@@ -185,10 +185,13 @@ async def build_vectors(request: Request, kb_id: int, body: BuildVectorReq):
 
     默认只吃已有解析产物（改分块配置最常见的操作不该重跑几百页 PDF 的解析）；
     ``reparse=true`` 时连解析一起重跑——换了引擎或预处理开关之后的正确姿势。
+    向量化或图谱构建中的文档直接拒投（投了也会被 worker 跳过），逐条原因见回执。
     """
     data = await RagDocService.build_vectors(await get_login_user(request), kb_id, body)
     return ApiResponse.success(data=data,
-                               message=f"已投递 {data.get('accepted', 0)} 个文档的构建向量任务")
+                               message=f"已投递 {data.get('accepted', 0)} 个文档的构建向量任务"
+                                       + (f"，{data.get('rejected', 0)} 个有任务在跑未投递"
+                                          if data.get("rejected") else ""))
 
 
 # ==================== 库内知识图谱（SPEC §7.6-2 手动触发） ====================

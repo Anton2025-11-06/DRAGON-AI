@@ -14,5 +14,12 @@ class DashscopeTextToText(TextToTextBase):
     default_model = "qwen-turbo"
 
     def _thinking_kwargs(self, thinking: bool) -> dict:
-        # 通义思考模式：仅推理类模型支持，且通常要求 stream=True
-        return {"extra_body": {"enable_thinking": True}} if thinking else {}
+        # 通义 Qwen3 混合推理模型（qwen-*-flash/plus-latest 等）在 OpenAI 兼容端上
+        # enable_thinking 默认就是 true：关闭态若不外发参数（旧写法会直接回 {}），非
+        # 流式调用就会把整段耗在思考上——图谱抽取这种内部调用从不传 thinking，
+        # 于是每批都撞满 120s 超时（j_failed 堆叠、全部文档图谱构建失败）。
+        # 按 supports_thinking 闸门双向外发：登记支持思考的模型开/关都显式传值，未登
+        # 记的老 qwen（不认 enable_thinking）一律不传，传了反而 400。
+        if not getattr(self.config, "supports_thinking", False):
+            return {}
+        return {"extra_body": {"enable_thinking": bool(thinking)}}
