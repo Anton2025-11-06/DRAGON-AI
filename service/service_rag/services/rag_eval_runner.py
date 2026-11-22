@@ -113,14 +113,20 @@ async def _score_samples(samples: list[dict], judge_config, embed_config) -> lis
     主循环上的 httpx 连接池（见 ragas_adapter 里同步入口为何明确拒绝），也正因为同循环，
     指标里任何**同步**发起的模型调用都会走到 NotImplementedError 上。
 
-    返回与 ``samples`` 同序的指标字典列表。ragas 导入/接口异常在这里原样抛出，
-    由调用方兜成「指标全 NULL」而不是推翻整场评测。单个指标自己抛的异常 ragas 不会
-    往上送（Executor 吞成 np.nan 只打一行日志），所以一项失败不连带其余四项。
+    返回与 ``samples`` 同序的指标字典列表（已经 _clean_score 归一，缺项为 None）。
+    ragas 导入/接口异常在这里原样抛出，由调用方兜成「指标全 NULL」而不是推翻整场评测。
+    单个指标自己抛的异常 ragas 不会往上送（Executor 吞成 np.nan 只打一行不带指标名的
+    Job[N] 日志），所以一项失败不连带其余四项，但也因而看不见——下面统一摊开说。
+
+    必须显式传 RunConfig：ragas 不传就用 ``RunConfig()``，其 timeout=180 是**逐任务**
+    （一行×一个指标）的硬顶，而 context_precision 内部对召回的每一片串行调一次裁判，
+    top_k 片就是 top_k 次——拿默认值时稍大一点的 top_k 或稍慢一点的裁判模型都会整列超时。
     """
     from ragas import aevaluate
     from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
     from ragas.metrics import (_AnswerCorrectness, _Faithfulness,
                                _LLMContextPrecisionWithReference, _LLMContextRecall)
+    from ragas.run_config import RunConfig
 
     built = [SingleTurnSample(user_input=s["user_input"],
                               retrieved_contexts=s["retrieved_contexts"],
@@ -142,7 +148,9 @@ async def _score_samples(samples: list[dict], judge_config, embed_config) -> lis
     metrics = [m for m, _ in wanted]
     llm = build_judge_llm(0, label="裁判模型", config=judge_config)
     embeddings = build_embeddings(0, label="相似度向量模型", config=embed_config)
-    result = await aevaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings)
+    result = await aevaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings,
+                             run_config=RunConfig(
+                                 timeout=max(1.0, float(RC.EVAL_SCORE_TIMEOUT))))
     # to_pandas 的行序与 dataset 一致；缺列（某指标整场没算出来）按 None 处理
     key_of = {m.name: attr for m, attr in wanted}
     records = result.to_pandas().to_dict("records")
@@ -158,8 +166,18 @@ async def _score_samples(samples: list[dict], judge_config, embed_config) -> lis
         row = {attr: None for attr in _METRIC_ATTRS}
         for ragas_name, attr in key_of.items():
             if ragas_name in rec:
-                row[attr] = rec[ragas_name]
+                row[attr] = _clean_score(rec[ragas_name])
         out.append(row)
+    # 把「哪一项在几行上没算出来」摊开说：ragas 只留一行 Job[N]，既不说是哪个指标
+    # 也不说为什么，页面上就只能看到一个无从查起的「—」
+    lost = {RC.EVAL_METRIC_LABELS[attr]: sum(1 for r in out if r[attr] is None)
+            for attr in _METRIC_ATTRS}
+    if any(lost.values()):
+        log.warning("RAGAS 打分缺项（共 {} 行）：{}；缺项多为单行打分超过 {}s 上限"
+                    "（裁判模型太慢、top_k 太大，或该模型登记了 supports_thinking 却没真关住思考）",
+                    len(out),
+                    "、".join(f"{name} 缺 {cnt} 行" for name, cnt in lost.items() if cnt),
+                    int(RC.EVAL_SCORE_TIMEOUT))
     return out
 
 

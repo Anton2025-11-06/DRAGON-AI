@@ -721,7 +721,15 @@ EVAL_METRIC_LABELS = {
 
 # 逐问答对并发（外层 asyncio.Semaphore：每对一次召回+一次生成；
 #   ragas 内部打分另有自己的并发，不在这一层控制）
-EVAL_CONCURRENCY = 10
+EVAL_CONCURRENCY = 5
+# 单个「一行×一个指标」的打分上限（传给 ragas RunConfig.timeout）。
+#   ragas 不传就用它自己的默认 180s，而那个默认是按“一次裁判调用”算的：
+#   context_precision 要对召回的每一片各调一次裁判且是串行循环（top_k 片就是
+#   top_k 次），一次慢调用就能把整行拖到上限外。超时后 ragas 只把该项置 NaN
+#   并打一行不带指标名的 Job[N] 日志，页面表现依旧是一个说不清为什么的「—」。
+#   给到 15 分钟：足够装下 top_k 上限内串行的裁判调用，又远小于 ragflow 的
+#   job_timeout（2 小时），不会把整场评测拖成无限等。
+EVAL_SCORE_TIMEOUT = 5400
 # run 的 job_id 幂等标识前缀（与 rag:job:{task}:{identity} 拼法一致，identity=run_id）
 EVAL_RUN_IDENTITY_PREFIX = "eval"
 
