@@ -17,6 +17,11 @@ const BASE_URL = '/api/system/user-groups';
 export interface UserGroupItem {
   create_time?: string;
   created_by?: number;
+  /**
+   * 创建人姓名：后端一次批量回表取好（组名不再全局唯一，靠这一列分清同名组）。
+   * 历史回填的 created_by=0、或创建人已被删时为 null，页面显示占位符。
+   */
+  creator_name?: null | string;
   description?: string;
   group_id: number;
   group_name: string;
@@ -37,10 +42,11 @@ export interface UserGroupMemberItem {
 }
 
 /**
- * 成员候选：GET /api/system/user-groups/member-candidates（按数据范围过滤）
+ * 成员候选：GET /api/system/user-groups/member-candidates（除管理员账号外不做筛人）
  *
  * 后端逐列下发 姓名/账号/部门，并且已经按调用者身份把系统管理员账号藏掉了
  * （非 ADMIN 搜不到也选不到），所以这里不要再拿 label 回拆字段。
+ * 部门与数据范围不参与筛选：建组的协作对象常在别的部门。
  */
 export interface UserCandidate {
   dept_name?: null | string;

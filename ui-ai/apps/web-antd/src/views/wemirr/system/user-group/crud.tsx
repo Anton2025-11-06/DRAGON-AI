@@ -57,6 +57,8 @@ export default function crud(
               await member.openMemberModal({
                 groupId: row.group_id,
                 groupName: row.group_name,
+                // 同名组在弹窗标题上也要分得开，不能只靠列表那一列
+                creatorName: row.creator_name ?? undefined,
               });
             },
           },
@@ -75,6 +77,14 @@ export default function crud(
               { min: 1, max: 64, message: '长度在 1 到 64 个字符' },
             ],
           },
+        },
+        creator_name: {
+          title: '创建人',
+          type: 'text',
+          column: { width: 140 },
+          // 只读展示列：姓名由后端一次批量取回，表单里没有这一项。统一都显示：
+          // 普通用户那侧每行都是他自己，ADMIN 那侧靠这一列分清多个同名组
+          form: { show: false },
         },
         member_count: {
           title: '成员数',

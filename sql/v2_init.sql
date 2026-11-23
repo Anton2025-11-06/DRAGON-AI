@@ -165,7 +165,9 @@ CREATE TABLE IF NOT EXISTS `tb_user_group` (
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`group_id`),
-    UNIQUE KEY `uk_group_name` (`group_name`)
+    -- 组名只在同一个创建人名下唯一：不同人可以建同名组（与 tb_orch_* 那类「个人名下命名」同思路）。
+    -- 代码侧判重口径必须跟这里一致（同样不看 is_deleted），见 usergroup_service._name_taken
+    UNIQUE KEY `uk_group_name` (`created_by`, `group_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户组表（ACL 授权主体）';
 
 -- 1.8 用户组成员表（一行一个成员，一人可属多个组）

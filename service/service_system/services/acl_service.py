@@ -129,18 +129,18 @@ class AclService:
 
     @staticmethod
     async def grantee_options(grantee_type: int, keyword: str = None, limit: int = 20,
-                              login_user: dict = None) -> list[dict]:
+                              login_user: dict = None, apply_data_scope: bool = True) -> list[dict]:
         """授权主体候选（用户/角色/部门/用户组）。全员不用检索，固定返回一条。
 
-        用户候选按数据范围过滤：能授权不等于能翻全公司通讯录；按 id 直填仍然支持，
-        保存时会重新校验存在性，所以这里少给不会造成越权，只会影响可发现性。
+        apply_data_scope 只作用在用户候选上，默认按数据范围过滤（能授权不等于能翻
+        全公司通讯录）。用户组加成员那个口显式传 False：建组是把人拉进同一个项目，
+        协作对象常在别的部门，按组织范围筛会让人找不到人。
 
-        三条隐藏口径都只落在「候选列表」这一侧，存在性校验与在册回显（_grantee_names）
+        隐藏口径都只落在「候选列表」这一侧，存在性校验与在册回显（_grantee_names）
         刻意不动 —— 已经授给管理员、或授给别人的那个组的行，仍然要能回显出名字，
-        否则授权列表会凭空少一片。少给只在「新授权时找不到人」这一件事上生效：
-        - 用户：非 ADMIN 看不到管理员账号（谁握着管理员身份本身就是敏感信息）；
-        - 用户：检索命中 姓名/账号/部门 三列，并逐列下发字段，选人时「技术部那个谁」
-          比记住对方登录名常见得多；
+        否则授权列表会凭空少一片：
+        - 用户：非 ADMIN 看不到管理员账号（谁握着管理员身份本身就是敏感信息），
+          除此之外不做其它筛人；检索命中 姓名/账号/部门 三列并逐列下发字段；
         - 用户组：只列自己创建的，与用户组列表页同口径（组不共享）。
         """
         limit = max(1, min(int(limit or 20), 100))
@@ -151,7 +151,7 @@ class AclService:
                 query = select(User.user_id, User.username, User.real_name, Dept.dept_name) \
                     .outerjoin(Dept, Dept.dept_id == User.dept_id) \
                     .where(User.is_deleted == 0)
-                if login_user is not None:
+                if apply_data_scope and login_user is not None:
                     scope_filter = build_data_scope_filter(login_user, User.created_by)
                     if scope_filter is not None:
                         query = query.where(scope_filter)
@@ -189,8 +189,10 @@ class AclService:
                 return [{"grantee_id": r[0], "grantee_name": r[1], "label": r[1]}
                         for r in rows.all()]
             if grantee_type == GRANTEE_GROUP:
-                query = select(UserGroup.group_id, UserGroup.group_name, UserGroup.description) \
-                    .where(UserGroup.is_deleted == 0, UserGroup.status == 1)
+                query = (select(UserGroup.group_id, UserGroup.group_name, UserGroup.description,
+                                User.real_name, User.username)
+                         .outerjoin(User, User.user_id == UserGroup.created_by)
+                         .where(UserGroup.is_deleted == 0, UserGroup.status == 1))
                 if hidden:
                     # 用户组不共享：别人的组连「存在」都不对外可见。必须在这一侧一起收，
                     # 否则列表页按 created_by 藏好了、授权弹窗又把它整个列出来，等于换个口
@@ -200,8 +202,18 @@ class AclService:
                 if like:
                     query = query.where(UserGroup.group_name.like(like))
                 rows = await session.execute(query.order_by(UserGroup.group_id).limit(limit))
-                return [{"grantee_id": r[0], "grantee_name": r[1],
-                         "label": r[1] + (f" · {r[2]}" if r[2] else "")} for r in rows.all()]
+                # 组名只在各自名下唯一：ADMIN 这一侧不按 created_by 过滤，不同人建的
+                # 同名组会并排落在同一个下拉里，标签上不带上是谁建的，授错了人看不出来。
+                # 非 ADMIN 只看自己建的组，那一档里名字天然不重复，不必多加这层噪音
+                options = []
+                for r in rows.all():
+                    creator = None if hidden else (r[3] or r[4])
+                    options.append({
+                        "grantee_id": r[0], "grantee_name": r[1],
+                        "label": "{}{}{}".format(
+                            r[1], f"（{creator}）" if creator else "",
+                            f" · {r[2]}" if r[2] else "")})
+                return options
             if grantee_type == GRANTEE_ALL:
                 return [{"grantee_id": 0, "grantee_name": "全员", "label": "全员"}]
         raise ValueError(f"不支持的授权主体类型：{grantee_type}")

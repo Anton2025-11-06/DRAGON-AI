@@ -31,7 +31,7 @@ async def all_user_groups(request: Request):
     return ApiResponse.success(data=await UserGroupService.list_all_groups(login_user))
 
 
-@router.get("/user-groups/member-candidates", summary="成员候选用户（按数据范围过滤）")
+@router.get("/user-groups/member-candidates", summary="成员候选用户（除管理员外全员）")
 @has_permission("system:usergroup:list")
 async def user_group_member_candidates(
         request: Request,
@@ -39,7 +39,9 @@ async def user_group_member_candidates(
         limit: int = Query(100, ge=1, le=100, description="返回条数，默认 100 条")):
     """有成员维护权就能选人，不另外要求 system:user:list（见 service 层注释）
 
-    非 ADMIN 的候选里不会出现系统管理员账号（与 /acl/grantees 同口径，见 acl_service）。
+    默认返回 100 条，可按 姓名/账号/部门 模糊检索，结果逐列带上这三项。
+    唯一的筛人条件：非 ADMIN 拿不到系统管理员账号（与 /acl/grantees 同口径），
+    部门与数据范围不参与筛选。
     """
     login_user = await get_login_user(request)
     return ApiResponse.success(data=await UserGroupService.member_candidates(
@@ -75,9 +77,10 @@ async def update_user_group(request: Request, group_id: int, body: UserGroupUpda
     return ApiResponse.success("更新成功")
 
 
-@router.delete("/user-groups/{group_id}", summary="删除用户组（连带撤销指向该组的授权）")
+@router.delete("/user-groups/{group_id}", summary="删除用户组（物理删行，连带撤销指向该组的授权）")
 @has_permission("system:usergroup:delete")
 async def delete_user_group(request: Request, group_id: int):
+    """物理删除：名字当场释放，同一个组名下次还能再用（不再报「含已删除的用户组」）"""
     login_user = await get_login_user(request)
     data = await UserGroupService.delete_group(group_id, login_user)
     return ApiResponse.success(data=data, message="删除成功")

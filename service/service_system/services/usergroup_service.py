@@ -30,7 +30,7 @@ class UserGroupService:
                           status: int = None, login_user: dict = None):
         """用户组分页列表：只列自己创建的（ADMIN 看全部）
 
-        附带成员数（一次 group by 批量取，不逐行数），供列表页直接展示。
+        附带成员数（一次 group by 批量取，不逐行数）与创建人姓名，供列表页直接展示。
 
         这里刻意不走 build_data_scope_filter：那套口径会把「同部门同事创建的」也放进来，
         而用户组定位是个人协作分组，组成员名单本身就是「谁在跟谁合作项目」的信息，
@@ -53,17 +53,30 @@ class UserGroupService:
                 .offset((page - 1) * page_size).limit(page_size))).scalars().all()
 
             counts = {}
+            creators: dict[int, str] = {}
             if rows:
                 count_rows = await session.execute(
                     select(UserGroupMember.group_id, func.count())
                     .where(UserGroupMember.group_id.in_([g.group_id for g in rows]))
                     .group_by(UserGroupMember.group_id))
                 counts = {g: c for g, c in count_rows.all()}
+                # 创建人姓名也一次批量取：组名不再全局唯一，ADMIN 那一侧会同时看到
+                # 好几个同名组，光有 group_id 分不出谁是谁；逐行回表就把一页变成 N+1
+                from common.common_entity.user_entity import User  # 延迟导入避免循环
+                owner_ids = sorted({int(g.created_by or 0) for g in rows} - {0})
+                if owner_ids:
+                    name_rows = await session.execute(
+                        select(User.user_id, User.username, User.real_name)
+                        .where(User.user_id.in_(owner_ids)))
+                    creators = {r[0]: (r[2] or r[1]) for r in name_rows.all()}
 
             items = [{"group_id": g.group_id, "group_name": g.group_name,
                       "description": g.description, "status": g.status,
                       "member_count": counts.get(g.group_id, 0),
                       "created_by": g.created_by,
+                      # 取不到人（历史回填的 created_by=0，或创建人已被删）就给 None，
+                      # 让页面显示占位符，不编一个假名字出来
+                      "creator_name": creators.get(int(g.created_by or 0)),
                       "create_time": g.create_time, "update_time": g.update_time}
                      for g in rows]
             return {"total": total, "items": items}
@@ -117,20 +130,26 @@ class UserGroupService:
     @staticmethod
     async def member_candidates(keyword: str = None, limit: int = 100,
                                login_user: dict = None) -> list:
-        """成员候选用户（按数据范围过滤）：供用户组页的选人控件用。
+        """成员候选用户：除系统管理员账号外不做其它筛人，供用户组页的选人控件用。
+
+        不走数据范围过滤（grantee_options 的 apply_data_scope 显式传 False）：建组就
+        是把人拉进同一个项目，协作对象常在别的部门，按组织范围筛会让人找不到人。
+        唯一的限制是管理员账号不出现在这里，而且写入侧也挡一道（见 assign_members）：
+        否则手造一个 user_ids=[管理员] 就能把看不见的人塞进组，再靠下面的成员列表
+        把他的姓名/账号/部门读出来。
 
         默认给到 100 条（grantee_options 那一侧的上限也就是 100）：选人控件开弹时
         先递一批可点的，而不是空列表等关键字 —— 0 条和「坏了」在界面上分不开。
 
-        为什么不自己写一份 select(User...)：「这个人能看到哪些用户」的口径
-        （is_deleted=0 + 数据范围 + 藏管理员账号 + 姓名/账号/部门检索）在
-        AclService.grantee_options 里已经定了，两处各查一遍早晚分叉；也不让前端直接
-        调 /users 列表：那个接口卡的是 system:user:list，有成员维护权的人不该被
-        通讯录权限卡住。
+        为什么不自己写一份 select(User...)：检索口径（姓名/账号/部门）、逐列下发的
+        字段名与管理员识别都在 AclService.grantee_options 里定了，两处各查一遍早晚
+        分叉；也不让前端直接调 /users 列表：那个接口卡的是 system:user:list，
+        有成员维护权的人不该被通讯录权限卡住。
         """
         from service.service_system.services.acl_service import AclService  # 延迟导入避开相互引用
 
-        rows = await AclService.grantee_options(GRANTEE_USER, keyword, limit, login_user=login_user)
+        rows = await AclService.grantee_options(GRANTEE_USER, keyword, limit,
+                                                login_user=login_user, apply_data_scope=False)
         # 逐列下发姓名/账号/部门：前端拼选项标签不该再从 label 里回拆字串
         return [{"user_id": r["grantee_id"], "username": r.get("username"),
                  "real_name": r.get("real_name"), "dept_name": r.get("dept_name"),
@@ -139,10 +158,10 @@ class UserGroupService:
     # ==================== 写入 ====================
     @staticmethod
     async def create_group(request, creator_id: int = 0):
-        """新建用户组：名称全局唯一（唯一键 uk_group_name 不区分软删，故连已删行一起判）"""
+        """新建用户组：组名只在创建人自己名下查重，别人建的同名组不算占用"""
         async with mysql_client.get_session() as session:
-            if await UserGroupService._name_taken(session, request.group_name):
-                raise ValueError("用户组名称已存在（含已删除的用户组，请换个名称）")
+            if await UserGroupService._name_taken(session, request.group_name, creator_id or 0):
+                raise ValueError("用户组名称已存在")
             session.add(UserGroup(group_name=request.group_name,
                                   description=request.description,
                                   status=request.status,
@@ -153,7 +172,7 @@ class UserGroupService:
                 # 并发双击创建会穿过上面的判重撞唯一键，这里必须转成可读文案而非 500
                 await session.rollback()
                 log.error(f"UserGroup create conflict: {str(e)}")
-                raise ValueError("用户组名称已存在（含已删除的用户组，请换个名称）")
+                raise ValueError("用户组名称已存在")
             log.info(f"UserGroup created: {request.group_name}")
             return True
 
@@ -164,8 +183,12 @@ class UserGroupService:
             group = await UserGroupService._get_group_or_raise(session, group_id, login_user)
             data = {k: v for k, v in request.model_dump().items() if v is not None}
             if "group_name" in data and data["group_name"] != group.group_name:
-                if await UserGroupService._name_taken(session, data["group_name"], exclude_id=group_id):
-                    raise ValueError("用户组名称已存在（含已删除的用户组，请换个名称）")
+                # 拿组上的 created_by、不拿操作人：ADMIN 改名别人的组时，要查的是
+                # 「那个人的组里有没有重名」，跟 ADMIN 自己名下有什么组无关
+                if await UserGroupService._name_taken(session, data["group_name"],
+                                                     int(group.created_by or 0),
+                                                     exclude_id=group_id):
+                    raise ValueError("用户组名称已存在")
             if data:
                 await session.execute(update(UserGroup).where(UserGroup.group_id == group_id)
                                       .values(**data))
@@ -174,12 +197,17 @@ class UserGroupService:
 
     @staticmethod
     async def delete_group(group_id: int, login_user: dict):
-        """删除用户组：软删组 + 清成员 + 撤销指向该组的授权行（三件事必须同事务）"""
+        """删除用户组：物理删组 + 清成员 + 撤销指向该组的授权行（三件事必须同事务）
+
+        物理删而不是软删：uk_group_name 不认 is_deleted，软删过的名字会一直占着，
+        删一个组还要连带告诉用户「这个名字以后都不能用了」，既没必要也解释不清。
+        授权行（tb_resource_acl）仍按原样软删：那里的 is_deleted 是全平台一致的
+        「撤销」语义，且现有授权列表要能回显出被撤销的行，不能连痕迹一起抹掉。
+        """
         operator_id = int(login_user.get("user_id") or 0)
         async with mysql_client.get_session() as session:
             await UserGroupService._get_group_or_raise(session, group_id, login_user)
-            await session.execute(update(UserGroup).where(UserGroup.group_id == group_id)
-                                  .values(is_deleted=1))
+            await session.execute(delete(UserGroup).where(UserGroup.group_id == group_id))
             await session.execute(delete(UserGroupMember).where(UserGroupMember.group_id == group_id))
             revoked = (await session.execute(
                 update(ResourceAcl)
@@ -255,9 +283,19 @@ class UserGroupService:
         return group
 
     @staticmethod
-    async def _name_taken(session, group_name: str, exclude_id: int = 0) -> bool:
-        """名称占用判断：不带 is_deleted 条件 —— 唯一键本身不区分软删，判重口径必须一致"""
-        query = select(UserGroup.group_id).where(UserGroup.group_name == group_name)
+    async def _name_taken(session, group_name: str, created_by: int, exclude_id: int = 0) -> bool:
+        """名称占用判断：只在同一个创建人的组里比，别人建的同名组不算占用
+
+        created_by 这一列不是可选项：唯一键 uk_group_name 是 (created_by, group_name)，
+        只按名字比会把别人的组算成占用，界面上一句「名称已存在」背后其实那个人与你无关。
+        同理不拿 created_by 当可选参数：默认「不限人」就是回到全局判重那个错口径。
+
+        不带 is_deleted 条件 —— 与唯一键口径一致（它也不分软删），否则会出现
+        「代码说没占、INSERT 撞键」；组现在物理删，库里不该再有待软删的行，
+        历史遗留由 sql/user_group_upgrade.sql 清掉。
+        """
+        query = select(UserGroup.group_id).where(UserGroup.group_name == group_name,
+                                                UserGroup.created_by == created_by)
         if exclude_id:
             query = query.where(UserGroup.group_id != exclude_id)
         return (await session.execute(query.limit(1))).first() is not None

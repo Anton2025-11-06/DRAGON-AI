@@ -10,7 +10,8 @@
  * 这句话不写出来，运维就会被「我明明加进去了为什么看不到那个知识库」的工单淹没。
  *
  * 还有一件事不在这一层定：候选名单里看不到某个同事，不是接口坏了也不是分页丢了，
- * 而是后端按数据范围过滤、并且对非 ADMIN 藏起了系统管理员账号（见 acl_service）。
+ * 而是后端对非 ADMIN 藏起了系统管理员账号（见 acl_service）；除此之外不做筛人，
+ * 部门和数据范围都不参与，跨部门协作的人照常能搜到。
  * 这一层不自己拼 姓名/账号/部门，直接用后端下发的 label，免得两边口径分叉。
  */
 import type { UserCandidate, UserGroupMemberItem } from './api';
@@ -26,12 +27,21 @@ const loading = ref(false);
 const saving = ref(false);
 const groupId = ref<number>(0);
 const groupName = ref('');
+/** 同名组现在允许存在（组名只在创建人自己名下唯一），标题要带上人才能分得清 */
+const creatorName = ref('');
 /** 在册成员（进弹窗时拉一次，作为展示基线） */
 const members = ref<UserGroupMemberItem[]>([]);
 /** 最终成员集合：选择框绑它，保存提交它 */
 const pickedIds = ref<number[]>([]);
 /** 搜索到的候选攒下来：否则翻页搜索后，之前选中的 id 会退回显示成裸数字 */
 const cache = ref<UserCandidate[]>([]);
+
+/** 拿不到创建人就退回只显示组名，不给标题里多带一对空括号 */
+const modalTitle = computed(() =>
+  creatorName.value
+    ? `成员维护 - ${groupName.value}（${creatorName.value}）`
+    : `成员维护 - ${groupName.value}`,
+);
 
 const columns = [
   { dataIndex: 'real_name', key: 'real_name', title: '姓名', width: 120 },
@@ -79,9 +89,14 @@ function dedupe(list: UserCandidate[]) {
   });
 }
 
-async function openModal(row: { groupId: number; groupName?: string }) {
+async function openModal(row: {
+  creatorName?: string;
+  groupId: number;
+  groupName?: string;
+}) {
   groupId.value = row.groupId;
   groupName.value = row.groupName ?? '';
+  creatorName.value = row.creatorName ?? '';
   cache.value = [];
   visible.value = true;
   loading.value = true;
@@ -118,7 +133,7 @@ defineExpose({ open: openModal });
   <a-modal
     v-model:open="visible"
     :confirm-loading="saving"
-    :title="`成员维护 - ${groupName}`"
+    :title="modalTitle"
     width="760px"
     @ok="handleSave"
   >
@@ -165,9 +180,7 @@ defineExpose({ open: openModal });
               将移除
             </a-tag>
             <a-tag
-              v-if="
-                record.status === 1 && pickedIds.includes(record.user_id)
-              "
+              v-if="record.status === 1 && pickedIds.includes(record.user_id)"
               color="success"
             >
               在册
