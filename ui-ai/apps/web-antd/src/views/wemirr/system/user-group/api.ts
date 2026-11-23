@@ -7,6 +7,10 @@ const BASE_URL = '/api/system/user-groups';
  *
  * 定位与后端一致：用户组只是「资源 ACL 的一类授权主体」，本页面只管组织事实
  * （组名、启停、成员）；给组授什么权限在资源列表页的授权弹窗里做。
+ *
+ * 可见范围与后端同口径：列表只回自己创建的组，改/删/成员四个口后端还卡归属
+ * （ADMIN 除外）。所以进到这一页的操作都是在自己建的组上，不要拿
+ * group_id 去碰别人的组 —— 只会收到一句「只能操作自己创建的用户组」。
  */
 
 /** 列表行：GET /api/system/user-groups → {total, items} */
@@ -32,11 +36,18 @@ export interface UserGroupMemberItem {
   username: string;
 }
 
-/** 成员候选：GET /api/system/user-groups/member-candidates（按数据范围过滤） */
+/**
+ * 成员候选：GET /api/system/user-groups/member-candidates（按数据范围过滤）
+ *
+ * 后端逐列下发 姓名/账号/部门，并且已经按调用者身份把系统管理员账号藏掉了
+ * （非 ADMIN 搜不到也选不到），所以这里不要再拿 label 回拆字段。
+ */
 export interface UserCandidate {
+  dept_name?: null | string;
   label: string;
-  real_name: string;
+  real_name?: null | string;
   user_id: number;
+  username?: string;
 }
 
 /** 分页查询（page / page_size 由 fast-crud 的 transformQuery 统一给出） */
@@ -77,9 +88,13 @@ export function AssignMembers(groupId: number | string, user_ids: number[]) {
   );
 }
 
-/** 成员候选用户：不要求 system:user:list，有成员维护权就能选人 */
+/**
+ * 成员候选用户：不要求 system:user:list，有成员维护权就能选人。
+ *
+ * 默认 100 条（后端上限也是 100）：开弹窗就给人一批可点的，0 条和接口坏了在界面上分不开。
+ */
 export function GetMemberCandidates(keyword?: string) {
   return defHttp.get<UserCandidate[]>(`${BASE_URL}/member-candidates`, {
-    params: { keyword: keyword || undefined, limit: 50 },
+    params: { keyword: keyword || undefined, limit: 100 },
   });
 }

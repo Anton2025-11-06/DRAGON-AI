@@ -8,6 +8,10 @@
  * 必须让操作者知道的一件事：成员变化不即时生效。登录载荷里的 group_ids 是登录时
  * 算好的（与角色/部门同口径），所以刚加进组的人要下次登录才拿到该组已授予的权限。
  * 这句话不写出来，运维就会被「我明明加进去了为什么看不到那个知识库」的工单淹没。
+ *
+ * 还有一件事不在这一层定：候选名单里看不到某个同事，不是接口坏了也不是分页丢了，
+ * 而是后端按数据范围过滤、并且对非 ADMIN 藏起了系统管理员账号（见 acl_service）。
+ * 这一层不自己拼 姓名/账号/部门，直接用后端下发的 label，免得两边口径分叉。
  */
 import type { UserCandidate, UserGroupMemberItem } from './api';
 
@@ -118,7 +122,9 @@ defineExpose({ open: openModal });
     width="760px"
     @ok="handleSave"
   >
-    <div class="pick-label">选择成员（可输入姓名或账号搜索，空集合即清空该组）</div>
+    <div class="pick-label">
+      选择成员（默认列出 100 人，可按姓名/账号/部门模糊搜索；空集合即清空该组）
+    </div>
 
     <a-select
       v-model:value="pickedIds"
@@ -126,7 +132,7 @@ defineExpose({ open: openModal });
       :loading="loading"
       :options="selectOptions"
       mode="multiple"
-      placeholder="输入关键字搜索用户"
+      placeholder="输入姓名、账号或部门搜索用户"
       style="width: 100%"
       @search="(kw: string) => fetchCandidates(kw)"
     />

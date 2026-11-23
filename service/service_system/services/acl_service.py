@@ -23,7 +23,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from common.common_entity.rbac_entity import Dept, ResourceAcl, Role, UserGroup
+from common.common_entity.rbac_entity import Dept, ResourceAcl, Role, UserGroup, UserRole
 from common.common_entity.user_entity import User
 from common.common_exception.custom_exception import UnauthorizedException
 from common.common_log.log_init import log
@@ -134,9 +134,18 @@ class AclService:
 
         用户候选按数据范围过滤：能授权不等于能翻全公司通讯录；按 id 直填仍然支持，
         保存时会重新校验存在性，所以这里少给不会造成越权，只会影响可发现性。
+
+        三条隐藏口径都只落在「候选列表」这一侧，存在性校验与在册回显（_grantee_names）
+        刻意不动 —— 已经授给管理员、或授给别人的那个组的行，仍然要能回显出名字，
+        否则授权列表会凭空少一片。少给只在「新授权时找不到人」这一件事上生效：
+        - 用户：非 ADMIN 看不到管理员账号（谁握着管理员身份本身就是敏感信息）；
+        - 用户：检索命中 姓名/账号/部门 三列，并逐列下发字段，选人时「技术部那个谁」
+          比记住对方登录名常见得多；
+        - 用户组：只列自己创建的，与用户组列表页同口径（组不共享）。
         """
         limit = max(1, min(int(limit or 20), 100))
         like = f"%{keyword}%" if keyword else None
+        hidden = login_user is not None and not is_admin(login_user)
         async with mysql_client.get_session() as session:
             if grantee_type == GRANTEE_USER:
                 query = select(User.user_id, User.username, User.real_name, Dept.dept_name) \
@@ -146,10 +155,21 @@ class AclService:
                     scope_filter = build_data_scope_filter(login_user, User.created_by)
                     if scope_filter is not None:
                         query = query.where(scope_filter)
+                if hidden:
+                    # tb_user 没有 is_admin 列，管理员身份只由 ADMIN 角色决定
+                    # （与 permission.is_admin 同源），所以按角色表反查排除，
+                    # 不去硬编码 user_id=1 那种「一号管理员」假设
+                    query = query.where(User.user_id.notin_(
+                        select(UserRole.user_id)
+                        .join(Role, Role.role_id == UserRole.role_id)
+                        .where(Role.role_code == "ADMIN", Role.is_deleted == 0,
+                               Role.status == 1).scalar_subquery()))
                 if like:
-                    query = query.where(or_(User.username.like(like), User.real_name.like(like)))
+                    query = query.where(or_(User.username.like(like), User.real_name.like(like),
+                                            Dept.dept_name.like(like)))
                 rows = await session.execute(query.order_by(User.user_id).limit(limit))
-                return [{"grantee_id": r[0], "grantee_name": r[2] or r[1],
+                return [{"grantee_id": r[0], "username": r[1], "real_name": r[2],
+                         "dept_name": r[3], "grantee_name": r[2] or r[1],
                          "label": "{}（{}）{}".format(r[2] or r[1], r[1], f" · {r[3]}" if r[3] else "")}
                         for r in rows.all()]
             if grantee_type == GRANTEE_ROLE:
@@ -171,6 +191,12 @@ class AclService:
             if grantee_type == GRANTEE_GROUP:
                 query = select(UserGroup.group_id, UserGroup.group_name, UserGroup.description) \
                     .where(UserGroup.is_deleted == 0, UserGroup.status == 1)
+                if hidden:
+                    # 用户组不共享：别人的组连「存在」都不对外可见。必须在这一侧一起收，
+                    # 否则列表页按 created_by 藏好了、授权弹窗又把它整个列出来，等于换个口
+                    # 把私有组名单摊给全公司看（口径见 usergroup_service.list_groups）
+                    query = query.where(
+                        UserGroup.created_by == int(login_user.get("user_id") or 0))
                 if like:
                     query = query.where(UserGroup.group_name.like(like))
                 rows = await session.execute(query.order_by(UserGroup.group_id).limit(limit))

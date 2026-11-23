@@ -3,6 +3,10 @@
 用户组是资源 ACL 的一类授权主体（grantee_type=4），但本模块只管组织事实：
 组名、启停、成员。谁能把资源授给某个组，是 acl_router 的事（share 判定）。
 权限点 system:usergroup:list|add|edit|delete|member 见 sql/v2_init.sql PART 8。
+
+可见范围：组是创建人的私有对象，列表只列自己创建的，改/删/看成员/设成员四个口
+都卡归属（ADMIN 豁免）。因此每个按 group_id 寻址的口都要把 login_user 传下去，
+漏一个就等于只做了展示层的遮挡。
 """
 from fastapi import APIRouter, Query, Request
 
@@ -17,18 +21,26 @@ router = APIRouter(tags=["用户组"])
 
 # ==================== 下拉与候选（固定段必须声明在 {group_id} 之前） ====================
 @router.get("/user-groups/all", summary="启用中的用户组（下拉框）")
-async def all_user_groups():
-    """授权弹窗的主体候选走 /acl/grantees，这份给「成员维护」等页内下拉用"""
-    return ApiResponse.success(data=await UserGroupService.list_all_groups())
+async def all_user_groups(request: Request):
+    """授权弹窗的主体候选走 /acl/grantees，这份给「成员维护」等页内下拉用
+
+    只要求登录、不卡权限点（页内下拉未必落在某个菜单上），但必须按人过滤：
+    非 ADMIN 只拿得到自己创建的组。
+    """
+    login_user = await get_login_user(request)
+    return ApiResponse.success(data=await UserGroupService.list_all_groups(login_user))
 
 
 @router.get("/user-groups/member-candidates", summary="成员候选用户（按数据范围过滤）")
 @has_permission("system:usergroup:list")
 async def user_group_member_candidates(
         request: Request,
-        keyword: str = Query(None, max_length=64, description="姓名/登录名模糊查询"),
-        limit: int = Query(50, ge=1, le=100, description="返回条数")):
-    """有成员维护权就能选人，不另外要求 system:user:list（见 service 层注释）"""
+        keyword: str = Query(None, max_length=64, description="姓名/账号/部门模糊查询"),
+        limit: int = Query(100, ge=1, le=100, description="返回条数，默认 100 条")):
+    """有成员维护权就能选人，不另外要求 system:user:list（见 service 层注释）
+
+    非 ADMIN 的候选里不会出现系统管理员账号（与 /acl/grantees 同口径，见 acl_service）。
+    """
     login_user = await get_login_user(request)
     return ApiResponse.success(data=await UserGroupService.member_candidates(
         keyword, limit, login_user=login_user))
@@ -58,7 +70,8 @@ async def create_user_group(request: Request, body: UserGroupCreateRequest):
 @router.put("/user-groups/{group_id}", summary="更新用户组")
 @has_permission("system:usergroup:edit")
 async def update_user_group(request: Request, group_id: int, body: UserGroupUpdateRequest):
-    await UserGroupService.update_group(group_id, body)
+    login_user = await get_login_user(request)
+    await UserGroupService.update_group(group_id, body, login_user)
     return ApiResponse.success("更新成功")
 
 
@@ -66,8 +79,7 @@ async def update_user_group(request: Request, group_id: int, body: UserGroupUpda
 @has_permission("system:usergroup:delete")
 async def delete_user_group(request: Request, group_id: int):
     login_user = await get_login_user(request)
-    data = await UserGroupService.delete_group(
-        group_id, operator_id=int(login_user.get("user_id") or 0))
+    data = await UserGroupService.delete_group(group_id, login_user)
     return ApiResponse.success(data=data, message="删除成功")
 
 
@@ -75,7 +87,9 @@ async def delete_user_group(request: Request, group_id: int):
 @router.get("/user-groups/{group_id}/members", summary="用户组成员列表")
 @has_permission("system:usergroup:list")
 async def list_user_group_members(request: Request, group_id: int):
-    return ApiResponse.success(data=await UserGroupService.list_members(group_id))
+    """成员名单是谁在跟谁合作项目的事实，只给组的创建人看（ADMIN 豁免）"""
+    login_user = await get_login_user(request)
+    return ApiResponse.success(data=await UserGroupService.list_members(group_id, login_user))
 
 
 @router.put("/user-groups/{group_id}/members", summary="重设用户组成员（整表提交）")
@@ -87,6 +101,5 @@ async def assign_user_group_members(request: Request, group_id: int, body: UserG
     与角色/部门变化同口径（下次登录生效），这里不做在线 token 批量重写。
     """
     login_user = await get_login_user(request)
-    data = await UserGroupService.assign_members(
-        group_id, body.user_ids, operator_id=int(login_user.get("user_id") or 0))
+    data = await UserGroupService.assign_members(group_id, body.user_ids, login_user)
     return ApiResponse.success(data=data, message="成员已保存")
