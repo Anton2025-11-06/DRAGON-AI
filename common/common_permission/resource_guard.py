@@ -12,9 +12,13 @@
 1. **归属人档**：`created_by == 当前用户` → 该资源的全部动作（含 share，才能把授权转出去）；
 2. **数据范围档**：归属人落在当前用户 data_scope 的部门集合内 → 只给 spec["scope"] 那一小组
    动作（一般是 view/use），这是「同事的东西我能用但不能改」的来源；
+   资源声明 `"use_data_scope": False` 时跳过本档（知识库/文档：列表可见性无关组织上下级）；
 3. **显式授权档**：tb_resource_acl 里命中（主体 = 用户/角色/部门(含下级)/用户组/全员、动作匹配、
    未过期）的那条动作。
 ADMIN 角色跳出三档：不做任何过滤（返回 None / 给全集），与 permission.is_admin 同一判定。
+
+父实例归属人兜底（文档用）：拥有父资源（如知识库创建人）即对子资源（库内文档）持有全部动作，
+使「别人往自己库里上传的文档」不会因不是自己建的而从列表/鉴权里漏掉（含改标题这类文档级 edit）。
 
 消费方式
 --------
@@ -133,6 +137,8 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
                     ACTION_PREVIEW, ACTION_CONTENT, ACTION_CHUNK, ACTION_REPARSE,
                     ACTION_GRAPH, ACTION_DOC_DELETE, ACTION_USE, ACTION_EVAL],
         "scope": [ACTION_VIEW, ACTION_USE],
+        # 知识库维护列表的可见性无关组织上下级：不走数据范围档（上级不再默认看下级库），只认归属 + 显式授权
+        "use_data_scope": False,
         "groups": [
             {"key": "kb", "name": "知识库操作",
              "hint": "只影响这一个知识库本身：看得见、改得动、能往里传文件、能删能转授",
@@ -165,6 +171,8 @@ RESOURCE_SPECS: dict[str, dict[str, Any]] = {
         "actions": [ACTION_VIEW, ACTION_EDIT, ACTION_PREVIEW, ACTION_CHUNK,
                     ACTION_REPARSE, ACTION_GRAPH, ACTION_DELETE, ACTION_SHARE],
         "scope": [ACTION_VIEW],
+        # 文档可见性由所属知识库决定（拥有/被授权该库即看得到库内全部文档），不走文档级数据范围档
+        "use_data_scope": False,
         "groups": [
             {"key": "read", "name": "看这一篇",
              "hint": "只读：看解析出来的内容、看原件，不含任何修改",
@@ -506,6 +514,29 @@ def _acl_base(login_user: dict, resource_code: str, action: str) -> Select:
                    or_(*grantee_conds(login_user))))
 
 
+def _owned_ids_select(parent_code: str, user_id: int):
+    """父实例「归属人档」命中当前用户的父 id 子查询：拥有父实例（如知识库创建人）即看得到其下全部子实例。"""
+    p_spec = spec_of(parent_code)
+    model = _model_of(parent_code)
+    pid = getattr(model, p_spec["id_col"])
+    powner = getattr(model, p_spec["owner_col"])
+    return select(pid).where(powner == user_id)
+
+
+async def owns_instance(login_user: dict, resource_code: str, resource_id: Any, *,
+                        session: Optional[AsyncSession] = None) -> bool:
+    """当前用户是否为该实例的归属人。供「父实例归属人兜底」用：拥有知识库即对库内文档持有全部动作。"""
+    spec = spec_of(resource_code)
+    model = _model_of(resource_code)
+    id_col = getattr(model, spec["id_col"])
+    owner_col = getattr(model, spec["owner_col"])
+    async with maybe_session(session) as s:
+        return (await s.execute(
+            select(id_col).where(id_col == _as_int(resource_id),
+                                 owner_col == int(login_user.get("user_id") or 0)).limit(1)
+        )).first() is not None
+
+
 # =====================================================================================
 # 一、列表下推
 # =====================================================================================
@@ -517,9 +548,10 @@ def build_visible_cond(login_user: dict, resource_code: str, id_col, owner_col, 
     :param owner_col: 归属人列（如 KnowledgeBase.created_by）
     :param action: 需要持有的动作，列表默认 view；下拉/可执行清单传 use
     :param parent: 父实例兜底 (父资源码, 本表上的父 id 列, 父侧动作码)，文档用它：
-                   在知识库上勾了「库内文件」那组的人，整库的文档行都得出现在列表里，
-                   否则按钮判得过、行却查不出来，等于授了个寂寞。
-    口径 = 归属人 ∪ 数据范围内的他人创建 ∪ 持有该动作的显式授权（∪ 父实例的对应授权，ADMIN 不限）。
+                   在知识库上勾了「库内文件」那组、或本就是该库归属人的人，整库的文档行都得
+                   出现在列表里，否则按钮判得过、行却查不出来，等于授了个寂寞。
+    口径 = 归属人 ∪ 持有该动作的显式授权 ∪ 父实例的对应授权/父实例归属人
+           （∪ 数据范围内的他人创建，spec.use_data_scope=False 时跳过，ADMIN 不限）。
     """
     if is_admin(login_user):
         return None
@@ -528,17 +560,22 @@ def build_visible_cond(login_user: dict, resource_code: str, id_col, owner_col, 
         # 传了该资源根本不存在的动作：列表应当空掉而不是放行，否则会看见不该看见的行
         return id_col == -1
     user_id = int(login_user.get("user_id") or 0)
-    conds = [owner_col == user_id, id_col.in_(_acl_base(login_user, resource_code, action))]
+    conds = [owner_col == user_id,
+             id_col.in_(_acl_base(login_user, resource_code, action))]
     if parent is not None:
         p_code, p_id_col, p_action = parent
         if p_action in spec_of(p_code)["actions"]:
             conds.append(p_id_col.in_(_acl_base(login_user, p_code, p_action)))
-    scope_dept_ids = get_login_scope(login_user)
-    if scope_dept_ids:
-        from common.common_entity.user_entity import User  # 延迟导入避免循环
+        # 父实例归属人兜底：拥有父实例（如知识库创建人）即看得到其下全部子实例，
+        # 别人往自己库里上传的文档不会因「不是自己建的」而从列表里漏掉
+        conds.append(p_id_col.in_(_owned_ids_select(p_code, user_id)))
+    if spec.get("use_data_scope", True):
+        scope_dept_ids = get_login_scope(login_user)
+        if scope_dept_ids:
+            from common.common_entity.user_entity import User  # 延迟导入避免循环
 
-        conds.append(owner_col.in_(
-            select(User.user_id).where(User.dept_id.in_(scope_dept_ids))))
+            conds.append(owner_col.in_(
+                select(User.user_id).where(User.dept_id.in_(scope_dept_ids))))
     return or_(*conds)
 
 
@@ -574,7 +611,8 @@ async def decorate_actions(login_user: dict, resource_code: str, items: list[dic
 
     async with _session_scope(session) as s:
         granted = _granted_map(await _load_acl(login_user, resource_code, ids, s))
-        scope_owners = await _scope_owners(login_user, items, owner_key, s)
+        scope_owners = (await _scope_owners(login_user, items, owner_key, s)
+                        if spec.get("use_data_scope", True) else set())
 
     scope_actions = list(spec["scope"])
     for it in items:
@@ -649,8 +687,9 @@ async def ensure_action(login_user: dict, resource_code: str, resource_id: Any,
     三档并集在这里逐档短路：ADMIN → 归属人 → 显式授权（含父实例兜底）→ 数据范围。
     把 403 说成 404 会让用户去翻回收站，所以调用方自己确认过资源存在的，都把 owner_id 传进来
     （传了省一次回表；不传则按 spec 的表回查一次归属，杜绝「前端不传就绕过」的口子）。
-    :param parent: (父资源码, 父资源 id)；只在自身 ACL 判不过时多看一眼父实例上同一件事的
-                   授权，且只认 KB_FILE_TO_DOC 里那几个库内文件动作（父库的 edit/use 不会兜过来）。
+    :param parent: (父资源码, 父资源 id)；自身 ACL 判不过时兜两档：显式「库内文件」授权只认
+                   KB_FILE_TO_DOC 里那几个码（父库的 edit/use 不会兜过来），而父实例归属人（如知识库
+                   创建人）对子实例持有全部动作。
     """
     if is_admin(login_user):
         return
@@ -666,15 +705,20 @@ async def ensure_action(login_user: dict, resource_code: str, resource_id: Any,
     async with _session_scope(session) as s:
         granted = await _has_acl(login_user, resource_code, rid, action, s)
         if not granted and parent is not None:
-            # 库内文件族可以由知识库那一行支撑（在库上勾一次，整库生效）
+            p_code, p_id = str(parent[0]), _as_int(parent[1])
+            # 1) 显式「库内文件」授权：只认 KB_FILE_TO_DOC 里那几个码（库上的 edit/use 不兜到文档）
             kb_act = DOC_TO_KB_FILE.get(action)
-            granted = bool(kb_act) and await _has_acl(login_user, str(parent[0]),
-                                                      _as_int(parent[1]), kb_act, s)
+            if kb_act:
+                granted = await _has_acl(login_user, p_code, p_id, kb_act, s)
+            # 2) 父实例归属人兜底：拥有整库（知识库创建人）即对库内文档持有全部动作，含 edit（改标题）
+            if not granted:
+                granted = await owns_instance(login_user, p_code, p_id, session=s)
         if granted:
             return
-        in_scope = await _owner_in_scope(login_user, owner_id, s)
-    if in_scope and action in spec["scope"]:
-        return
+        if spec.get("use_data_scope", True):
+            in_scope = await _owner_in_scope(login_user, owner_id, s)
+            if in_scope and action in spec["scope"]:
+                return
     raise UnauthorizedException(_denied(action, spec, owner_id))
 
 
@@ -895,7 +939,8 @@ async def accessible_ids(login_user: dict, resource_code: str, ids: Sequence[int
             if await _has_acl(login_user, resource_code, rid, action, s):
                 out.append(rid)
                 continue
-            if action in spec["scope"] and await _owner_in_scope(login_user, owner_id, s):
+            if (spec.get("use_data_scope", True) and action in spec["scope"]
+                    and await _owner_in_scope(login_user, owner_id, s)):
                 out.append(rid)
     return out
 
@@ -924,6 +969,6 @@ __all__ = [
     "spec_of", "check_actions", "grantee_conds", "granted_actions", "action_label",
     "build_visible_cond", "decorate_actions",
     "ensure_action", "ensure_any", "ensure_action_strict", "accessible_ids", "load_owner",
-    "load_resource_brief",
+    "load_resource_brief", "owns_instance",
     "maybe_session",
 ]

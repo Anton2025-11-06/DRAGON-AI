@@ -47,7 +47,7 @@ from common.common_neo4j import kg_store
 from common.common_permission.resource_guard import (
     ACTION_CHUNK, ACTION_CONTENT, ACTION_DELETE, ACTION_EDIT, ACTION_GRAPH, ACTION_PREVIEW,
     ACTION_REPARSE, ACTION_UPLOAD, ACTION_VIEW, KB_FILE_TO_DOC, build_visible_cond,
-    decorate_actions, ensure_action, granted_actions, maybe_session, spec_of,
+    decorate_actions, ensure_action, granted_actions, maybe_session, owns_instance, spec_of,
 )
 from common.common_storage import MAX_FILE_SIZE, get_storage
 from common.common_utils.creator_util import attach_creator
@@ -202,6 +202,10 @@ class RagDocService:
             return
         granted = await granted_actions(login_user, RESOURCE_KB, kb_id, session=session)
         extra = {KB_FILE_TO_DOC[a] for a in granted if a in KB_FILE_TO_DOC}
+        # 知识库归属人对库内文档持有全部动作（含 edit 改标题）：
+        # 别人往自己库里上传的文档，创建人也要能看能管，而不是只停在概览计数上
+        if await owns_instance(login_user, RESOURCE_KB, kb_id, session=session):
+            extra |= set(spec_of(RESOURCE_DOC)["actions"])
         if not extra:
             return
         order = list(spec_of(RESOURCE_DOC)["actions"])
