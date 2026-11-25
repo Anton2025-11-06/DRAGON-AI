@@ -86,11 +86,22 @@ def _unit_text(block: ParsedBlock) -> str:
 
     地址只在这一层拼，不进 `ParsedBlock.body()`：body() 还被 doc_title 兜底与 plain_text
     用着，那些场合要的是纯文字（标题里冒出 URL 是灾难），而分块才是「写进数据」的那一步。
+
+    有可访问地址时以 markdown 图片语法输出（![alt](url)），让前端 MarkdownRenderer
+    能够正常渲染图片，而非把地址当纯文本展示。
     """
     text = (block.body() or "").strip()
     if block.type != C.BLOCK_IMAGE or block.image is None:
         return text
-    return " ".join(x for x in (text, block.image.address()) if x)
+    address = block.image.address()
+    if not address:
+        return text
+    # 音频/视频保持原有纯文本格式（前端通过 media_url 字段内联播放，正文无需特殊语法）
+    if block.image.kind != RC.MEDIA_KIND_IMAGE:
+        return " ".join(x for x in (text, address) if x)
+    # 去掉占位符的方括号（[图片] → 图片），使 alt 文字简洁可读
+    alt = text.strip("[]") or "图片"
+    return f"![{alt}]({address})"
 
 
 def build_units(blocks: Sequence[ParsedBlock]) -> list[Unit]:

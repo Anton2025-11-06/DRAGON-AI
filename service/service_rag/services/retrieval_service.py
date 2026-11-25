@@ -448,12 +448,16 @@ class _SearchRunner:
             rerank_model, do_rerank = 0, False
 
         # 图谱那一路（按库抽取时要用）：抽取模型 + 实体范围。
+        #   不再拿 kb.graph_enabled 当闸门：那个开关只决定「新文档还要不要自动建图」，
+        #     关掉它不该让已建好的存量图谱在检索时消失（与图谱浏览页 kb_scope 同口径，
+        #     那里就只按 doc 型过滤）。真没建过图的库由 recall 自然回空。
         #   抽取模型：新库建库已强制“开图谱必选图谱模型”；存量老库回退库上的 chat_model_id，
-        #     两个都没有就是 0（recall 会把这一组的图谱那一路跳过）。
+        #     两个都没有就是 0（recall 会把这一组的图谱那一路跳过）。关开关不清 extract_model_id，
+        #     所以存量库关了开关仍能抽词。
         #   实体范围：开了自定义就用它（与建图同口径的 prompt_types 展示串），否则 None 走系统默认。
         graph_entity_types: Optional[list[str]] = None
         graph_extract_model = 0
-        if is_doc and kb.graph_enabled:
+        if is_doc:
             graph_extract_model = int(kb.extract_model_id or 0) or int(kb.chat_model_id or 0)
             graph_entity_types = settings.graph_extract_types(kb.graph_config)[1]
 
@@ -465,8 +469,9 @@ class _SearchRunner:
             "recall_size": max(int(cfg["recall_size"]), max(1, top_k)),
             "rerank": do_rerank, "rerank_model_id": rerank_model,
             "chunk_types": [self.chunk_type] if self.chunk_type else None,
-            # 图谱增强只对 doc 型且真建过图的库生效（非 doc 型的支持列恒为 0）
-            "graph_enabled": bool(is_doc and kb.graph_enabled),
+            # 图谱增强这一路对所有 doc 型库都尝试（不看建图开关，存量图谱可能仍在 Neo4j）；
+            #   非 doc 型压根不支持图谱，恒不进这一路。真没建过图的库由 recall 自然回空。
+            "graph_supported": is_doc,
             # 按库抽取那一路的两个参数（graph_per_kb 时 _merge_graph 会用上；其余时候无害）
             "extract_model_id": graph_extract_model,
             "graph_entity_types": graph_entity_types,
@@ -732,12 +737,12 @@ class _SearchRunner:
         """
         self.graph = {"applied": False, "depth": self.graph_depth, "scale": self.graph_scale,
                       "entities": [], "edges": [], "triples": [], "terms": {}, "truncated": False}
-        targets = [t for t in self.targets if t["graph_enabled"]]
+        targets = [t for t in self.targets if t["graph_supported"]]
         if not self.with_graph:
             return rows
         if not targets:
-            self.warnings.append("开启图谱增强但这些知识库都没建过图谱（只有文档型知识库"
-                                 "支持构建），本次只有关键词+向量一路")
+            self.warnings.append("开启图谱增强但所选知识库都不是文档型（只有文档型知识库"
+                                 "支持图谱），本次只有关键词+向量一路")
             return rows
         if not self.query:
             self.warnings.append("图谱那一路要先从问句里抽实体和关系，以图搜图不做图谱增强")
@@ -798,7 +803,7 @@ class _SearchRunner:
         finally:
             # 开了「反查原文」才会多这一次 mget：慢的时候要先看清是不是它
             self.watch.add("图谱原文", t_stage)
-        allowed = {int(t["kb_id"]) for t in self.targets if t["graph_enabled"]}
+        allowed = {int(t["kb_id"]) for t in self.targets if t["graph_supported"]}
         seen = {str(r.get("es_id") or "") for r in rows}
         # 实体名 → 摘要 / 实体名 → 相关三元组：让图谱命中行在正文里能说清
         # 「这个实体是什么、和谁有什么关系」，模型才能直接引用「A -[关系]-> B」
