@@ -2,7 +2,7 @@
 
 > **Model gateway, Knowledge RAG, Knowledge Graph, Workflow orchestration, a Deep-Exploration agent (Harness) and enterprise RBAC in one workspace** — your data, models and permissions stay under your control.
 
-> Online demo: `47.112.99.147:12345` (viewer / viewer) · [中文](README.md) / English
+> Online demo: `47.112.175.188:12345` (viewer / viewer) · [中文](README.md) / English
 
 > Code: [GitHub](https://github.com/Anton2025-11-06/DRAGON-AI) · [Gitee (faster in China)](https://gitee.com/Anton2022/dragon-ai)
 

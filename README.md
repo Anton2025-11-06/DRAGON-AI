@@ -1,20 +1,23 @@
-# 🐉 DRAGON-AI — 可私有部署的多租户 AI 中台
+# 🐉 DRAGON-AI — 完全开源的AI平台 无任何商业目的
+
+📺 **平台介绍视频**：[▶ 国外（GitHub）](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4) · [▶ 国内（Gitee）](https://gitee.com/Anton2022/dragon-ai/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4)
+<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4"></video>
+
+> 在线体验：`47.112.175.188:12345`（viewer / viewer） · 中文 / [English](README.en.md)
+
+> 代码仓库：[GitHub](https://github.com/Anton2025-11-06/DRAGON-AI) · [Gitee（国内加速）](https://gitee.com/Anton2022/dragon-ai)
+
+![DRAGON-AI 总体架构](docs/项目总体架构.drawio.png)
 
 > 把 **模型网关、知识库 RAG、知识图谱、工作流编排、深度探索智能体（Harness）与企业级 RBAC** 收进同一个工作区，数据、模型与权限都由你自己掌握。
 
-> 在线体验：`47.112.99.147:12345`（viewer / viewer） · 中文 / [English](README.en.md)
-
-> 代码仓库：[GitHub](https://github.com/Anton2025-11-06/DRAGON-AI) · [Gitee（国内加速）](https://gitee.com/Anton2022/dragon-ai)
 
 > 本 README 与代码同步维护：**标「已开发」的都能跑，标「规划中」的请当作不可用**。
 
 ---
 
-📺 **平台介绍视频**：[▶ 国外（GitHub）](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4) · [▶ 国内（Gitee）](https://gitee.com/Anton2022/dragon-ai/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4)
 
-<video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4"></video>
 
-![DRAGON-AI 总体架构](docs/项目总体架构.drawio.png)
 
 ## 一、核心能力
 
