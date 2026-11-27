@@ -4,6 +4,8 @@
 
 > 在线体验：`47.112.99.147:12345`（viewer / viewer） · 中文 / [English](README.en.md)
 
+> 代码仓库：[GitHub](https://github.com/Anton2025-11-06/DRAGON-AI) · [Gitee（国内加速）](https://gitee.com/Anton2022/dragon-ai)
+
 > 本 README 与代码同步维护：**标「已开发」的都能跑，标「规划中」的请当作不可用**。
 
 ---

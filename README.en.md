@@ -4,6 +4,8 @@
 
 > Online demo: `47.112.99.147:12345` (viewer / viewer) · [中文](README.md) / English
 
+> Code: [GitHub](https://github.com/Anton2025-11-06/DRAGON-AI) · [Gitee (faster in China)](https://gitee.com/Anton2022/dragon-ai)
+
 > This README is kept in sync with the code: **everything marked "Done" actually runs; treat "Planned" as unavailable**.
 
 ---
