@@ -10,7 +10,7 @@
 
 ---
 
-📺 **平台介绍视频**：[▶ 点击观看 AI 中台介绍.mp4](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4)（GitHub 上因渲染限制不会内嵌自动播放，点开在新窗口播放；本地预览器下方可直接内嵌播放）
+📺 **平台介绍视频**：[▶ 国外（GitHub）](https://github.com/Anton2025-11-06/DRAGON-AI/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4) · [▶ 国内（Gitee）](https://gitee.com/Anton2022/dragon-ai/raw/master/docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4)
 
 <video src="./docs/AI%E4%B8%AD%E5%8F%B0%E4%BB%8B%E7%BB%8D.mp4" controls width="100%" type="video/mp4"></video>
 
